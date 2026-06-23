@@ -1,15 +1,16 @@
 # Official Asset License
 
 The Apache License, Version 2.0 applies to Kota source code except where noted.
-It does not grant rights to Kota trademarks, official names, logos, visual
-identity, or reserved official asset files.
+It does not grant rights to the "Kota" trademark, Kota logos, official Kota
+visual identity, or the reserved official asset files described below. Kota
+feature and concept names are not claimed as trademarks; see `TRADEMARK.md`.
 
 ## Reserved Official Assets
 
 The following are reserved by Nan Wu and are not licensed under Apache-2.0
 unless a specific file or notice says otherwise:
 
-- Kota names, marks, logos, icons, and official visual identity;
+- the "Kota" word mark, Kota logos, icons, and official Kota visual identity;
 - official product visuals and generated media;
 - hero/source-hero names, portraits, visual assets, and related official
   character assets;
