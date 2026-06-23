@@ -11,6 +11,7 @@ Kota public legal and notice documents currently live at the repository root:
   draft.
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md): current contribution policy.
 - [`SECURITY.md`](../SECURITY.md): vulnerability reporting policy.
+- [`PRIVACY.md`](../PRIVACY.md): privacy and network-behavior disclosure draft.
 - [`CITATION.cff`](../CITATION.cff): citation metadata.
 
 Future website legal pages should mirror these files rather than inventing

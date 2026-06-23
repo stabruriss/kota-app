@@ -25,6 +25,7 @@ downloads, public documentation, legal notices, citation metadata, and the
 | [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md) | Third-party notice draft. |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Current contribution policy. |
 | [`SECURITY.md`](./SECURITY.md) | Vulnerability reporting policy. |
+| [`PRIVACY.md`](./PRIVACY.md) | Privacy and network-behavior disclosure draft. |
 | [`CITATION.cff`](./CITATION.cff) | Citation metadata. |
 
 ## Downloads
@@ -57,6 +58,11 @@ Kota is not accepting external code pull requests yet. See
 
 Please do not report security vulnerabilities in public issues. See
 [`SECURITY.md`](./SECURITY.md).
+
+## Privacy
+
+Kota's privacy and network-behavior disclosure is in
+[`PRIVACY.md`](./PRIVACY.md).
 
 ## Citation
 
