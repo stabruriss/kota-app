@@ -1,0 +1,42 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node / website build artifacts
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+.cache/
+.turbo/
+*.tsbuildinfo
+
+# Vercel local state
+.vercel/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# App distribution artifacts — NEVER committed; served via GitHub Releases
+*.dmg
+*.ipa
+*.pkg
+*.app
