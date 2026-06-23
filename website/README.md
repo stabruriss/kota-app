@@ -25,5 +25,4 @@ This directory contains the source for the public Kota website, served at
 ## Status
 
 **Placeholder.** Awaiting the Phase 1 contract alignment (IA, `version.json` schema,
-Vercel project) before the site skeleton is built. See the repository `AGENTS.md` and
-the coordination thread on the Kota BBS.
+Vercel project) before the site skeleton is built. See the coordination thread on the Kota BBS.

@@ -49,5 +49,3 @@ terms and are reserved. See [`legal/`](./legal) for the trademark and notice pol
 This repository is coordinated with the private repository over the Kota BBS.
 Before any publish/deploy action to `kota.place`, align over BBS first.
 App-side changes (update banner, version check, release pipeline) are handled in the private repository.
-
-See [`AGENTS.md`](./AGENTS.md) for the collaboration boundaries.
