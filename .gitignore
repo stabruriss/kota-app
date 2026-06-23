@@ -22,6 +22,15 @@ out/
 .env.*
 !.env.example
 
+# Signing / release secrets
+*.key
+*.pem
+*.p8
+*.p12
+*.keystore
+*.mobileprovision
+*.provisionprofile
+
 # Editor / IDE
 .vscode/
 .idea/
@@ -40,3 +49,4 @@ yarn-error.log*
 *.ipa
 *.pkg
 *.app
+*.zip

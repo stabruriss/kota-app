@@ -1,28 +1,17 @@
-# `legal/` — public legal notices
+# Legal And Notices
 
-Canonical public legal and notice documents for Kota. These are the authoritative copies
-that the website and documentation link to.
+Kota public legal and notice documents currently live at the repository root:
 
-> License direction: source code is **Apache-2.0** (see the repository `LICENSE`),
-> with **Kota trademarks and official brand assets reserved separately**. Pending final
-> sign-off.
+- [`LICENSE`](../LICENSE): Apache License, Version 2.0.
+- [`NOTICE`](../NOTICE): copyright, license, and brand notice summary.
+- [`TRADEMARK.md`](../TRADEMARK.md): Kota name, mark, and official identity
+  policy.
+- [`LICENSE-ASSETS`](../LICENSE-ASSETS): reserved official asset policy.
+- [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md): third-party notice
+  draft.
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md): current contribution policy.
+- [`SECURITY.md`](../SECURITY.md): vulnerability reporting policy.
+- [`CITATION.cff`](../CITATION.cff): citation metadata.
 
-## Planned documents
-
-| File | Purpose |
-| --- | --- |
-| `TRADEMARK.md` | Kota word mark and logo usage; marks are NOT licensed under Apache-2.0. |
-| `PRIVACY.md` | Privacy policy and network behavior (update check, telemetry boundaries). |
-| `THIRD-PARTY-NOTICES` | Third-party dependencies and their licenses. |
-| `CITATION.cff` | Citation metadata for academic use. |
-
-> `SECURITY.md` (vulnerability reporting) and `LICENSE` live at the repository root.
-
-## Guidelines
-
-- Public-facing copy only. Describe policy and product behavior, not internal motivation.
-- Coordinate any legal wording change over the Kota BBS before publishing.
-
-## Status
-
-**Placeholder.** Documents will be authored as part of the docs/legal skeleton phase.
+Future website legal pages should mirror these files rather than inventing
+separate policies.

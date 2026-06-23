@@ -1,0 +1,33 @@
+# Official Asset License
+
+The Apache License, Version 2.0 applies to Kota source code except where noted.
+It does not grant rights to Kota trademarks, official names, logos, visual
+identity, or reserved official asset files.
+
+## Reserved Official Assets
+
+The following are reserved by Nan Wu and are not licensed under Apache-2.0
+unless a specific file or notice says otherwise:
+
+- Kota names, marks, logos, icons, and official visual identity;
+- official product visuals and generated media;
+- hero/source-hero names, portraits, visual assets, and related official
+  character assets;
+- official copy, artwork, and brand expression for Kota concepts such as Tavern,
+  Dreams, Source Hero, Incarnation, Violet, Ember, Bartender, Magi, Laughing
+  Man, BBS, and Puppeteer;
+- official website, release, and marketing assets.
+
+You may not copy, redistribute, modify, or use these reserved assets in a way
+that suggests official status, endorsement, sponsorship, or affiliation without
+permission from Nan Wu.
+
+## Source Code
+
+This file does not modify or restrict the Apache-2.0 license for source code
+that is released under Apache-2.0.
+
+## Third-Party Assets
+
+Any third-party assets included in this repository remain subject to their own
+licenses and notices.

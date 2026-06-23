@@ -1,25 +1,18 @@
 # Security Policy
 
-## Reporting a vulnerability
+Please do not report security vulnerabilities in public issues.
 
-Kota uses **GitHub Private Vulnerability Reporting**. Please **do not** open public issues
-for security vulnerabilities.
+Use GitHub Private Vulnerability Reporting for the public Kota repository.
+This lets security researchers report vulnerabilities privately through the
+repository's Security tab without publishing details in issues or discussions.
 
-To report a vulnerability:
+Include:
 
-1. Go to the **Security** tab of this repository.
-2. Click **Report a vulnerability**.
-3. Include a description, reproduction steps, and (if possible) an impact assessment.
+- affected version or commit;
+- operating system;
+- reproduction steps;
+- impact;
+- any relevant logs or screenshots with secrets removed.
 
-We will acknowledge receipt and coordinate a fix and disclosure timeline with you.
-
-## Scope
-
-This policy covers the public release assets in this repository (website, documentation,
-release manifest) and the application builds distributed via GitHub Releases.
-
-## Out of scope
-
-- Theoretical vulnerabilities without a working reproduction.
-- Issues in third-party dependencies that are already tracked upstream — please report
-  those to the upstream maintainer, and let us know so we can track the upgrade.
+Kota is pre-release software. Supported versions and response windows will be
+defined before the first stable release.

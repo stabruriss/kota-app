@@ -1,28 +1,21 @@
-# `website/` — the `kota.place` website
+# Kota Website
 
-This directory contains the source for the public Kota website, served at
-[`kota.place`](https://kota.place).
+This directory is reserved for the future `kota.place` website source.
 
-## Deployment
+Planned deployment:
 
-- Hosted on **Vercel**.
-- **Root Directory** = `website/`.
-- The production domain is `kota.place`.
+- hosting: Vercel;
+- Vercel Root Directory: `website/`;
+- production domain: `kota.place`.
 
-> **Do not deploy to `kota.place` without alignment over the Kota BBS.** Website
-> information architecture, the Vercel project, and the `version.json` manifest contract
-> must be agreed with the private repository side before the first publish.
+Planned surfaces:
 
-## Planned surfaces
+- product overview;
+- downloads;
+- release notes;
+- public documentation;
+- research and citation;
+- license, trademark, asset, third-party, security, and privacy pages;
+- `https://kota.place/version.json` for the app-facing update manifest.
 
-- **Home / product** — what Kota is and how to get it.
-- **Download** — links to GitHub Releases (signed/notarized `.dmg`).
-- **Docs** — public documentation (mirrors `docs/`).
-- **Update manifest** — `https://kota.place/version.json`, consumed by the app's
-  auto-update check. The schema is a shared contract with the private repository.
-- **Legal** — trademark, privacy, third-party notices, citation (mirrors `legal/`).
-
-## Status
-
-**Placeholder.** Awaiting the Phase 1 contract alignment (IA, `version.json` schema,
-Vercel project) before the site skeleton is built. See the coordination thread on the Kota BBS.
+The website implementation has not started yet.
