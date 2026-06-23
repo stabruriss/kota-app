@@ -15,6 +15,10 @@ Kota may store app configuration, project metadata, chat history, logs, agent
 state, and related workspace data on the user's machine as part of normal app
 operation.
 
+This workspace data stays on the user's machine unless the user chooses to move
+or share it — for example by pushing a project to their own git remote, or by
+sending content to a configured provider tool.
+
 ## Provider Tools And Integrations
 
 Kota can run or coordinate user-configured tools such as model-provider CLIs,
@@ -48,3 +52,16 @@ should be documented separately when the website implementation is finalized.
 Please do not include secrets, API keys, private project data, or vulnerability
 details in public issues. Use the security reporting process described in
 `SECURITY.md`.
+
+## Children's Privacy
+
+Kota is a developer-focused desktop tool and is not directed to children. Kota
+does not request or knowingly collect personal information from children.
+
+## Contact
+
+For privacy questions before a dedicated channel is published, open an issue in
+the public repository for non-sensitive matters. Do not include confidential
+information in public issues.
+
+Responsible party: Nan Wu.

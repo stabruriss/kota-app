@@ -17,7 +17,7 @@ downloads, public documentation, legal notices, citation metadata, and the
 | [`app-v2/`](./app-v2) | Reserved for the desktop app source release. Source files will be added in a later step. |
 | [`website/`](./website) | Planned `kota.place` website source. |
 | [`docs/`](./docs) | Planned public documentation. |
-| [`legal/`](./legal) | Index for license, trademark, asset, notice, citation, and security documents. |
+| [`legal/`](./legal) | Index for license, notice, trademark, asset, third-party, contribution, security, privacy, and citation documents. |
 | [`LICENSE`](./LICENSE) | Apache License, Version 2.0. |
 | [`NOTICE`](./NOTICE) | Copyright, license, and brand notice summary. |
 | [`TRADEMARK.md`](./TRADEMARK.md) | Kota name, mark, and official identity policy. |
