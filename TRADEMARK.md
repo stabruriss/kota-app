@@ -8,27 +8,23 @@ confusing or misleading uses of the Kota name, logo, and official identity.
 
 ## What This Policy Covers
 
-The only trademark claimed under this policy is **"Kota"** (the word mark),
-together with the Kota logos and official Kota visual identity when used to
-identify the Kota project. These are not licensed under the Apache License,
-Version 2.0.
+This policy covers the "Kota" word mark, the Kota logos, and the official Kota
+visual identity. These are not licensed under the Apache License, Version 2.0.
 
-The Kota project also uses internal feature and concept names — such as Tavern,
-Dreams, Source Hero, Incarnation, Violet, Ember, Bartender, Magi, Laughing Man,
-BBS, and Puppeteer — to refer to its own features. **These feature and concept
-names are not claimed as trademarks.** Several are common words, names that
-coincide with third-party projects, or references to outside culture. Kota does
-not claim trademark rights in those words themselves or in any third-party
-marks. Nothing here claims ownership of third-party marks or of ordinary
-descriptive uses of common terms.
+Within Kota, certain feature and concept names — such as Tavern, Dreams, Source
+Hero, Incarnation, Violet, Ember, Bartender, Magi, Laughing Man, BBS, and
+Puppeteer — refer to specific Kota features. These names, together with the
+official UI/UX designs, copy, artwork, and brand expression that identify each
+feature, are part of Kota's official product identity and are not licensed
+under Apache-2.0 (see `LICENSE-ASSETS`).
 
-The official UI/UX designs, copy, artwork, and brand expression associated with
-Kota features are reserved official assets (see `LICENSE-ASSETS`) and are not
-licensed under Apache-2.0; they may not be used to suggest official status,
-endorsement, sponsorship, or affiliation.
+You may not use these feature names, or their corresponding official designs
+and brand expression, in a way that implies your product, service, package,
+fork, or distribution is an official Kota feature, or that it is endorsed by,
+sponsored by, or affiliated with Kota.
 
-This trademark policy does not restrict functional use of these names as
-identifiers inside source code that is licensed under Apache-2.0.
+This policy does not restrict functional use of these names as identifiers
+inside source code that is licensed under Apache-2.0.
 
 ## Allowed Uses
 
@@ -38,9 +34,7 @@ You may:
 - say that software works with Kota or is compatible with Kota, if true;
 - link to the official Kota website or repository;
 - make truthful, non-misleading statements about the origin of the source code;
-- reproduce required notices from the Apache-2.0 `NOTICE` file;
-- use Kota feature and concept names descriptively and truthfully, including
-  names that are common words or that coincide with third-party projects.
+- reproduce required notices from the Apache-2.0 `NOTICE` file.
 
 ## Not Allowed
 
