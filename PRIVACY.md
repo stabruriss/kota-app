@@ -44,11 +44,12 @@ legal pages, and related assets.
 
 The website may use hosted-service logs and analytics to understand traffic,
 reliability, abuse prevention, and downloads. Depending on provider
-configuration, these services may process standard request metadata such as IP
-address, user agent, requested URL, referrer, timestamp, and coarse
-device/browser information. Website analytics are not used to collect project
-files, local workspace data, chat history, provider credentials, or coding-agent
-content from the desktop app.
+configuration, these services may use cookies or similar technologies, where
+used, and may process standard request metadata such as IP address, user agent,
+requested URL, referrer, timestamp, and coarse device/browser information.
+Website analytics are not used to collect project files, local workspace data,
+chat history, provider credentials, or coding-agent content from the desktop
+app.
 
 ## Security Reports
 
