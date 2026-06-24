@@ -1,6 +1,6 @@
 # Kota
 
-Kota is a desktop workspace for working with multiple coding agents inside
+Kota is a desktop workspace for working with multiple agents inside
 project-scoped rooms.
 
 This public repository is the release home for Kota source, downloads, public
