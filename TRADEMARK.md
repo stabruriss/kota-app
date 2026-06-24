@@ -1,7 +1,6 @@
 # Trademark Policy
 
-"Kota" is a trademark of Nan Wu. The mark is currently claimed under
-common-law usage (TM), not a registered trademark (®).
+"Kota" is a trademark of Nan Wu.
 
 This policy is intended to let people accurately refer to Kota while preventing
 confusing or misleading uses of the Kota name, logo, and official identity.
