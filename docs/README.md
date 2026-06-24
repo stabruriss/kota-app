@@ -1,13 +1,13 @@
 # Kota Documentation
 
-This directory is reserved for public Kota documentation.
+This directory contains public Kota documentation.
 
-Planned documentation areas:
+Documentation areas:
 
 - getting started;
 - downloads and installation;
 - configuring user-provided agent CLIs and provider accounts;
-- building from source after the source release is published;
+- building from source;
 - release notes and upgrade behavior;
 - citation, license, trademark, security, privacy, and third-party notices.
 

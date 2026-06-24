@@ -7,5 +7,5 @@ authors:
 url: "https://kota.place"
 repository-code: "https://github.com/stabruriss/kota-app"
 license: "Apache-2.0"
-# Add version, date-released, identifiers, and DOI after the first public
-# release/archive is ready.
+version: "0.1.1"
+date-released: "2026-06-25"

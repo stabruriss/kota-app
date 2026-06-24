@@ -1,10 +1,7 @@
 # Third-Party Notices
 
-Status: pre-release notice draft.
-
-This file currently covers font assets and GitHub mark/icon assets identified
-during release preparation. Final generated npm, Cargo, bundled media, and
-other dependency notices remain pending before source publication.
+This file covers third-party font assets, bundled defaults, GitHub mark/icon
+assets, and dependency-license summaries identified for Kota 0.1.1.
 
 This file does not modify the Apache License, Version 2.0 for Kota source code.
 Third-party assets remain subject to their own licenses and brand policies.
@@ -17,7 +14,7 @@ subject to their own licenses and notices. Kota does not claim ownership of
 third-party names, marks, or upstream content included for interoperability,
 examples, or convenience.
 
-The prepared Kota app bundle includes these default account rules:
+The Kota app bundle includes these default account rules:
 
 - `account-language-always.md`: Kota default account guidance.
 - `rules-for-coding.md`: Kota-adapted coding guidance derived from
@@ -32,7 +29,7 @@ https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md
 The upstream `multica-ai/andrej-karpathy-skills` repository identifies its
 license as MIT.
 
-The prepared Kota app bundle includes these default account skills:
+The Kota app bundle includes these default account skills:
 
 - `frontend-design`: includes `LICENSE.txt` with Apache License, Version 2.0.
 - `github`: Kota GitHub integration skill; includes GitHub-related mark/icon
@@ -40,8 +37,8 @@ The prepared Kota app bundle includes these default account skills:
 - `skill-creator`: includes `LICENSE.txt` with Apache License, Version 2.0 and
   a copyright notice for Anthropic, PBC.
 
-Final source publication should preserve any upstream license or notice files
-shipped inside bundled defaults.
+Source distributions include upstream license or notice files shipped inside
+bundled defaults where applicable.
 
 ## Fonts
 
@@ -57,8 +54,7 @@ Google Fonts states that Google Fonts are open source, free to use, usable
 commercially, and may be included in sold products subject to the font license:
 https://developers.google.com/fonts/faq
 
-Before public launch, include the full SIL Open Font License 1.1 text or a
-dedicated `OFL.txt` reference in the final public repository.
+The full SIL Open Font License 1.1 text is included in `OFL-1.1.txt`.
 
 ### Cinzel
 
@@ -163,9 +159,9 @@ Kota includes GitHub-related image assets in the bundled default GitHub skill:
 - `app-v2/src-tauri/defaults/account-skills/github/assets/github-small.svg`
 - `app-v2/src-tauri/defaults/account-skills/github/assets/github.png`
 
-These files should be treated as GitHub brand/mark assets or GitHub-related
-icon assets. They are not Kota-owned official assets, and Kota does not grant
-rights to GitHub marks.
+These files are treated as GitHub brand/mark assets or GitHub-related icon
+assets. They are not Kota-owned official assets, and Kota does not grant rights
+to GitHub marks.
 
 GitHub's logo policy says GitHub logos may be used on websites or third-party
 applications in some scenarios, and points to GitHub's logo usage guidelines:
@@ -178,21 +174,17 @@ https://brand.github.com/foundations/logo
 Octicons are published separately by GitHub's Primer project:
 https://github.com/primer/octicons
 
-Before public launch, choose one:
-
-1. Keep these GitHub assets only for truthful GitHub integration identification
-   and follow GitHub logo usage guidance.
-2. Replace them with a generic repository/provider icon to avoid relying on
-   GitHub brand assets.
+Kota uses these GitHub assets only for truthful GitHub integration
+identification and follows GitHub logo usage guidance.
 
 ## Dependency License Summary
 
-This section summarizes the current lockfile audit. It is not a replacement for
-the final generated dependency notice file.
+This section summarizes the 0.1.1 lockfile audit. Source package metadata and
+upstream license files remain authoritative for individual dependency licenses.
 
 ### npm
 
-`app-v2/package-lock.json` currently contains 455 non-root package entries.
+The 0.1.1 `app-v2/package-lock.json` contains 455 non-root package entries.
 The observed license fields are permissive/notice licenses, with no GPL-only,
 AGPL, or SSPL package found in the lockfile pass.
 
@@ -232,8 +224,8 @@ Notice-bearing or review-worthy non-default expressions include:
   alternatives are also available.
 
 The only missing license field in the Cargo metadata pass is the local
-`kota-v2` crate, which should be covered by the root public repository license
-metadata before publication.
+`kota-v2` crate, which is covered by the root public repository license
+metadata.
 
 ### Tauri Sidecars
 
@@ -247,14 +239,9 @@ source tree:
 They do not introduce separate third-party project licenses beyond the Cargo
 dependency graph summarized above.
 
-## Remaining Pre-Release Notice Work
+## Release Verification
 
-Add dependency and package notices before source publication for:
-
-- final generated npm dependency notice text;
-- final generated Cargo dependency notice text;
-- website dependencies;
-- any additional bundled third-party media or generated assets identified later.
-
-Dedicated license/secret tooling should be run against the final public source
-tree before source publication.
+The 0.1.1 release notice review checked npm and Cargo lockfile metadata, bundled
+font licenses, bundled default rules and skills, and GitHub mark/icon assets.
+Dedicated license and secret scanning run against each public release tree as
+part of the release process.

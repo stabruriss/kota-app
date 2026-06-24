@@ -14,5 +14,7 @@ Include:
 - impact;
 - any relevant logs or screenshots with secrets removed.
 
-Kota is pre-release software. Supported versions and response windows will be
-defined before the first stable release.
+Supported version: the latest public release.
+
+During pre-1.0 development, security reports are triaged best-effort. Kota does
+not publish fixed response windows.

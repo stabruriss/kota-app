@@ -1,10 +1,8 @@
-# Privacy And Network Behavior
+# Privacy Policy
 
-Status: pre-release disclosure draft.
-
-This document describes the intended public privacy and network-behavior
-disclosure for Kota. It is not a complete privacy policy for hosted services,
-analytics, update checks, or future account features.
+This document describes Kota privacy and network behavior for the desktop app,
+the `kota.place` website, downloads, update metadata, and related public
+services.
 
 ## Desktop App
 
@@ -27,25 +25,30 @@ tools may contact their own services according to their own configuration,
 accounts, credentials, and terms.
 
 Kota's installer does not include provider API keys. If a user configures
-credentials, API keys, tokens, account sign-in, or future BYOK features, their
-storage and use depend on the relevant Kota feature, provider tool, operating
-system credential store, and user configuration.
+credentials, API keys, tokens, account sign-in, or BYOK features, their storage
+and use depend on the relevant Kota feature, provider tool, operating system
+credential store, and user configuration.
 
 ## Update Checks
 
-Future versions of Kota may check `kota.place` for app update metadata, such as
-the latest version, release notes, and download URL.
+Kota may check `https://kota.place/version.json` for app update metadata, such
+as the latest version, release notes, and download URL.
 
-Kota should not silently install updates. A user-visible action should be
-required before downloading or installing a new app version.
+Kota does not silently install updates. A user-visible action is required before
+downloading or installing a new app version.
 
 ## Website
 
-The `kota.place` website may serve downloads, documentation, release metadata,
+The `kota.place` website serves downloads, documentation, release metadata,
 legal pages, and related assets.
 
-Website privacy behavior, analytics, fonts, logs, and any hosted services
-should be documented separately when the website implementation is finalized.
+The website may use hosted-service logs and analytics to understand traffic,
+reliability, abuse prevention, and downloads. Depending on provider
+configuration, these services may process standard request metadata such as IP
+address, user agent, requested URL, referrer, timestamp, and coarse
+device/browser information. Website analytics are not used to collect project
+files, local workspace data, chat history, provider credentials, or coding-agent
+content from the desktop app.
 
 ## Security Reports
 
@@ -60,8 +63,7 @@ does not request or knowingly collect personal information from children.
 
 ## Contact
 
-For privacy questions before a dedicated channel is published, open an issue in
-the public repository for non-sensitive matters. Do not include confidential
-information in public issues.
+For privacy questions, open an issue in the public repository for non-sensitive
+matters. Do not include confidential information in public issues.
 
 Responsible party: Nan Wu.
