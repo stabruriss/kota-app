@@ -40,11 +40,6 @@ The prepared Kota app bundle includes these default account skills:
 - `skill-creator`: includes `LICENSE.txt` with Apache License, Version 2.0 and
   a copyright notice for Anthropic, PBC.
 
-The prepared Kota app bundle does not bundle `all-plan` as a default account
-skill, so its third-party CLI integrations are not part of the default
-distribution's notices. Users may still install or keep it manually outside the
-default bundle.
-
 Final source publication should preserve any upstream license or notice files
 shipped inside bundled defaults.
 
