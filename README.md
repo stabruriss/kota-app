@@ -41,8 +41,8 @@ artifacts. They are not committed to git.
 Kota source code will be released under the Apache License, Version 2.0, except
 where a file or notice says otherwise.
 
-Kota names, marks, official visual identity, logos, avatars, generated media,
-and other official assets are not licensed under Apache-2.0. See
+The "Kota" word mark, Kota logos, official visual identity, avatars, generated
+media, and other official assets are not licensed under Apache-2.0. See
 [`NOTICE`](./NOTICE), [`TRADEMARK.md`](./TRADEMARK.md), and
 [`LICENSE-ASSETS`](./LICENSE-ASSETS).
 
