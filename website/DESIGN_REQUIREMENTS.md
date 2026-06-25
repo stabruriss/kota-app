@@ -273,6 +273,64 @@ Release automation should supply or update:
 The visual design should be able to render development data and production data
 through the same content model.
 
+## Release Data Contract
+
+Release automation updates two JSON files only. It must not edit website HTML,
+CSS, component code, documentation, or `app-v2/` source. The website and the
+desktop app read these files at runtime.
+
+Files and deploy URLs:
+
+- `website/public/version.json` → `https://kota.place/version.json` — app update
+  manifest, read by the desktop app's update check.
+- `website/public/whats-new.json` → `https://kota.place/whats-new.json` —
+  release summary, read by the website "What's New" surface.
+
+Sample files are committed at these paths and show the exact shape. Release
+automation overwrites them per release.
+
+### `version.json` fields
+
+- `schema_version` (number): contract version; bump on a breaking change.
+- `product` (string): `"kota"`.
+- `channel` (string): release channel, e.g. `"stable"`.
+- `version` (string): semver, e.g. `"0.1.1"`.
+- `pub_date` (string): ISO 8601 UTC.
+- `minimum_os_version` (string): minimum macOS version, from the app build.
+- `release_url` (string): GitHub Release tag page.
+- `release_notes_url` (string): canonical release notes (GitHub Release body).
+- `artifacts[]` (array): one entry per downloadable build.
+  - `platform` (string), e.g. `"macos"`.
+  - `arch` (string), e.g. `"arm64"`.
+  - `filename` (string): asset filename.
+  - `download_url` (string): GitHub Releases asset URL.
+  - `sha256` (string): hex digest; filled by build/automation.
+  - `size_bytes` (number): filled by build/automation.
+
+The first public release ships a single `macos`/`arm64` artifact. The array
+allows future platforms without a schema change.
+
+### `whats-new.json` fields
+
+- `schema_version` (number): contract version.
+- `version` (string): matches `version.json`.
+- `date` (string): `YYYY-MM-DD`.
+- `title` (string): short release title.
+- `summary` (string): one-line summary.
+- `highlights[]` (string array): bullet points for the What's New card.
+- `release_notes_url` (string): canonical release notes.
+- `download_url` (string): release page or current artifact.
+
+### Boundaries
+
+- DMG/installer artifacts are never committed; they live in GitHub Releases.
+- Release automation writes only `version.json` and `whats-new.json`.
+- Build-time values (`sha256`, `size_bytes`, `minimum_os_version`, and the
+  artifact `download_url`) are populated by the build/release automation.
+- Canonical release notes are the GitHub Release body; the website renders only
+  the summary and highlights.
+- `app-v2/` source sync is a separate track from release-metadata updates.
+
 ## Accessibility And Quality
 
 Requirements:

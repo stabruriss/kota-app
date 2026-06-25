@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,400;0,500;0,600;0,700;0,800;1,500;1,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{ box-sizing:border-box; }
+  html{ scroll-behavior:smooth; }
+  body{ margin:0; background:#0c0b0a; color:#f1ece5; font-family:'Hanken Grotesk',system-ui,sans-serif; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+  a{ color:inherit; text-decoration:none; }
+  ::selection{ background:rgba(217,138,79,0.32); }
+  @keyframes kotaPulse{ 0%{ box-shadow:0 0 0 0 rgba(217,138,79,0.42); } 70%{ box-shadow:0 0 0 14px rgba(217,138,79,0); } 100%{ box-shadow:0 0 0 0 rgba(217,138,79,0); } }
+  @keyframes kotaSpin{ from{ transform:translate(-50%,-50%) rotate(0deg); } to{ transform:translate(-50%,-50%) rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce){ *{ transition-duration:0.001ms !important; animation:none !important; scroll-behavior:auto !important; } }
+</style>
+</helmet>
+
+<div style="min-height:100vh; background:radial-gradient(140% 80% at 50% -10%, #15120f 0%, #0c0b0a 60%); position:relative;">
+
+  <header style="position:sticky; top:0; z-index:60; backdrop-filter:blur(14px); background:rgba(12,11,10,0.72); border-bottom:1px solid rgba(255,255,255,0.06);">
+    <div style="margin:0 auto; padding:14px 28px; display:flex; align-items:center; gap:24px;">
+      <a href="#top" style="display:flex; align-items:center; gap:9px; flex:0 0 auto;">
+        <span style="display:flex; align-items:center; justify-content:center; width:27px; height:27px; border-radius:7px; background:linear-gradient(160deg,#211c18,#141110); border:1px dashed rgba(255,255,255,0.22); font-family:'JetBrains Mono',monospace; font-size:7px; letter-spacing:0.04em; color:#6b655c; text-align:center; line-height:1.05;">LOGO</span>
+        <span style="font-weight:700; font-size:18px; letter-spacing:-0.02em; color:#f1ece5;">kota</span>
+      </a>
+      <nav style="display:flex; gap:22px; flex:1 1 auto; flex-wrap:wrap; font-size:14px; color:#b3aca2;">
+        <a href="#features" style-hover="{{ navHover }}">Features</a>
+        <a href="https://github.com/stabruriss/kota-app/tree/main/docs" style-hover="{{ navHover }}">Docs</a>
+        <a href="https://github.com/stabruriss/kota-app/discussions" style-hover="{{ navHover }}">Feedback</a>
+      </nav>
+      <a href="https://github.com/stabruriss/kota-app" style="font-family:'JetBrains Mono',monospace; font-size:12.5px; color:#b3aca2; flex:0 0 auto;" style-hover="{{ navHover }}">GitHub&nbsp;↗</a>
+    </div>
+  </header>
+
+  <main id="top" style="max-width:1180px; margin:0 auto; padding:0 24px;">
+
+    <section id="download" style="padding:48px 0 40px;">
+      <div style="display:flex; flex-direction:column; align-items:center; text-align:center;">
+        <div style="position:relative; width:100%; height:clamp(150px,19vw,212px); margin:0 0 -14px;">
+          <canvas ref="{{ canvasRef }}" aria-hidden="true" style="display:block; width:100%; height:100%;"></canvas>
+        </div>
+        <h1 style="{{ srOnly }}">kota — a home for your agents and projects</h1>
+
+        <p ref="{{ scrambleRef }}" style="font-family:'JetBrains Mono',monospace; font-size:clamp(15px,1.95vw,20px); line-height:1.55; letter-spacing:-0.01em; color:#cfc8bd; margin:0 0 26px; cursor:default; min-height:1.6em;">A home for your agents and projects.</p>
+
+        <a href="#" style="{{ heroBtnStyle }}" style-hover="{{ heroBtnHover }}">
+          <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
+          <span style="{{ heroInnerStyle }}">
+            <span aria-hidden="true" style="display:flex; align-items:center; justify-content:center; width:40px; height:40px; border-radius:11px; background:linear-gradient(160deg,#2c241d,#15110e); box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), inset 0 -2px 4px rgba(0,0,0,0.4); flex:0 0 auto; font-family:'JetBrains Mono',monospace; font-size:8px; font-weight:700; letter-spacing:0.04em; color:rgba(243,236,226,0.55);">LOGO</span>
+            <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
+              <span style="font-weight:750; font-size:17px; letter-spacing:-0.01em; color:#f4ede3;">Download Kota</span>
+              <span style="font-size:11.5px; font-weight:600; letter-spacing:0.02em; color:rgba(244,237,227,0.6);">macOS · Apple Silicon</span>
+            </span>
+          </span>
+        </a>
+      </div>
+    </section>
+
+    <section style="padding:32px 0 28px; display:flex; flex-wrap:wrap; gap:24px; align-items:stretch;">
+      <div style="flex:1 1 320px; min-width:0; display:flex; flex-direction:column; gap:16px;">
+        <section id="whats-new" style="flex:1 1 auto; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.025),rgba(255,255,255,0)); padding:16px 20px; display:flex; flex-direction:column; gap:12px;">
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:{{ accent }}; margin-bottom:7px;">What's new</div>
+            <div style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">v{{ version }} — first public release</div>
+            <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7e7870;">{{ date }}</div>
+          </div>
+          <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; justify-content:space-between; flex:1 1 auto; min-width:0;">
+            <sc-for list="{{ news }}" as="n" hint-placeholder-count="4">
+              <li style="display:flex; gap:10px; align-items:baseline; font-size:13px; color:#c8c1b7; line-height:1.35;">
+                <span style="flex:0 0 auto; width:5px; height:5px; border-radius:2px; background:{{ accent }}; transform:translateY(-1px);"></span>
+                <span style="min-width:0;">{{ n }}</span>
+              </li>
+            </sc-for>
+          </ul>
+        </section>
+
+        <section aria-label="Supported CLIs" style="flex:0 0 auto; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.022),rgba(255,255,255,0)); padding:14px 18px; display:flex; flex-direction:column; gap:11px;">
+          <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.13em; text-transform:uppercase; color:#8a847a;">Works with your CLI</div>
+          <div style="display:flex; gap:9px; flex-wrap:wrap;">
+            <sc-for list="{{ clis }}" as="cli" hint-placeholder-count="5">
+              <div style="display:flex; align-items:center; gap:8px; padding:6px 11px 6px 7px; border:1px solid rgba(255,255,255,0.08); border-radius:9px; background:rgba(255,255,255,0.02);">
+                <span style="display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:6px; background:linear-gradient(160deg,#241f1a,#15110e); border:1px solid rgba(255,255,255,0.1); flex:0 0 auto;">
+                  <div aria-hidden="true" style="{{ cli.iconStyle }}"></div>
+                </span>
+                <span style="font-size:12.5px; font-weight:600; color:#cfc8bd; white-space:nowrap;">{{ cli.name }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </section>
+      </div>
+
+      <div style="flex:1.14 1 420px; min-width:0; display:flex;">
+        <div ref="{{ swapContainerRef }}" style="{{ swapContainerStyle }}">
+        <div ref="{{ swapStackRef }}" style="{{ swapStackStyle }}">
+          <sc-for list="{{ shots }}" as="s" hint-placeholder-count="4">
+            <div ref="{{ s.ref }}" onClick="{{ s.onClick }}" aria-label="{{ s.title }}" style="{{ s.style }}">
+              <div style="height:34px; display:flex; align-items:center; gap:7px; padding:0 13px; background:linear-gradient(#1a1612,#141110); border-bottom:1px solid rgba(0,0,0,0.5); flex:0 0 auto;">
+                <span style="width:10px; height:10px; border-radius:50%; background:#3a342e;"></span>
+                <span style="width:10px; height:10px; border-radius:50%; background:#3a342e;"></span>
+                <span style="width:10px; height:10px; border-radius:50%; background:#3a342e;"></span>
+                <span style="margin-left:7px; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#6f6960; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ s.file }}</span>
+              </div>
+              <div style="position:relative; flex:1 1 auto; background:repeating-linear-gradient(135deg,#1a1612 0 12px,#15110e 12px 24px); display:flex; align-items:center; justify-content:center;">
+                <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#6b655c; letter-spacing:0.05em; padding:6px 12px; border:1px dashed rgba(255,255,255,0.14); border-radius:7px; text-align:center;">{{ s.shot }}</span>
+                <span style="position:absolute; left:11px; bottom:10px; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.08em; text-transform:uppercase; color:{{ accent }};">{{ s.tag }}</span>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section id="features" style="padding:64px 0 30px; scroll-margin-top:80px;">
+      <div style="margin-bottom:34px;">
+        <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:#8a847a; margin-bottom:12px;">The collection</div>
+        <h2 style="font-size:clamp(30px,4vw,46px); line-height:1.02; letter-spacing:-0.03em; font-weight:800; margin:0; max-width:18ch; text-wrap:balance;">What Kota Does</h2>
+      </div>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:30px 26px;">
+        <sc-for list="{{ cards }}" as="c" hint-placeholder-count="8">
+          <div style="position:relative; aspect-ratio:2.46;">
+            <article tabindex="0" role="group" aria-label="{{ c.title }}" ref="{{ c.ref }}" style="{{ c.shellStyle }}">
+              <div data-role="glow" style="{{ c.glowStyle }}"></div>
+              <div data-role="flip" style="{{ c.flipStyle }}">
+
+                <div data-role="front" style="{{ c.frontStyle }}">
+                  <div style="{{ c.frameStyle }}">
+                    <div style="{{ c.mainStyle }}">
+                      <div data-role="art" style="{{ c.imgBoxStyle }}">
+                        <span style="{{ c.tShotStyle }}">{{ c.shot }}</span>
+                        <div style="{{ c.tImgTagStyle }}">{{ c.tag }}</div>
+                      </div>
+                      <div style="{{ c.textColStyle }}">
+                        <div style="{{ c.tHeadRowStyle }}"><span>KOTA</span><span>NO.{{ c.num }}</span></div>
+                        <h3 style="{{ c.tTitleStyle }}">{{ c.title }}</h3>
+                        <div style="{{ c.tLocStyle }}"><span>ROOM</span><div style="{{ c.tRuleStyle }}"></div><span>MACOS</span></div>
+                      </div>
+                    </div>
+                    <div style="{{ c.stubStyle }}">
+                      <div style="{{ c.eyeStyle }}"><div style="{{ c.eyePupilStyle }}"></div></div>
+                      <div style="{{ c.stubVStyle }}">ADMIT ONE PER ROOM</div>
+                      <div style="{{ c.tStampStyle }}">{{ c.num }}</div>
+                    </div>
+                  </div>
+                  <div style="{{ c.nTL }}"></div><div style="{{ c.nTR }}"></div><div style="{{ c.nBL }}"></div><div style="{{ c.nBR }}"></div>
+                  <div style="{{ c.nSeamT }}"></div><div style="{{ c.nSeamB }}"></div>
+                </div>
+
+                <div data-role="back" style="{{ c.backStyle }}">
+                  <div style="{{ c.frameStyle }}">
+                    <div style="{{ c.backMainStyle }}">
+                      <div style="{{ c.tStubHeadStyle }}">KOTA 2026 · {{ c.tag }}</div>
+                      <p style="{{ c.tStubTextStyle }}">{{ c.detail }}</p>
+                      <div style="{{ c.qrRowStyle }}">
+                        <div style="{{ c.qrStyle }}"></div>
+                        <div style="{{ c.qrMetaStyle }}"><div>{{ c.model }}</div><div style="{{ c.tStubSubStyle }}">SCAN TO OPEN</div></div>
+                      </div>
+                    </div>
+                    <div style="{{ c.backStubStyle }}">
+                      <div data-role="art" style="{{ c.stubImgStyle }}"><span style="{{ c.stubImgTxtStyle }}">{{ c.tag }}</span></div>
+                      <div style="{{ c.stubVStyle }}">REDEEM ONE PER PERSON</div>
+                    </div>
+                  </div>
+                  <div style="{{ c.nTL }}"></div><div style="{{ c.nTR }}"></div><div style="{{ c.nBL }}"></div><div style="{{ c.nBR }}"></div>
+                  <div style="{{ c.nSeamT }}"></div><div style="{{ c.nSeamB }}"></div>
+                </div>
+
+                <div data-role="edgeT" style="{{ c.edgeTStyle }}"></div>
+                <div data-role="edgeB" style="{{ c.edgeBStyle }}"></div>
+                <div data-role="edgeL" style="{{ c.edgeLStyle }}"></div>
+                <div data-role="edgeR" style="{{ c.edgeRStyle }}"></div>
+
+              </div>
+            </article>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+  </main>
+
+  <footer style="border-top:1px solid rgba(255,255,255,0.07); margin-top:50px; background:#0a0908;">
+    <div style="max-width:1180px; margin:0 auto; padding:54px 24px 30px; display:flex; flex-wrap:wrap; gap:40px 34px;">
+      <div style="flex:1 1 260px; min-width:220px;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
+          <span style="display:block; width:18px; height:20px; border-radius:5px 5px 2px 2px; background:linear-gradient(160deg,#2a241f,#15110e); border:1px solid rgba(255,255,255,0.12); box-shadow:inset 0 6px 0 -4px {{ accent }};"></span>
+          <span style="font-weight:700; font-size:19px; letter-spacing:-0.02em;">kota</span>
+        </div>
+        <p style="font-size:14px; color:#7e7870; line-height:1.55; max-width:30ch; margin:0;">A home for your agents and projects.</p>
+      </div>
+      <sc-for list="{{ footerCols }}" as="col" hint-placeholder-count="4">
+        <div style="flex:1 1 150px; min-width:140px;">
+          <div style="font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:0.12em; text-transform:uppercase; color:#6f6960; margin-bottom:14px;">{{ col.head }}</div>
+          <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px;">
+            <sc-for list="{{ col.links }}" as="lnk" hint-placeholder-count="4">
+              <li><a href="{{ lnk.href }}" style="font-size:14px; color:#b3aca2;" style-hover="{{ navHover }}">{{ lnk.label }}</a></li>
+            </sc-for>
+          </ul>
+        </div>
+      </sc-for>
+    </div>
+    <div style="max-width:1180px; margin:0 auto; padding:0 24px 40px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#6f6960;">
+      <span>© 2026 kota.place · <a href="https://github.com/stabruriss/kota-app/blob/main/LICENSE" style="color:#9a9389; border-bottom:1px solid rgba(255,255,255,0.18); padding-bottom:1px;" style-hover="{{ navHover }}">License</a></span>
+      <span>Built without BS</span>
+    </div>
+  </footer>
+
+  <a href="#" style="{{ stickyBtnStyle }}" style-hover="{{ stickyBtnHover }}">
+    <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
+    <span style="{{ stickyInnerStyle }}">
+      <span aria-hidden="true" style="display:flex; align-items:center; justify-content:center; width:40px; height:40px; border-radius:11px; background:linear-gradient(160deg,#2c241d,#15110e); box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), inset 0 -2px 4px rgba(0,0,0,0.4); flex:0 0 auto; font-family:'JetBrains Mono',monospace; font-size:8px; font-weight:700; letter-spacing:0.04em; color:rgba(243,236,226,0.55);">LOGO</span>
+      <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
+        <span style="font-weight:700; font-size:17px; color:#f4ede3;">Download Kota</span>
+        <span style="font-size:11.5px; font-weight:600; letter-spacing:0.03em; color:rgba(244,237,227,0.55);">macOS · Apple Silicon</span>
+      </span>
+    </span>
+  </a>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#d98a4f&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;options&quot;:[&quot;#d98a4f&quot;,&quot;#c0524a&quot;,&quot;#5b8c6e&quot;,&quot;#4a72b0&quot;,&quot;#b8a14a&quot;]},&quot;variety&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;},&quot;reducedMotion&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;}}">
+class Component extends DCLogic {
+  state = { scrolled: false };
+  canvasRef = React.createRef();
+  scrambleRef = React.createRef();
+  swapContainerRef = React.createRef();
+  swapStackRef = React.createRef();
+  _A = null;
+  _gsap = null;
+  _swapCards = [];
+
+  componentDidMount() {
+    this._onScroll = () => {
+      const y = window.scrollY || document.documentElement.scrollTop || 0;
+      const s = y > 560;
+      if (s !== this.state.scrolled) this.setState({ scrolled: s });
+    };
+    window.addEventListener('scroll', this._onScroll, { passive: true });
+    this._onScroll();
+
+    this._startFlame();
+    this._initScramble();
+    this._sweep = () => this._sweepCartridges();
+    [0, 80, 250, 700, 1500, 3000].forEach((d) => setTimeout(this._sweep, d));
+    window.addEventListener('resize', this._sweep);
+    import('https://cdn.jsdelivr.net/npm/animejs@4/+esm')
+      .then((mod) => { this._A = mod; })
+      .catch(() => { this._A = null; });
+    import('https://cdn.jsdelivr.net/npm/gsap@3.12.5/+esm')
+      .then((m) => { this._gsap = m.gsap || m.default || m; this._initSwap(); })
+      .catch(() => { this._gsap = null; this._initSwap(); });
+  }
+  componentWillUnmount() {
+    if (this._onScroll) window.removeEventListener('scroll', this._onScroll);
+    if (this._raf) cancelAnimationFrame(this._raf);
+    if (this._switchTimer) clearInterval(this._switchTimer);
+    if (this._sweep) window.removeEventListener('resize', this._sweep);
+    if (this._ro) this._ro.disconnect();
+    if (this._io) this._io.disconnect();
+    if (this._swapInterval) clearInterval(this._swapInterval);
+    if (this._swapRO) this._swapRO.disconnect();
+    if (this._cardRO) this._cardRO.disconnect();
+    if (this._swapTl) this._swapTl.kill();
+    if (this._scrRaf) cancelAnimationFrame(this._scrRaf);
+    if (this._scrEl && this._scrMove) { this._scrEl.removeEventListener('pointermove', this._scrMove); this._scrEl.removeEventListener('pointerleave', this._scrLeave); }
+  }
+
+  // ---- ScrambledText (proximity scramble, ported from React Bits / GSAP ScrambleText) ----
+  _initScramble(tries) {
+    const el = this.scrambleRef.current;
+    if (!el) { if ((tries || 0) < 20) setTimeout(() => this._initScramble((tries || 0) + 1), 120); return; }
+    if (el._kotaScrambled) return;
+    el._kotaScrambled = true;
+
+    const radius = 120, duration = 1.2, speed = 0.5;
+    const chars = '.:';
+    const reduced = this.props.reducedMotion ?? false;
+    const text = el.textContent;
+    el.textContent = '';
+    const spans = [];
+    text.split(/(\s+)/).forEach((tok) => {
+      if (tok === '') return;
+      if (/^\s+$/.test(tok)) { el.appendChild(document.createTextNode(tok)); return; }
+      const word = document.createElement('span');
+      word.style.display = 'inline-block';
+      word.style.whiteSpace = 'nowrap';
+      for (const ch of tok) {
+        const s = document.createElement('span');
+        s.textContent = ch;
+        s.style.display = 'inline-block';
+        spans.push({ el: s, orig: ch, until: 0, next: 0 });
+        word.appendChild(s);
+      }
+      el.appendChild(word);
+    });
+    this._scrSpans = spans;
+    this._scrEl = el;
+    if (reduced) return;
+
+    const rnd = () => chars[(Math.random() * chars.length) | 0];
+    const cadence = 38 + 70 * speed;
+    const tick = (now) => {
+      let active = false;
+      for (const sp of spans) {
+        if (now < sp.until) {
+          active = true;
+          if (now >= sp.next) { sp.el.textContent = rnd(); sp.next = now + cadence * (0.6 + Math.random() * 0.8); }
+        } else if (sp.el.textContent !== sp.orig) {
+          sp.el.textContent = sp.orig;
+        }
+      }
+      this._scrRaf = active ? requestAnimationFrame(tick) : 0;
+    };
+    const onMove = (e) => {
+      const now = performance.now();
+      for (const sp of spans) {
+        if (sp.orig === ' ') continue;
+        const r = sp.el.getBoundingClientRect();
+        const dx = e.clientX - (r.left + r.width / 2);
+        const dy = e.clientY - (r.top + r.height / 2);
+        const dist = Math.hypot(dx, dy);
+        if (dist < radius) {
+          const d = duration * (1 - dist / radius) * 1000;
+          if (now + d > sp.until) sp.until = now + d;
+        }
+      }
+      if (!this._scrRaf) this._scrRaf = requestAnimationFrame(tick);
+    };
+    this._scrMove = onMove;
+    this._scrLeave = () => {};
+    el.addEventListener('pointermove', onMove);
+  }
+
+  // ---- CardSwap window stack (GSAP-driven) ----
+  _swapMetrics(w, total) {
+    const W = Math.max(280, w || 540);
+    const distX = Math.round(W * 0.04);
+    let cardW = W - (total - 1) * distX - 14;   // guarantee the whole spread fits the container width
+    cardW = Math.max(240, Math.min(470, cardW));
+    const cardH = Math.round(cardW * 0.56);
+    const distY = Math.round(cardH * 0.09);
+    return { cardW, cardH, distX, distY, skew: 5, drop: cardH + 150, total };
+  }
+
+  _initSwap() {
+    if (this._swapInited) return;
+    const container = this.swapContainerRef.current;
+    const stack = this.swapStackRef.current;
+    const cards = this._swapCards.filter(Boolean);
+    if (!container || cards.length === 0) return;
+    this._swapInited = true;
+
+    const gsap = this._gsap;
+    const reduced = this.props.reducedMotion ?? false;
+    const total = cards.length;
+    let order = cards.map((_, i) => i);
+    let M = this._swapMetrics(container.clientWidth, total);
+
+    const apply = () => {
+      if (stack) stack.style.transform = `translate(${-((total - 1) * M.distX) / 2}px, ${((total - 1) * M.distY) / 2}px)`;
+      cards.forEach((el) => { el.style.width = M.cardW + 'px'; el.style.height = M.cardH + 'px'; });
+    };
+    const slot = (i) => ({ x: i * M.distX, y: -i * M.distY, z: -i * M.distX * 1.5, zIndex: total - i });
+    const place = (el, s) => {
+      if (gsap) gsap.set(el, { x: s.x, y: s.y, z: s.z, xPercent: -50, yPercent: -50, skewY: M.skew, transformOrigin: 'center center', zIndex: s.zIndex, force3D: true });
+      else { el.style.transform = `translate(-50%,-50%) translate3d(${s.x}px,${s.y}px,${s.z}px) skewY(${M.skew}deg)`; el.style.zIndex = s.zIndex; }
+    };
+    const placeByOrder = () => order.forEach((ci, pos) => place(cards[ci], slot(pos)));
+    apply(); placeByOrder();
+
+    this._swapRO = new ResizeObserver(() => {
+      M = this._swapMetrics(container.clientWidth, total);
+      if (this._swapTl) { this._swapTl.kill(); this._swapTl = null; }
+      apply(); placeByOrder();
+    });
+    this._swapRO.observe(container);
+
+    if (reduced || !gsap) return;
+
+    const cfg = { ease: 'elastic.out(0.55,0.85)', durDrop: 1.5, durMove: 1.5, durReturn: 1.5, promoteOverlap: 0.9, returnDelay: 0.05 };
+    const delay = 4200;
+    const swap = () => {
+      if (order.length < 2) return;
+      const front = order[0]; const rest = order.slice(1);
+      const elFront = cards[front];
+      const tl = gsap.timeline(); this._swapTl = tl;
+      tl.to(elFront, { y: '+=' + M.drop, duration: cfg.durDrop, ease: cfg.ease });
+      tl.addLabel('promote', `-=${cfg.durDrop * cfg.promoteOverlap}`);
+      rest.forEach((ci, i) => {
+        const el = cards[ci]; const s = slot(i);
+        tl.set(el, { zIndex: s.zIndex }, 'promote');
+        tl.to(el, { x: s.x, y: s.y, z: s.z, duration: cfg.durMove, ease: cfg.ease }, `promote+=${i * 0.15}`);
+      });
+      const back = slot(total - 1);
+      tl.addLabel('return', `promote+=${cfg.durMove * cfg.returnDelay}`);
+      tl.call(() => { gsap.set(elFront, { zIndex: back.zIndex }); }, undefined, 'return');
+      tl.to(elFront, { x: back.x, y: back.y, z: back.z, duration: cfg.durReturn, ease: cfg.ease }, 'return');
+      tl.call(() => { order = [...rest, front]; });
+    };
+
+    const startInterval = () => { this._swapInterval = window.setInterval(swap, delay); };
+    const stopInterval = () => { clearInterval(this._swapInterval); };
+    this._advanceSwap = () => { stopInterval(); swap(); startInterval(); };
+
+    swap(); startInterval();
+    container.addEventListener('mouseenter', () => { stopInterval(); if (this._swapTl) this._swapTl.pause(); });
+    container.addEventListener('mouseleave', () => { if (this._swapTl) this._swapTl.play(); startInterval(); });
+  }
+
+  hexA(hex, a) {
+    const h = hex.replace('#', '');
+    const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+
+  // ---- Cartridge interaction (anime.js driven, imperative — no React re-render) ----
+  _bindCard(el) {
+    if (!el || el._kotaBound) return;
+    el._kotaBound = true;
+    el.addEventListener('mouseenter', () => this._openCard(el, true));
+    el.addEventListener('mouseleave', () => this._openCard(el, false));
+    el.addEventListener('focusin', () => this._openCard(el, true));
+    el.addEventListener('focusout', (e) => { if (!el.contains(e.relatedTarget)) this._openCard(el, false); });
+    if (this._sweep) requestAnimationFrame(this._sweep);
+  }
+
+  _openCard(el, open) {
+    const A = this._A;
+    const reduced = this.props.reducedMotion ?? false;
+    const flip = el.querySelector('[data-role="flip"]');
+    const glow = el.querySelector('[data-role="glow"]');
+
+    if (open) el.style.zIndex = 6;
+    else { clearTimeout(el._zt); el._zt = setTimeout(() => { el.style.zIndex = 1; }, reduced ? 0 : 1340); }
+
+    const rot = open ? 180 : 0;
+    const lift = open ? -10 : 0;
+    const sc = open ? 1.03 : 1;
+    const glowOp = open ? 1 : 0;
+
+    if (!A || reduced) {
+      if (flip) flip.style.transform = `translateY(${lift}px) scale(${sc}) rotateY(${rot}deg)`;
+      if (glow) glow.style.opacity = glowOp;
+      return;
+    }
+    if (flip) A.animate(flip, { rotateY: rot, translateY: lift, scale: sc, duration: open ? 1640 : 1320, ease: open ? 'outBack(1.12)' : 'out(3)' });
+    if (glow) A.animate(glow, { opacity: glowOp, duration: 880, ease: 'out(3)' });
+  }
+
+  _sweepCartridges() {
+    const cards = document.querySelectorAll('#features article');
+    cards.forEach((el) => {
+      const w = el.clientWidth, h = el.clientHeight;
+      if (!w || !h) return;
+      const t = Math.max(5, Math.min(10, Math.round(w * 0.025)));
+      el.style.setProperty('--cw', w + 'px');
+      el.style.setProperty('--ch', h + 'px');
+      el.style.setProperty('--ct', t + 'px');
+    });
+  }
+
+  // ---- Flame wordmark (canvas particles, morph choreographed by anime.js) ----
+  _startFlame() {
+    const canvas = this.canvasRef.current;
+    if (!canvas) return;
+    const self = this;
+    const reduced = this.props.reducedMotion ?? false;
+    const ctx = canvas.getContext('2d');
+    const off = document.createElement('canvas');
+    const octx = off.getContext('2d', { willReadFrequently: true });
+
+    const sprite = document.createElement('canvas');
+    sprite.width = sprite.height = 32;
+    const sg = sprite.getContext('2d');
+    const grad = sg.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, 'rgba(255,242,200,1)');
+    grad.addColorStop(0.32, 'rgba(255,180,74,0.92)');
+    grad.addColorStop(0.7, 'rgba(232,104,30,0.5)');
+    grad.addColorStop(1, 'rgba(190,60,18,0)');
+    sg.fillStyle = grad;
+    sg.beginPath(); sg.arc(16, 16, 16, 0, 7); sg.fill();
+
+    const texts = [
+      { lines: ['kota'], frac: 0.78, weight: 800, italic: false, step: 2, size: 6.5 },
+      { lines: ['whisper to the fire,', 'never alone'], frac: 0.5, weight: 600, italic: true, step: 2, size: 5 },
+    ];
+    let W = 0, H = 0, dpr = 1;
+    let particles = [];
+    let curText = 0;
+    this._vis = true;
+
+    const sample = (spec) => {
+      octx.clearRect(0, 0, W, H);
+      octx.fillStyle = '#fff';
+      octx.textBaseline = 'middle';
+      octx.textAlign = 'center';
+      const n = spec.lines.length;
+      const style = (spec.italic ? 'italic ' : '') + spec.weight + ' ';
+      let fs = (H * spec.frac) / n;
+      const setFont = () => { octx.font = style + fs + "px 'Hanken Grotesk', sans-serif"; };
+      setFont();
+      let mw = 0;
+      spec.lines.forEach(l => { mw = Math.max(mw, octx.measureText(l).width); });
+      const maxW = W * 0.98;
+      if (mw > maxW) { fs = fs * (maxW / mw); setFont(); }
+      const lineH = fs * 1.04;
+      const totalH = lineH * n;
+      const startY = H / 2 - totalH / 2 + lineH / 2;
+      spec.lines.forEach((l, li) => { octx.fillText(l, W / 2, startY + li * lineH); });
+      const img = octx.getImageData(0, 0, W, H).data;
+      const pts = [];
+      const s = spec.step;
+      for (let y = 0; y < H; y += s) {
+        for (let x = 0; x < W; x += s) {
+          if (img[(y * W + x) * 4 + 3] > 130) pts.push({ x, y });
+        }
+      }
+      for (let i = pts.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = pts[i]; pts[i] = pts[j]; pts[j] = t; }
+      return pts;
+    };
+
+    const buildTargets = (doAnimate) => {
+      const spec = texts[curText];
+      const pts = sample(spec);
+      const N = pts.length;
+      while (particles.length < N) {
+        const sx = Math.random() * W, sy = H + Math.random() * 50;
+        particles.push({ x: sx, y: sy, tx: sx, ty: sy, a: 0, ta: 0, seed: Math.random() * 6.28, sz: spec.size });
+      }
+      const L = particles.length;
+      for (let i = 0; i < L; i++) {
+        const p = particles[i];
+        if (i < N) { p.tx = pts[i].x; p.ty = pts[i].y; p.ta = 1; p.sz = spec.size; }
+        else { p.ta = 0; }
+      }
+      const A = self._A;
+      const animate = A && A.animate;
+      const stagger = A && A.stagger;
+      const utils = A && A.utils;
+      if (doAnimate && animate) {
+        if (utils && utils.remove) utils.remove(particles);
+        animate(particles, {
+          x: (p) => p.tx, y: (p) => p.ty, a: (p) => p.ta,
+          duration: 1250,
+          delay: stagger ? stagger(1.4, { from: 'center' }) : 0,
+          ease: 'outExpo',
+        });
+      } else if (!doAnimate) {
+        for (const p of particles) { p.x = p.tx; p.y = p.ty; p.a = p.ta; }
+      }
+    };
+
+    const resize = () => {
+      W = Math.max(1, canvas.clientWidth);
+      H = Math.max(1, canvas.clientHeight);
+      dpr = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      off.width = W; off.height = H;
+      buildTargets(false);
+    };
+
+    const drawStatic = () => {
+      ctx.clearRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'lighter';
+      for (const p of particles) {
+        if (p.a < 0.5) continue;
+        const sz = p.sz * 1.5;
+        ctx.globalAlpha = 0.62;
+        ctx.drawImage(sprite, p.x - sz / 2, p.y - sz / 2, sz, sz);
+      }
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    };
+
+    let last = performance.now();
+    const frame = (now) => {
+      if (!this._vis) { this._raf = requestAnimationFrame(frame); return; }
+      const dt = Math.min(2, (now - last) / 16.67); last = now;
+      const t = now * 0.001;
+      ctx.clearRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'lighter';
+      const noAnim = !(self._A && self._A.animate);
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        if (noAnim) { p.x += (p.tx - p.x) * 0.12 * dt; p.y += (p.ty - p.y) * 0.12 * dt; p.a += (p.ta - p.a) * 0.12 * dt; }
+        const fl = 0.45 + 0.45 * Math.abs(Math.sin(t * 2.3 + p.seed * 1.7));
+        const sway = Math.sin(p.y * 0.05 + t * 1.9 + p.seed) * 2.1;
+        const rise = -Math.abs(Math.sin(t * 3.0 + p.seed)) * 1.4;
+        const sz = p.sz * (0.8 + 0.5 * fl);
+        const alpha = 0.5 * fl * p.a;
+        if (alpha > 0.012) {
+          ctx.globalAlpha = alpha;
+          ctx.drawImage(sprite, p.x + sway - sz / 2, p.y + rise - sz / 2, sz, sz);
+        }
+      }
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+      this._raf = requestAnimationFrame(frame);
+    };
+
+    const init = () => {
+      resize();
+      this._ro = new ResizeObserver(() => { resize(); drawStatic(); });
+      this._ro.observe(canvas);
+      this._io = new IntersectionObserver((es) => { this._vis = es[0].isIntersecting; }, { threshold: 0 });
+      this._io.observe(canvas);
+      drawStatic();
+      if (reduced) return;
+      this._raf = requestAnimationFrame(frame);
+      this._switchTimer = setInterval(() => {
+        if (document.hidden || !this._vis) return;
+        curText = (curText + 1) % texts.length;
+        buildTargets(true);
+      }, 5200);
+    };
+
+    let started = false;
+    const go = () => { if (started) return; started = true; if (this.canvasRef.current) init(); };
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(go);
+      setTimeout(go, 900);
+    } else { go(); }
+  }
+
+  _palette() {
+    return [
+      ['#ee8a3a', '#b8540f'],
+      ['#46b0b3', '#1f7d80'],
+      ['#d85c4a', '#9a3326'],
+      ['#d8ad50', '#9c7220'],
+      ['#6a90c6', '#3a5680'],
+      ['#a079c4', '#6a4690'],
+    ];
+  }
+
+  _data() {
+    return [
+      { title: 'Multi-agent rooms', tag: 'ROOMS', shot: 'rooms · overview',
+        summary: 'Project-scoped rooms where several agents work in parallel.',
+        detail: 'Create a room per project. Each holds its own agents, context, files, and history — so work stays isolated and easy to return to.',
+        doc: '/docs/rooms' },
+      { title: 'Room chat', tag: 'CHAT', shot: 'chat · timeline',
+        summary: 'A shared thread that keeps you and your agents in sync.',
+        detail: 'Talk to agents together or one-to-one. Messages, decisions, and tool output land in one ordered timeline you can scroll and search.',
+        doc: '/docs/chat' },
+      { title: 'Handoff & review', tag: 'HANDOFF', shot: 'review · diff',
+        summary: 'Pass work between agents with a clear review step.',
+        detail: 'Route a task from one agent to another, inspect the diff, and approve or send it back. Nothing ships without a review point.',
+        doc: '/docs/handoff' },
+      { title: 'Worktree awareness', tag: 'WORKTREE', shot: 'worktree · status',
+        summary: 'Agents see your repo, branches, and working tree.',
+        detail: 'Kota tracks the active worktree so agents reason about real files and branches — not a stale snapshot. Changes map back to source.',
+        doc: '/docs/worktree' },
+      { title: 'Docs & releases', tag: 'RELEASE', shot: 'release · notes',
+        summary: 'Public docs and releases from the same workspace.',
+        detail: 'Draft documentation, cut releases, and publish notes without leaving the room. Automation feeds version data straight to this site.',
+        doc: '/docs/releases' },
+      { title: 'Local-first data', tag: 'LOCAL', shot: 'storage · local',
+        summary: 'Your rooms and history live on your machine.',
+        detail: 'Workspace data is stored locally by default. Work offline, keep ownership of your context, and sync only what you choose to.',
+        doc: '/docs/local' },
+      { title: 'CLI & tool hooks', tag: 'TOOLS', shot: 'tools · providers',
+        summary: 'Bring your own model providers and CLI tools.',
+        detail: 'Wire up provider CLIs and command-line tools as first-class agent capabilities. Kota runs them in-context and captures output.',
+        doc: '/docs/tools' },
+      { title: 'Update & download', tag: 'UPDATE', shot: 'update · check',
+        summary: 'Signed builds with a clear, checkable update path.',
+        detail: 'Every build is signed and notarized. The app checks version.json for updates and points to GitHub Releases for provenance.',
+        doc: '/docs/updates' },
+      { title: 'Security & privacy', tag: 'SECURITY', shot: 'security · posture',
+        summary: 'Local data, signed code, transparent provenance.',
+        detail: 'Minimal data leaves your machine, builds are notarized, and provenance is public. Security notes ship alongside each release.',
+        doc: '/legal/security' },
+      { title: 'Research & citation', tag: 'RESEARCH', shot: 'research · library',
+        summary: 'Papers, whitepapers, and citation metadata.',
+        detail: 'A quiet, readable surface for long-form material — research notes, whitepapers, and citation metadata for anyone referencing the project.',
+        doc: '/research' },
+    ];
+  }
+
+  renderVals() {
+    const accent = this.props.accent ?? '#d98a4f';
+    const variety = this.props.variety ?? true;
+    const pal = this._palette();
+    const data = this._data();
+
+    const cards = data.map((d, i) => {
+      const acc = variety ? pal[i % pal.length] : [accent, accent];
+      const a0 = acc[0], a1 = acc[1];
+      const model = 'KTA-' + String(i + 1).padStart(2, '0');
+      const num = String(i + 1).padStart(2, '0');
+      const subList = ['MANY MINDS · ONE ROOM', 'ONE SHARED TIMELINE', 'NOTHING SHIPS UNSEEN', 'AWARE OF YOUR SOURCE', 'SHIP FROM THE ROOM', 'YOURS, ON YOUR MACHINE', 'BRING YOUR OWN TOOLS', 'SIGNED · SEALED · CURRENT', 'QUIET BY DEFAULT', 'READ THE LONG FORM'];
+      const sub = subList[i % subList.length];
+      const pp = '#ece1c8', pm = '#e3d4b6', pe = '#d4c4a0', pc = '#c2b088';
+      const ink = '#2c2218', ink2 = 'rgba(44,34,24,0.62)', ink3 = 'rgba(44,34,24,0.3)';
+      const page = '#0b0a09';
+      const paperBg = `linear-gradient(135deg, ${pp} 0%, ${pm} 55%, ${pe} 100%)`;
+
+      const shellStyle = { position: 'absolute', inset: 0, zIndex: 1, background: 'transparent', perspective: '1600px', cursor: 'pointer', outline: 'none' };
+      const glowStyle = { position: 'absolute', inset: '-10px', borderRadius: '12px', background: this.hexA(a0, 0.4), filter: 'blur(20px)', opacity: 0, pointerEvents: 'none', zIndex: -1 };
+      const flipStyle = { position: 'absolute', inset: 0, transformStyle: 'preserve-3d', transform: 'rotateY(0deg)', willChange: 'transform' };
+
+      const faceBase = { position: 'absolute', inset: 0, backfaceVisibility: 'hidden', WebkitBackfaceVisibility: 'hidden', display: 'flex', borderRadius: '5px' };
+      const faceShadow = `inset 0 1px 0 rgba(255,255,255,0.55), inset 0 0 0 1px ${ink3}, inset 0 -8px 14px rgba(150,115,65,0.12), 0 14px 24px -14px rgba(0,0,0,0.72)`;
+      const frontStyle = { ...faceBase, transform: 'translateZ(calc(var(--ct,7px) / 2))', background: paperBg, boxShadow: faceShadow };
+      const backStyle = { ...faceBase, transform: 'rotateY(180deg) translateZ(calc(var(--ct,7px) / 2))', background: `linear-gradient(135deg, ${pm} 0%, ${pe} 70%, ${pc} 100%)`, boxShadow: faceShadow };
+
+      const edgePV = `linear-gradient(90deg, ${pe} 0%, ${pc} 50%, ${pe} 100%)`;
+      const edgePH = `linear-gradient(180deg, ${pe} 0%, ${pc} 50%, ${pe} 100%)`;
+      const edgeBase = { position: 'absolute', top: '50%', left: '50%', transformOrigin: 'center center', backfaceVisibility: 'visible', WebkitBackfaceVisibility: 'visible', boxShadow: `inset 0 0 0 1px ${ink3}` };
+      const edgeLStyle = { ...edgeBase, width: 'var(--ct,7px)', height: 'calc(var(--ch,300px) - 6px)', background: edgePV, transform: 'translate(-50%,-50%) rotateY(-90deg) translateZ(calc(var(--cw,240px) / 2))' };
+      const edgeRStyle = { ...edgeBase, width: 'var(--ct,7px)', height: 'calc(var(--ch,300px) - 6px)', background: edgePV, transform: 'translate(-50%,-50%) rotateY(90deg) translateZ(calc(var(--cw,240px) / 2))' };
+      const edgeTStyle = { ...edgeBase, width: 'calc(var(--cw,240px) - 6px)', height: 'var(--ct,7px)', background: edgePH, transform: 'translate(-50%,-50%) rotateX(90deg) translateZ(calc(var(--ch,300px) / 2))' };
+      const edgeBStyle = { ...edgeBase, width: 'calc(var(--cw,240px) - 6px)', height: 'var(--ct,7px)', background: edgePH, transform: 'translate(-50%,-50%) rotateX(-90deg) translateZ(calc(var(--ch,300px) / 2))' };
+
+      const frameStyle = { position: 'absolute', inset: '6px', borderRadius: '4px', border: `1.5px solid ${ink}`, boxShadow: `inset 0 0 0 2px ${pp}, inset 0 0 0 3px ${ink3}`, display: 'flex', overflow: 'hidden' };
+
+      const mainStyle = { flex: '1 1 0', minWidth: 0, display: 'flex' };
+      const imgBoxStyle = { position: 'relative', flex: '2 1 0', minWidth: 0, overflow: 'hidden', borderRight: `1.5px solid ${ink}`, display: 'flex', alignItems: 'center', justifyContent: 'center', background: `linear-gradient(165deg, ${a1} 0%, #a99a76 34%, #8d8064 100%)` };
+      const tShotStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '9px', color: 'rgba(255,255,255,0.72)', letterSpacing: '0.04em', padding: '4px 9px', border: '1px dashed rgba(255,255,255,0.45)', borderRadius: '5px', textAlign: 'center', background: 'rgba(40,30,20,0.22)' };
+      const tImgTagStyle = { position: 'absolute', left: '7px', bottom: '7px', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: '#f6efe0', background: 'rgba(20,14,8,0.5)', padding: '2px 5px', borderRadius: '2px' };
+      const textColStyle = { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '11px 11px' };
+      const tHeadRowStyle = { flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: ink2 };
+      const tTitleStyle = { flex: '0 0 auto', margin: '9px 0', fontFamily: "'Hanken Grotesk',sans-serif", fontWeight: 800, fontSize: '18px', lineHeight: 0.96, letterSpacing: '-0.01em', textTransform: 'uppercase', color: ink };
+      const tLocStyle = { flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '6px', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: ink2 };
+      const tRuleStyle = { flex: '1 1 auto', height: 0, borderTop: `1px dashed ${ink3}` };
+
+      const stubStyle = { flex: '0 0 26%', minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'space-between', padding: '11px 4px', borderLeft: `1.5px dashed ${ink2}` };
+      const eyeStyle = { flex: '0 0 auto', width: '26px', height: '16px', border: `2px solid ${ink}`, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' };
+      const eyePupilStyle = { width: '7px', height: '7px', borderRadius: '50%', background: ink };
+      const stubVStyle = { writingMode: 'vertical-rl', transform: 'rotate(180deg)', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: ink2, whiteSpace: 'nowrap' };
+      const tStampStyle = { flex: '0 0 auto', width: '30px', height: '30px', borderRadius: '50%', border: `2px solid ${a0}`, color: a0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: "'Hanken Grotesk',sans-serif", fontWeight: 800, fontSize: '11px', transform: 'rotate(-10deg)', opacity: 0.92 };
+
+      const backMainStyle = { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', padding: '11px 13px', gap: '6px' };
+      const tStubHeadStyle = { flex: '0 0 auto', fontFamily: "'Hanken Grotesk',sans-serif", fontWeight: 800, fontSize: '14px', lineHeight: 1, letterSpacing: '0.01em', textTransform: 'uppercase', color: ink };
+      const tStubTextStyle = { flex: '1 1 auto', margin: 0, fontFamily: "'Hanken Grotesk',sans-serif", fontStyle: 'italic', fontSize: '10px', lineHeight: 1.42, color: 'rgba(44,34,24,0.78)', textWrap: 'pretty', overflow: 'hidden' };
+      const qrRowStyle = { flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '9px' };
+      const qrStyle = { flex: '0 0 auto', width: '40px', height: '40px', borderRadius: '2px', border: `1.5px solid ${ink}`, background: `repeating-conic-gradient(${ink} 0% 25%, ${pp} 0% 50%)`, backgroundSize: '8px 8px', boxShadow: `inset 0 0 0 2px ${pp}` };
+      const qrMetaStyle = { display: 'flex', flexDirection: 'column', gap: '2px', fontFamily: "'JetBrains Mono',monospace", fontSize: '8px', fontWeight: 600, letterSpacing: '0.05em', color: ink2 };
+      const tStubSubStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: ink3 };
+
+      const backStubStyle = { flex: '0 0 26%', minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'space-between', padding: '11px 6px', borderLeft: `1.5px dashed ${ink2}` };
+      const stubImgStyle = { width: '100%', flex: '1 1 auto', minHeight: 0, overflow: 'hidden', border: `1.5px solid ${ink}`, borderRadius: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `linear-gradient(165deg, ${a1} 0%, #968866 60%, #7d7058 100%)`, marginBottom: '6px' };
+      const stubImgTxtStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '6.5px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.7)', textAlign: 'center' };
+
+      const notchBase = { position: 'absolute', borderRadius: '50%', background: page, zIndex: 8, boxShadow: `inset 1px 1px 2px rgba(0,0,0,0.55), inset -1px -1px 1px rgba(170,140,90,0.18)`, pointerEvents: 'none' };
+      const nTL = { ...notchBase, width: '18px', height: '18px', left: '-9px', top: '-9px' };
+      const nTR = { ...notchBase, width: '18px', height: '18px', right: '-9px', top: '-9px' };
+      const nBL = { ...notchBase, width: '18px', height: '18px', left: '-9px', bottom: '-9px' };
+      const nBR = { ...notchBase, width: '18px', height: '18px', right: '-9px', bottom: '-9px' };
+      const nSeamT = { ...notchBase, width: '20px', height: '20px', left: '74%', top: '-10px', transform: 'translateX(-50%)' };
+      const nSeamB = { ...notchBase, width: '20px', height: '20px', left: '74%', bottom: '-10px', transform: 'translateX(-50%)' };
+
+      return {
+        ...d, model, num,
+        shellStyle, glowStyle, flipStyle, frontStyle, backStyle,
+        edgeLStyle, edgeRStyle, edgeTStyle, edgeBStyle,
+        frameStyle, mainStyle, imgBoxStyle, tShotStyle, tImgTagStyle, textColStyle, tHeadRowStyle, tTitleStyle, tLocStyle, tRuleStyle,
+        stubStyle, eyeStyle, eyePupilStyle, stubVStyle, tStampStyle,
+        backMainStyle, tStubHeadStyle, tStubTextStyle, qrRowStyle, qrStyle, qrMetaStyle, tStubSubStyle,
+        backStubStyle, stubImgStyle, stubImgTxtStyle,
+        nTL, nTR, nBL, nBR, nSeamT, nSeamB,
+        ref: (el) => this._bindCard(el),
+      };
+    });
+
+    const navHover = { color: '#f4efe8' };
+
+    const flowArc = `conic-gradient(from 0deg, transparent 0deg, ${accent} 30deg, transparent 64deg, transparent 180deg, ${accent} 210deg, transparent 244deg, transparent 360deg)`;
+    const dlGlowStyle = { position: 'absolute', top: '50%', left: '50%', width: '420px', height: '420px', background: flowArc, transform: 'translate(-50%,-50%)', animation: (this.props.reducedMotion ?? false) ? 'none' : 'kotaSpin 5s linear infinite', zIndex: 0, pointerEvents: 'none' };
+    const dlInner = { position: 'relative', zIndex: 1, display: 'inline-flex', alignItems: 'center', background: 'linear-gradient(165deg,#241d18 0%,#16110e 100%)', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -3px 8px rgba(0,0,0,0.45)' };
+    const heroInnerStyle = { ...dlInner, gap: '15px', minWidth: '290px', padding: '12px 32px 12px 13px', borderRadius: '13px' };
+    const stickyInnerStyle = { ...dlInner, gap: '14px', minWidth: '272px', padding: '12px 30px 12px 12px', borderRadius: '14px', whiteSpace: 'nowrap' };
+    const heroBtnStyle = {
+      position: 'relative', display: 'inline-flex', padding: '1.5px', borderRadius: '15px', overflow: 'hidden',
+      background: '#16110e', cursor: 'pointer', isolation: 'isolate',
+      transition: 'transform .25s ease, box-shadow .25s ease',
+      boxShadow: `0 14px 30px -12px ${this.hexA(accent, 0.5)}, 0 2px 6px rgba(0,0,0,0.45)`,
+    };
+    const heroBtnHover = {
+      transform: 'translateY(-2px)',
+      boxShadow: `0 20px 40px -12px ${this.hexA(accent, 0.62)}, 0 3px 8px rgba(0,0,0,0.5)`,
+    };
+
+    const on = this.state.scrolled;
+    const stickyBtnStyle = {
+      position: 'fixed', left: '50%', bottom: 'calc(24px + env(safe-area-inset-bottom,0px))',
+      zIndex: 80, display: 'inline-flex', padding: '1.5px', borderRadius: '16px', overflow: 'hidden',
+      background: '#16110e', cursor: 'pointer',
+      transform: on ? 'translateX(-50%) translateY(0)' : 'translateX(-50%) translateY(220%)',
+      opacity: on ? 1 : 0,
+      pointerEvents: on ? 'auto' : 'none',
+      boxShadow: on
+        ? `0 24px 48px -16px rgba(0,0,0,0.92), 0 0 0 1px ${this.hexA(accent, 0.18)}, 0 0 34px -10px ${this.hexA(accent, 0.5)}`
+        : 'none',
+      transition: 'transform .42s cubic-bezier(.2,.8,.2,1), opacity .42s ease, box-shadow .42s ease',
+    };
+    const stickyBtnHover = {
+      transform: 'translateX(-50%) translateY(-3px)',
+      boxShadow: `0 30px 58px -16px rgba(0,0,0,0.95), 0 0 0 1px ${this.hexA(accent, 0.28)}, 0 0 40px -8px ${this.hexA(accent, 0.6)}`,
+    };
+
+    const news = [
+      'First public release — macOS on Apple Silicon, signed and notarized.',
+      'Multi-agent project rooms with a shared room chat timeline.',
+      'Agent handoff with an explicit, human-readable review step.',
+      'Local-first workspace data and a checkable update flow via version.json.',
+    ];
+    const icon = (slug) => `https://api.iconify.design/simple-icons/${slug}.svg?color=%23e9e1d0`;
+    const iconStyle = (slug) => ({ width: '16px', height: '16px', backgroundImage: `url(${icon(slug)})`, backgroundSize: 'contain', backgroundRepeat: 'no-repeat', backgroundPosition: 'center' });
+    const clis = [
+      { name: 'Claude Code', iconStyle: iconStyle('claude') },
+      { name: 'Codex', iconStyle: iconStyle('openai') },
+      { name: 'Gemini', iconStyle: iconStyle('googlegemini') },
+      { name: 'OpenCode', iconStyle: iconStyle('opencode') },
+      { name: 'GitHub', iconStyle: iconStyle('github') },
+    ];
+    const footerCols = [
+      { head: 'Product', links: [
+        { label: 'Features', href: '#features' },
+        { label: 'Docs', href: 'https://github.com/stabruriss/kota-app/tree/main/docs' },
+      ] },
+      { head: 'Project', links: [
+        { label: 'GitHub', href: 'https://github.com/stabruriss/kota-app' },
+        { label: 'Feedback', href: 'https://github.com/stabruriss/kota-app/discussions' },
+      ] },
+    ];
+    const srOnly = {
+      position: 'absolute', width: '1px', height: '1px', padding: 0, margin: '-1px',
+      overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0,
+    };
+
+    // ---- CardSwap window stack ----
+    const shotData = [
+      { title: 'Room overview', file: 'kota — atlas / room', shot: 'app screenshot · room view', tag: 'ROOMS' },
+      { title: 'Room chat', file: 'kota — atlas / chat', shot: 'app screenshot · chat timeline', tag: 'CHAT' },
+      { title: 'Handoff & review', file: 'kota — atlas / review', shot: 'app screenshot · review diff', tag: 'REVIEW' },
+      { title: 'Worktree status', file: 'kota — atlas / worktree', shot: 'app screenshot · worktree', tag: 'WORKTREE' },
+    ];
+    const N = shotData.length;
+    const M0 = this._swapMetrics(540, N);
+    const swapContainerStyle = {
+      position: 'relative', width: '100%', height: 'clamp(420px,35vw,520px)',
+      perspective: '1200px', overflow: 'hidden',
+    };
+    const swapStackStyle = {
+      position: 'absolute', inset: 0, transformStyle: 'preserve-3d',
+      transform: `translate(${-((N - 1) * M0.distX) / 2}px, ${((N - 1) * M0.distY) / 2}px)`,
+    };
+    const shots = shotData.map((s, i) => {
+      const x = i * M0.distX, y = -i * M0.distY, z = -i * M0.distX * 1.5;
+      return {
+        ...s, idx: i,
+        ref: (el) => { if (el) this._swapCards[i] = el; },
+        onClick: () => { if (this._advanceSwap) this._advanceSwap(); },
+        style: {
+          position: 'absolute', top: '50%', left: '50%',
+          width: M0.cardW + 'px', height: M0.cardH + 'px',
+          transform: `translate(-50%,-50%) translate3d(${x}px,${y}px,${z}px) skewY(${M0.skew}deg)`,
+          transformStyle: 'preserve-3d', backfaceVisibility: 'hidden', WebkitBackfaceVisibility: 'hidden',
+          borderRadius: '14px', border: '1px solid rgba(255,255,255,0.13)', background: '#100e0c',
+          boxShadow: '0 30px 64px -26px rgba(0,0,0,0.92), inset 0 1px 0 rgba(255,255,255,0.05)',
+          overflow: 'hidden', zIndex: N - i, cursor: 'pointer', willChange: 'transform',
+          display: 'flex', flexDirection: 'column',
+        },
+      };
+    });
+
+    return {
+      accent, accentShadow: this.hexA(accent, 0.55),
+      version: '0.1.1', date: 'June 25, 2026',
+      cards, navHover, heroBtnStyle, heroBtnHover, stickyBtnStyle, stickyBtnHover, dlGlowStyle, heroInnerStyle, stickyInnerStyle,
+      news, clis, footerCols, srOnly, canvasRef: this.canvasRef, scrambleRef: this.scrambleRef,
+      shots, swapContainerStyle, swapStackStyle,
+      swapContainerRef: this.swapContainerRef, swapStackRef: this.swapStackRef,
+    };
+  }
+}
+</script>
+</body>
+</html>
