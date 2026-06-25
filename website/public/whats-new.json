@@ -2,13 +2,13 @@
   "schema_version": 1,
   "version": "0.1.1",
   "date": "2026-06-25",
-  "title": "First public release",
-  "summary": "macOS on Apple Silicon, signed and notarized.",
+  "title": "First public preview",
+  "summary": "A first public preview of Kota for macOS on Apple Silicon.",
   "highlights": [
-    "Multi-agent project rooms with a shared room chat timeline.",
-    "Agent handoff with an explicit, human-readable review step.",
-    "Worktree-aware agents that reason about real files and branches.",
-    "Local-first workspace data and a checkable update flow via version.json."
+    "Project-scoped rooms for working with multiple coding agents in one shared timeline.",
+    "Agent handoff and review flows designed for human-readable collaboration.",
+    "Worktree-aware agents that can reason about real project files and branches.",
+    "A checkable update metadata flow powered by version.json."
   ],
   "release_notes_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.1",
   "download_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.1"
