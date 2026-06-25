@@ -5,10 +5,12 @@
   "title": "First public preview",
   "summary": "A first public preview of Kota for macOS on Apple Silicon.",
   "highlights": [
-    "Project-scoped rooms for working with multiple coding agents in one shared timeline.",
-    "Agent handoff and review flows designed for human-readable collaboration.",
-    "Worktree-aware agents that can reason about real project files and branches.",
-    "A checkable update metadata flow powered by version.json."
+    "One room for each project, with up to 8 sitting agents from different providers, shared context, and a shared timeline.",
+    "Pure PTY, no SDK. Use your subscriptions safely.",
+    "Agent-to-agent communication and cross-project agent discussion, with humans in the loop.",
+    "Remote 24/7 access to all projects and all agents via Telegram, with a free Cloudflare Worker included.",
+    "Parallel worktrees for multitasking freely, with auto-sync and automatic conflict resolution.",
+    "A centralized skill pool, tiered rule management, an embedded Excalidraw board, timed tasks, and more waiting for you to explore."
   ],
   "release_notes_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.1",
   "download_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.1"
