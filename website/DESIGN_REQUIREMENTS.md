@@ -1,0 +1,304 @@
+# Kota Website Design Requirements
+
+This document defines the visual and structural requirements for the public
+`kota.place` website. It is intended for website implementation and visual
+design handoff.
+
+## Product Context
+
+Kota is a desktop workspace for working with multiple agents inside
+project-scoped rooms. The website should make the product feel focused,
+technical, elegant, and alive without becoming noisy or promotional.
+
+Primary audience:
+
+- developers and technical users evaluating whether to download Kota;
+- existing users checking release notes, documentation, and updates;
+- researchers, writers, and contributors looking for citations, papers, or
+  public project material.
+
+Primary language: English.
+
+## Design Direction
+
+The site should feel:
+
+- simple, clean, and elegant;
+- warm enough to suggest a crafted desktop product;
+- precise enough for a technical tool;
+- memorable through interaction and object design, not through heavy marketing
+  copy.
+
+Avoid generic SaaS landing-page patterns: oversized abstract gradients, vague
+hero cards, floating blob backgrounds, stock imagery, and dense marketing
+claims. Kota should read as a real desktop tool with a distinct product world.
+
+The visual system should be cohesive with Kota's product identity. If additional
+brand context is needed, ask for project aesthetic references before locking the
+final color, typography, or object language.
+
+## Technical Framework
+
+Deployment target: Vercel.
+
+Site architecture requirements:
+
+- static-first website;
+- Vercel root directory: `website/`;
+- production domain: `kota.place`;
+- serverless/API routes only where needed for the feedback surface;
+- release data supplied by release automation;
+- legal and policy pages generated from repository markdown where practical.
+
+The website must expose:
+
+- `/` for the main download and feature overview page;
+- `/download` for the current macOS Apple Silicon download surface;
+- `/whats-new` for release notes;
+- `/docs` for public documentation;
+- `/research` for papers, whitepapers, citation, and long-form material;
+- `/feedback` for the public wishing wall;
+- `/legal` for license, notices, trademark, assets, security, privacy, and
+  citation links;
+- `/version.json` for app update metadata.
+
+## Global Layout
+
+The home page is the product page. It should open directly on the useful
+experience: download, current release status, and product explanation.
+
+Global elements:
+
+- compact header with Kota word mark, primary navigation, GitHub link, and
+  download CTA;
+- sticky download CTA visible throughout the page;
+- footer with GitHub repository, legal links, docs, research, feedback, and
+  sister-project links;
+- responsive layout that works cleanly on narrow mobile screens and wide
+  desktop screens.
+
+The sticky CTA must remain useful without obstructing content. On desktop it can
+live in the header or as a restrained floating control. On mobile it should be a
+bottom action bar or compact persistent button with enough safe-area spacing.
+
+## Download CTA
+
+Primary CTA label: Download.
+
+Primary target: the latest signed and notarized macOS Apple Silicon `.dmg`.
+
+The first public version only supports macOS on Apple Silicon. The site should
+state this plainly near the download action without turning the limitation into
+the main headline.
+
+Download surface requirements:
+
+- current version number;
+- release date;
+- file type and platform: macOS Apple Silicon `.dmg`;
+- release notes or "What's New" summary;
+- checksum/signing/notarization status when available;
+- link to GitHub Releases for users who want artifacts and provenance.
+
+## Home Page Content
+
+The home page should combine:
+
+- current download;
+- "What's New" for the latest release;
+- concise product positioning;
+- feature introduction through stacked interactive cards;
+- links to docs, research, feedback, GitHub, and sister projects.
+
+The hero should use the Kota name and the current app download as first-viewport
+signals. The value proposition belongs in supporting copy, not in a long slogan.
+
+Suggested hero structure:
+
+- Kota word mark or product name;
+- one-sentence description: a desktop workspace for working with multiple agents
+  inside project-scoped rooms;
+- Download CTA;
+- small release metadata line;
+- one real app screenshot or product image once approved screenshots are
+  available.
+
+## Feature Card System
+
+The feature section is the key custom component. It should support many cards,
+not just a small marketing grid.
+
+Design concept:
+
+- one unified skeuomorphic collectible-object system;
+- inspiration may come from archival media and physical ephemera such as
+  cassettes, floppy disks, vinyl sleeves, game cartridges, and ticket stubs;
+- the final design should choose one coherent object language rather than mixing
+  unrelated object types per card.
+
+Interaction goal:
+
+- stacked cards should look layered, intentional, and browsable;
+- hover and focus states should extend or unfold the card;
+- image and text should trade emphasis during interaction, creating a
+  text-image-text rhythm between collapsed and expanded states;
+- collapsed state should still expose title, short detail, and a partial visual
+  preview;
+- expanded state should reveal more screenshot area and secondary copy;
+- keyboard focus must provide the same information as hover.
+
+Card content model:
+
+- feature title;
+- short summary;
+- detailed description;
+- real screenshot or approved visual asset;
+- optional tag or system label;
+- optional link to documentation.
+
+The component must handle a large number of cards. The first few cards should
+highlight primary features; later cards can represent narrower capabilities,
+integrations, and workflow details. The stack must stay visually organized when
+many cards are present.
+
+Implementation expectations:
+
+- no layout shift when cards expand;
+- responsive behavior for mobile touch interaction;
+- stable card dimensions and predictable stacking rhythm;
+- accessible focus order;
+- reduced-motion mode;
+- neutral empty-state rendering for feature records without approved screenshots.
+
+## Initial Feature Buckets
+
+Feature content is finalized with real screenshots during content integration.
+The component should be designed to support at least these buckets:
+
+- multi-agent project rooms;
+- room chat and coordination;
+- agent handoff and review workflows;
+- source/worktree awareness;
+- public documentation and release workflow;
+- local-first workspace data;
+- provider CLI and tool integration;
+- update and download flow;
+- security and privacy posture;
+- research, citation, and long-form docs.
+
+## Visual Assets
+
+Use real product screenshots for finalized feature cards. Do not make
+illustrations that imply product UI behavior not present in the app.
+
+The design system should define:
+
+- logo and word-mark placement rules;
+- screenshot frame style;
+- card object materials, shadows, edges, and depth;
+- typography scale;
+- color tokens;
+- focus rings;
+- motion timing;
+- light/dark behavior if both are supported.
+
+Avoid using protected third-party marks except for truthful links or integration
+identification, such as the GitHub repository link.
+
+## Feedback Surface
+
+The site needs a friendly public feedback surface for non-technical users.
+
+Surface name: Wishing Well.
+
+Purpose:
+
+- let visitors submit wishes, requests, questions, and discussion prompts from
+  the website;
+- present existing wishes in a browsable, lightweight wall;
+- avoid requiring ordinary users to understand GitHub Issues.
+
+Technical direction:
+
+- website form or embedded feedback board;
+- moderation or spam-control path before public display;
+- optional GitHub Issue creation for project maintainers and technical users;
+- public issue link remains available for technical feedback.
+
+The Wishing Well should feel like part of the Kota site, not a generic support
+form.
+
+## Docs And Research
+
+The site should include an expandable area for deeper public material:
+
+- documentation;
+- whitepapers;
+- papers;
+- citation metadata;
+- release notes;
+- legal and policy pages.
+
+The research/docs surface should be quiet and readable. It should not compete
+with the home page's interactive feature cards.
+
+## Sister Projects And External Links
+
+The footer and a small related-projects section should support about five links.
+Names and URLs should be configured through content data.
+
+Required external links:
+
+- GitHub repository;
+- GitHub Releases or artifact provenance page;
+- public issue tracker for technical users.
+
+Any sister-project names, logos, or marks must follow the repository trademark
+and asset policies.
+
+## Content Integration
+
+Release automation should supply or update:
+
+- latest version;
+- release date;
+- latest Apple Silicon `.dmg` URL;
+- file size;
+- checksum;
+- signing/notarization status;
+- "What's New" summary;
+- release notes link;
+- `/version.json` update metadata.
+
+The visual design should be able to render development data and production data
+through the same content model.
+
+## Accessibility And Quality
+
+Requirements:
+
+- semantic HTML for navigation, main content, forms, and cards;
+- visible focus states;
+- keyboard-operable feature cards and feedback UI;
+- no text hidden only behind hover;
+- sufficient contrast;
+- readable line lengths in docs and research pages;
+- reduced-motion support;
+- mobile safe-area handling for sticky CTA;
+- no content overlap at common mobile and desktop breakpoints.
+
+## Design Package Handoff
+
+The visual design package should provide:
+
+- homepage composition;
+- sticky download CTA behavior across desktop and mobile;
+- feature card component in collapsed, hover, focus, expanded, and mobile states;
+- screenshot treatment;
+- Wishing Well layout;
+- docs/research page style;
+- footer and related-project link style;
+- color and typography tokens;
+- motion guidance;
+- responsive breakpoints;
+- implementation notes for Vercel-hosted static pages.

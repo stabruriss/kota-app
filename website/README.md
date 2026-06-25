@@ -17,3 +17,7 @@ Surfaces:
 - research and citation;
 - license, trademark, asset, third-party, security, and privacy pages;
 - `https://kota.place/version.json` for the app-facing update manifest.
+
+Design requirements:
+
+- [`DESIGN_REQUIREMENTS.md`](./DESIGN_REQUIREMENTS.md).
