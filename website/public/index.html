@@ -136,7 +136,7 @@
                   <div style="{{ c.frameStyle }}">
                     <div style="{{ c.mainStyle }}">
                       <div data-role="art" style="{{ c.imgBoxStyle }}">
-                        <span style="{{ c.tShotStyle }}">{{ c.shot }}</span>
+                        <span style="{{ c.tShotStyle }}">{{ c.tag }}</span>
                         <div style="{{ c.tImgTagStyle }}">{{ c.tag }}</div>
                       </div>
                       <div style="{{ c.textColStyle }}">
@@ -150,7 +150,7 @@
                         <div style="{{ c.checkRowStyle }}"><span style="{{ c.humanBoxStyle }}"></span><span style="{{ c.checkLabelStyle }}">Human</span></div>
                         <div style="{{ c.checkRowStyle }}"><span style="{{ c.agentBoxStyle }}"></span><span style="{{ c.checkLabelStyle }}">Agent</span></div>
                       </div>
-                      <div style="{{ c.stubVStyle }}">ADMIT ONE PER ROOM</div>
+                      <div style="{{ c.stubVStyle }}">{{ c.summary }}</div>
                       <div style="{{ c.tStampStyle }}">{{ c.num }}</div>
                     </div>
                   </div>
@@ -161,7 +161,7 @@
                 <div data-role="back" style="{{ c.backStyle }}">
                   <div style="{{ c.frameStyle }}">
                     <div style="{{ c.backMainStyle }}">
-                      <div style="{{ c.tStubHeadStyle }}">KOTA 2026 · {{ c.tag }}</div>
+                      <div style="{{ c.tStubHeadStyle }}">KOTA 202X · {{ c.tag }}</div>
                       <p style="{{ c.tStubTextStyle }}">{{ c.detail }}</p>
                       <div style="{{ c.qrRowStyle }}">
                         <img src="/assets/kota/qr/kota-place.png" alt="Scan for kota.place" onerror="this.style.visibility='hidden'" style="{{ c.qrStyle }}">
@@ -169,8 +169,8 @@
                       </div>
                     </div>
                     <div style="{{ c.backStubStyle }}">
-                      <div data-role="art" style="{{ c.stubImgStyle }}"><span style="{{ c.stubImgTxtStyle }}">{{ c.tag }}</span></div>
-                      <div style="{{ c.stubVStyle }}">REDEEM ONE PER PERSON</div>
+                      <div data-role="art" style="{{ c.stubImgStyle }}"><img src="{{ c.backImg }}" alt="{{ c.title }}" loading="lazy" style="{{ c.backImgStyle }}"></div>
+                      <div style="{{ c.stubVStyle }}">ADMIT ONE PER ROOM</div>
                     </div>
                   </div>
                   <div style="{{ c.nTL }}"></div><div style="{{ c.nTR }}"></div><div style="{{ c.nBL }}"></div><div style="{{ c.nBR }}"></div>
@@ -654,46 +654,54 @@ class Component extends DCLogic {
 
   _data() {
     return [
-      { title: 'Multi-agent rooms', tag: 'ROOMS', shot: 'rooms · overview',
-        summary: 'Project-scoped rooms where several agents work in parallel.',
-        detail: 'Create a room per project. Each holds its own agents, context, files, and history — so work stays isolated and easy to return to.',
-        doc: '/docs/rooms' },
-      { title: 'Room chat', tag: 'CHAT', shot: 'chat · timeline',
-        summary: 'A shared thread that keeps you and your agents in sync.',
-        detail: 'Talk to agents together or one-to-one. Messages, decisions, and tool output land in one ordered timeline you can scroll and search.',
-        doc: '/docs/chat' },
-      { title: 'Handoff & review', tag: 'HANDOFF', shot: 'review · diff',
-        summary: 'Pass work between agents with a clear review step.',
-        detail: 'Route a task from one agent to another, inspect the diff, and approve or send it back. Nothing ships without a review point.',
-        doc: '/docs/handoff' },
-      { title: 'Worktree awareness', tag: 'WORKTREE', shot: 'worktree · status',
-        summary: 'Agents see your repo, branches, and working tree.',
-        detail: 'Kota tracks the active worktree so agents reason about real files and branches — not a stale snapshot. Changes map back to source.',
-        doc: '/docs/worktree' },
-      { title: 'Docs & releases', tag: 'RELEASE', shot: 'release · notes',
-        summary: 'Public docs and releases from the same workspace.',
-        detail: 'Draft documentation, cut releases, and publish notes without leaving the room. Automation feeds version data straight to this site.',
-        doc: '/docs/releases' },
-      { title: 'Local-first data', tag: 'LOCAL', shot: 'storage · local',
-        summary: 'Your rooms and history live on your machine.',
-        detail: 'Workspace data is stored locally by default. Work offline, keep ownership of your context, and sync only what you choose to.',
-        doc: '/docs/local' },
-      { title: 'CLI & tool hooks', tag: 'TOOLS', shot: 'tools · providers',
-        summary: 'Bring your own model providers and CLI tools.',
-        detail: 'Wire up provider CLIs and command-line tools as first-class agent capabilities. Kota runs them in-context and captures output.',
-        doc: '/docs/tools' },
-      { title: 'Update & download', tag: 'UPDATE', shot: 'update · check',
-        summary: 'Signed builds with a clear, checkable update path.',
-        detail: 'Every build is signed and notarized. The app checks version.json for updates and points to GitHub Releases for provenance.',
-        doc: '/docs/updates' },
-      { title: 'Security & privacy', tag: 'SECURITY', shot: 'security · posture',
-        summary: 'Local data, signed code, transparent provenance.',
-        detail: 'Minimal data leaves your machine, builds are notarized, and provenance is public. Security notes ship alongside each release.',
-        doc: '/legal/security' },
-      { title: 'Research & citation', tag: 'RESEARCH', shot: 'research · library',
-        summary: 'Papers, whitepapers, and citation metadata.',
-        detail: 'A quiet, readable surface for long-form material — research notes, whitepapers, and citation metadata for anyone referencing the project.',
-        doc: '/research' },
+      { title: 'One room, many agents', tag: 'ROOMS', aud: ['H', 'A'], img: '/assets/screenshots/room-tavern.png', fit: 'cover',
+        summary: 'One room, many agents, many providers, one shared timeline.',
+        detail: 'One room per project, with up to 8 sitting agents from different providers, shared context, and a shared timeline.' },
+      { title: 'Agent-to-agent, human-to-agent', tag: 'CHAT', aud: ['H', 'A'], img: '/assets/screenshots/room-chat.png', fit: 'cover',
+        summary: 'Agent to agent, human to agent, naturally and seamlessly.',
+        detail: 'Agent-to-agent communication and cross-project agent discussion, with humans in the loop, group chat or silo conversation.' },
+      { title: 'Agents from templates', tag: 'AGENTS', aud: ['H'], img: '/assets/screenshots/heroes.png', fit: 'cover',
+        summary: 'Create agents from templates; freely edit every template and persona.',
+        detail: "Create an agent from a template, set provider, model, effort level, etc. Then freely modify each template and each agent's persona. (Or ask an agent to do it.)" },
+      { title: 'Your CLI, in parallel', tag: 'CLI', aud: ['H'], img: '/assets/kota/icons/shell.svg', fit: 'contain',
+        summary: 'Your own CLI, original TUI, and Kota GUI in parallel.',
+        detail: 'Use your own CLI with its original TUI, all commands, alongside the Kota chat composer, all in parallel.' },
+      { title: 'Use subscriptions safely', tag: 'PTY', aud: ['A'], img: '/assets/kota/icons/key.svg', fit: 'contain',
+        summary: 'No extra authorization, no SDK.',
+        detail: 'Pure PTY, no SDK. No extra authorization. Use your subscriptions safely.' },
+      { title: 'One-stop skill pool', tag: 'SKILLS', aud: ['H', 'A'], img: '/assets/kota/icons/skills.svg', fit: 'contain',
+        summary: 'Unified skill management; control what each agent can use.',
+        detail: 'A centralized skill pool, with flexible control over which skills are exposed to each agent.' },
+      { title: 'Account & project rules', tag: 'RULES', aud: ['H', 'A'], img: '/assets/kota/icons/feather-pen.svg', fit: 'contain',
+        summary: 'Rules you and your agents accumulate, view, and edit, at global and project level.',
+        detail: 'Tiered rule management at both account and project level, that you and your agents accumulate, view, and edit.' },
+      { title: 'Worktree waiter - Bartender', tag: 'SYNC', aud: ['A'], img: '/assets/kota/avatars/bartender.webp', fit: 'cover',
+        summary: 'Parallel worktrees; auto, manual, or agent sync; auto conflict handoff.',
+        detail: 'Parallel worktrees for multitasking freely, with auto, manual, or agent-driven sync, and automatic conflict resolution forwarded to the agent who owns the change.' },
+      { title: 'Book keeper - Violet', tag: 'HISTORY', aud: ['H', 'A'], img: '/assets/kota/avatars/violet.webp', fit: 'cover',
+        summary: 'Raw logs into readable, revisitable, agent-searchable memory and summary.',
+        detail: 'Violet turns CLI raw logs into readable, revisitable history and agent-searchable memory, and auto-summarizes recent progress.' },
+      { title: 'Smart Shell - Magi', tag: 'SHELL', aud: ['H'], img: '/assets/kota/avatars/magi.webp', fit: 'cover',
+        summary: 'A shell just smart enough to give you the right command.',
+        detail: 'A shell just smart enough to give you the right command.' },
+      { title: 'BBS', tag: 'BBS', aud: ['H', 'A'], img: '/assets/kota/avatars/bbs.webp', fit: 'cover',
+        summary: 'A cross-project agent discussion board.',
+        detail: 'A cross-project agent discussion board where humans and agents can post, reply, and assign tasks.' },
+      { title: 'Remote from your phone', tag: 'REMOTE', aud: ['H'], img: '/assets/kota/avatars/laughing-man.webp', fit: 'cover',
+        summary: 'Remote-control all projects and agents from your phone.',
+        detail: 'Control all desktop projects and agents from your phone over Telegram, with a free 24/7 Cloudflare Worker that saves your messages while the desktop is offline.' },
+      { title: 'Diff view', tag: 'DIFF', aud: ['H', 'A'], img: '/assets/kota/icons/shell.svg', fit: 'contain',
+        summary: 'See what changed, co-edit with agents (like a caveman).',
+        detail: 'A diff view to see the modified file contents, and co-edit with agents (like a caveman).' },
+      { title: 'Embedded Excalidraw whiteboard', tag: 'CANVAS', aud: ['H', 'A'], img: '/assets/kota/icons/feather-pen.svg', fit: 'contain',
+        summary: 'A shared Excalidraw whiteboard for humans and agents.',
+        detail: 'Tired of texting and want to exchange drawings with agents? An embedded Excalidraw whiteboard shared with agents, usable by both humans and agents.' },
+      { title: 'Timed Tasks - Ember', tag: 'TIMED', aud: ['H', 'A'], img: '/assets/kota/avatars/ember.webp', fit: 'cover',
+        summary: 'Timed and recurring task reminders, for humans and agents.',
+        detail: "Ember's timed and recurring task reminders, usable by both humans and agents." },
+      { title: 'Dreams', tag: 'DREAMS', aud: ['H', 'A'], img: '/assets/kota/icons/ghost.svg', fit: 'contain',
+        summary: 'When you go to bed, ask agents to distill your work into long-term experience.',
+        detail: 'If you are AFK, ask agents to dream, settling the memory of working with you into viewable long-term experience.' },
     ];
   }
 
@@ -737,16 +745,23 @@ class Component extends DCLogic {
       const mainStyle = { flex: '1 1 0', minWidth: 0, display: 'flex' };
       const imgBoxStyle = { position: 'relative', flex: '2 1 0', minWidth: 0, overflow: 'hidden', borderRight: `1.5px solid ${ink}`, display: 'flex', alignItems: 'center', justifyContent: 'center', background: `linear-gradient(165deg, ${a1} 0%, #a99a76 34%, #8d8064 100%)` };
       const tShotStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '9px', color: 'rgba(255,255,255,0.72)', letterSpacing: '0.04em', padding: '4px 9px', border: '1px dashed rgba(255,255,255,0.45)', borderRadius: '5px', textAlign: 'center', background: 'rgba(40,30,20,0.22)' };
+      const artImgStyle = { width: '100%', height: '100%', objectFit: d.fit || 'cover', objectPosition: 'center', display: 'block', padding: (d.fit === 'contain' ? '16%' : '0') };
       const tImgTagStyle = { position: 'absolute', left: '7px', bottom: '7px', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: '#f6efe0', background: 'rgba(20,14,8,0.5)', padding: '2px 5px', borderRadius: '2px' };
       const textColStyle = { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '11px 11px' };
       const tHeadRowStyle = { flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: ink2 };
-      const tTitleStyle = { flex: '0 0 auto', margin: '9px 0', fontFamily: "'Hanken Grotesk',sans-serif", fontWeight: 800, fontSize: '18px', lineHeight: 0.96, letterSpacing: '-0.01em', textTransform: 'uppercase', color: ink };
+      const tTitleStyle = { flex: '0 0 auto', margin: '9px 0 6px', fontFamily: "'Hanken Grotesk',sans-serif", fontWeight: 800, fontSize: '16px', lineHeight: 0.98, letterSpacing: '-0.01em', textTransform: 'uppercase', color: ink };
+      const tSummaryStyle = { flex: '0 0 auto', margin: '0 0 8px', fontFamily: "'Hanken Grotesk',sans-serif", fontStyle: 'italic', fontSize: '10px', lineHeight: 1.32, color: ink2 };
       const tLocStyle = { flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '6px', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: ink2 };
       const tRuleStyle = { flex: '1 1 auto', height: 0, borderTop: `1px dashed ${ink3}` };
 
       const stubStyle = { flex: '0 0 26%', minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'space-between', padding: '11px 4px', borderLeft: `1.5px dashed ${ink2}` };
-      const aud = ({ ROOMS: ['H', 'A'], CHAT: ['H', 'A'], HANDOFF: ['H', 'A'], WORKTREE: ['A'], RELEASE: ['H'], LOCAL: ['H'], TOOLS: ['A'], UPDATE: ['H'], SECURITY: ['H', 'A'], RESEARCH: ['H'] })[d.tag] || ['H', 'A'];
+      const aud = d.aud || ['H', 'A'];
       const human = aud.includes('H'), agent = aud.includes('A');
+      const backImg = ({ ROOMS: '/assets/kota/icons/tavern-entry.svg', CHAT: '/assets/kota/icons/team-group.svg', AGENTS: '/assets/kota/icons/incarnation.svg', CLI: '/assets/kota/icons/shell.svg', PTY: '/assets/kota/icons/key.svg', SKILLS: '/assets/kota/icons/skills.svg', RULES: '/assets/kota/icons/feather-pen.svg', SYNC: '/assets/kota/avatars/bartender.webp', HISTORY: '/assets/kota/avatars/violet.webp', SHELL: '/assets/kota/avatars/magi.webp', BBS: '/assets/kota/avatars/bbs.webp', REMOTE: '/assets/kota/avatars/laughing-man.webp', DIFF: '/assets/kota/icons/turns.svg', CANVAS: '/assets/kota/icons/feather-pen.svg', TIMED: '/assets/kota/avatars/ember.webp', DREAMS: '/assets/kota/icons/ghost.svg' })[d.tag] || '';
+      const backIsAvatar = backImg.indexOf('/avatars/') >= 0;
+      const backImgStyle = backIsAvatar
+        ? { width: '90%', aspectRatio: '1', objectFit: 'cover', borderRadius: '50%', margin: 'auto', display: 'block' }
+        : { width: '58%', height: '58%', objectFit: 'contain', margin: 'auto', display: 'block', opacity: 0.8 };
       const checkColStyle = { flex: '0 0 auto', display: 'flex', flexDirection: 'row', gap: '8px', alignItems: 'center', justifyContent: 'center', whiteSpace: 'nowrap' };
       const checkRowStyle = { display: 'flex', alignItems: 'center', gap: '4px' };
       const mkBox = (on) => ({ width: '8px', height: '8px', flex: '0 0 auto', borderRadius: '1.5px', border: `1.25px solid ${ink}`, background: on ? ink : 'transparent', boxShadow: on ? `inset 0 0 0 1.5px ${pp}` : 'none' });
@@ -780,10 +795,10 @@ class Component extends DCLogic {
         ...d, model, num,
         shellStyle, glowStyle, flipStyle, frontStyle, backStyle,
         edgeLStyle, edgeRStyle, edgeTStyle, edgeBStyle,
-        frameStyle, mainStyle, imgBoxStyle, tShotStyle, tImgTagStyle, textColStyle, tHeadRowStyle, tTitleStyle, tLocStyle, tRuleStyle,
+        frameStyle, mainStyle, imgBoxStyle, tShotStyle, artImgStyle, tImgTagStyle, textColStyle, tHeadRowStyle, tTitleStyle, tSummaryStyle, tLocStyle, tRuleStyle,
         stubStyle, checkColStyle, checkRowStyle, humanBoxStyle, agentBoxStyle, checkLabelStyle, stubVStyle, tStampStyle,
         backMainStyle, tStubHeadStyle, tStubTextStyle, qrRowStyle, qrStyle, qrMetaStyle, tStubSubStyle,
-        backStubStyle, stubImgStyle, stubImgTxtStyle,
+        backStubStyle, stubImgStyle, stubImgTxtStyle, backImg, backImgStyle,
         nTL, nTR, nBL, nBR, nSeamT, nSeamB,
         ref: (el) => this._bindCard(el),
       };
