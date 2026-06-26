@@ -28,7 +28,7 @@
   <header style="position:sticky; top:0; z-index:60; backdrop-filter:blur(14px); background:rgba(12,11,10,0.72); border-bottom:1px solid rgba(255,255,255,0.06);">
     <div style="margin:0 auto; padding:14px 28px; display:flex; align-items:center; gap:24px;">
       <a href="#top" style="display:flex; align-items:center; gap:9px; flex:0 0 auto;">
-        <img src="public/assets/kota/app-icons/icon.png" alt="Kota" width="27" height="27" style="display:block; border-radius:7px; flex:0 0 auto;">
+        <img src="/assets/kota/app-icons/icon.png" alt="Kota" width="27" height="27" style="display:block; border-radius:7px; flex:0 0 auto;">
         <span style="font-weight:700; font-size:18px; letter-spacing:-0.02em; color:#f1ece5;">kota</span>
       </a>
       <nav style="display:flex; gap:22px; flex:1 1 auto; flex-wrap:wrap; font-size:14px; color:#b3aca2;">
@@ -54,7 +54,7 @@
         <a href="#" style="{{ heroBtnStyle }}" style-hover="{{ heroBtnHover }}">
           <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
           <span style="{{ heroInnerStyle }}">
-            <img src="public/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
+            <img src="/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
             <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
               <span style="font-weight:750; font-size:17px; letter-spacing:-0.01em; color:#f4ede3;">Download Kota</span>
               <span style="font-size:11.5px; font-weight:600; letter-spacing:0.02em; color:rgba(244,237,227,0.6);">macOS · Apple Silicon</span>
@@ -192,7 +192,7 @@
     <div style="max-width:1180px; margin:0 auto; padding:54px 24px 30px; display:flex; flex-wrap:wrap; gap:40px 34px;">
       <div style="flex:1 1 260px; min-width:220px;">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
-          <img src="public/assets/kota/app-icons/icon.png" alt="Kota" width="20" height="20" style="display:block; border-radius:5px;">
+          <img src="/assets/kota/app-icons/icon.png" alt="Kota" width="20" height="20" style="display:block; border-radius:5px;">
           <span style="font-weight:700; font-size:19px; letter-spacing:-0.02em;">kota</span>
         </div>
         <p style="font-size:14px; color:#7e7870; line-height:1.55; max-width:30ch; margin:0;">A home for your agents and projects.</p>
@@ -217,7 +217,7 @@
   <a href="#" style="{{ stickyBtnStyle }}" style-hover="{{ stickyBtnHover }}">
     <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
     <span style="{{ stickyInnerStyle }}">
-      <img src="public/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
+      <img src="/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
       <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
         <span style="font-weight:700; font-size:17px; color:#f4ede3;">Download Kota</span>
         <span style="font-size:11.5px; font-weight:600; letter-spacing:0.03em; color:rgba(244,237,227,0.55);">macOS · Apple Silicon</span>
@@ -249,7 +249,7 @@ class Component extends DCLogic {
 
     fetch('/whats-new.json', { cache: 'no-cache' })
       .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .catch(() => fetch('public/whats-new.json', { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null)))
+      .catch(() => fetch('whats-new.json', { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null)))
       .then((d) => { if (d) this.setState({ whatsNew: d }); })
       .catch(() => {});
 
@@ -855,10 +855,10 @@ class Component extends DCLogic {
 
     // ---- CardSwap window stack ----
     const shotData = [
-      { title: 'Project room', file: 'kota — atlas / room', tag: 'ROOMS', image: 'public/assets/screenshots/room-tavern.png' },
-      { title: 'Room chat', file: 'kota — atlas / chat', tag: 'CHAT', image: 'public/assets/screenshots/room-chat.png' },
-      { title: 'Agent setup', file: 'kota — atlas / agent', tag: 'AGENT', image: 'public/assets/screenshots/agent-profile.png' },
-      { title: 'Source heroes', file: 'kota — atlas / heroes', tag: 'HEROES', image: 'public/assets/screenshots/heroes.png' },
+      { title: 'Project room', file: 'kota — atlas / room', tag: 'ROOMS', image: '/assets/screenshots/room-tavern.png' },
+      { title: 'Room chat', file: 'kota — atlas / chat', tag: 'CHAT', image: '/assets/screenshots/room-chat.png' },
+      { title: 'Agent setup', file: 'kota — atlas / agent', tag: 'AGENT', image: '/assets/screenshots/agent-profile.png' },
+      { title: 'Source heroes', file: 'kota — atlas / heroes', tag: 'HEROES', image: '/assets/screenshots/heroes.png' },
     ];
     const N = shotData.length;
     const M0 = this._swapMetrics(540, N);
