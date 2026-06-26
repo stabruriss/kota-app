@@ -757,11 +757,11 @@ class Component extends DCLogic {
       const stubStyle = { flex: '0 0 26%', minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'space-between', padding: '11px 4px', borderLeft: `1.5px dashed ${ink2}` };
       const aud = d.aud || ['H', 'A'];
       const human = aud.includes('H'), agent = aud.includes('A');
-      const backImg = ({ ROOMS: '/assets/kota/icons/tavern-entry.svg', CHAT: '/assets/kota/icons/team-group.svg', AGENTS: '/assets/kota/icons/incarnation.svg', CLI: '/assets/kota/icons/shell.svg', PTY: '/assets/kota/icons/key.svg', SKILLS: '/assets/kota/icons/skills.svg', RULES: '/assets/kota/icons/feather-pen.svg', SYNC: '/assets/kota/avatars/bartender.webp', HISTORY: '/assets/kota/avatars/violet.webp', SHELL: '/assets/kota/avatars/magi.webp', BBS: '/assets/kota/avatars/bbs.webp', REMOTE: '/assets/kota/avatars/laughing-man.webp', DIFF: '/assets/kota/icons/turns.svg', CANVAS: '/assets/kota/icons/feather-pen.svg', TIMED: '/assets/kota/avatars/ember.webp', DREAMS: '/assets/kota/icons/ghost.svg' })[d.tag] || '';
+      const backImg = ({ ROOMS: '/assets/kota/card-back/ROOMS.png', CHAT: '/assets/kota/card-back/CHAT.png', AGENTS: '/assets/kota/card-back/AGENTS.png', CLI: '/assets/kota/card-back/CLI.png', PTY: '/assets/kota/card-back/PTY.png', SKILLS: '/assets/kota/card-back/SKILLS.png', RULES: '/assets/kota/card-back/RULES.png', SYNC: '/assets/kota/avatars/bartender.webp', HISTORY: '/assets/kota/avatars/violet.webp', SHELL: '/assets/kota/avatars/magi.webp', BBS: '/assets/kota/avatars/bbs.webp', REMOTE: '/assets/kota/avatars/laughing-man.webp', DIFF: '/assets/kota/card-back/DIFF.png', CANVAS: '/assets/kota/card-back/CANVAS.png', TIMED: '/assets/kota/avatars/ember.webp', DREAMS: '/assets/kota/card-back/DREAMS.png' })[d.tag] || '';
       const backIsAvatar = backImg.indexOf('/avatars/') >= 0;
       const backImgStyle = backIsAvatar
         ? { width: '84%', aspectRatio: '1', objectFit: 'cover', borderRadius: '50%', transform: 'scale(1.34)', margin: 'auto', display: 'block' }
-        : { width: '58%', height: '58%', objectFit: 'contain', margin: 'auto', display: 'block', opacity: 0.8 };
+        : { width: '100%', height: '100%', objectFit: 'cover', display: 'block' };
       const checkColStyle = { flex: '0 0 auto', display: 'flex', flexDirection: 'row', gap: '8px', alignItems: 'center', justifyContent: 'center', whiteSpace: 'nowrap' };
       const checkRowStyle = { display: 'flex', alignItems: 'center', gap: '4px' };
       const mkBox = (on) => ({ width: '8px', height: '8px', flex: '0 0 auto', borderRadius: '1.5px', border: `1.25px solid ${ink}`, background: on ? ink : 'transparent', boxShadow: on ? `inset 0 0 0 1.5px ${pp}` : 'none' });
