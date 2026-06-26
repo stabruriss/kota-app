@@ -28,7 +28,7 @@
   <header style="position:sticky; top:0; z-index:60; backdrop-filter:blur(14px); background:rgba(12,11,10,0.72); border-bottom:1px solid rgba(255,255,255,0.06);">
     <div style="margin:0 auto; padding:14px 28px; display:flex; align-items:center; gap:24px;">
       <a href="#top" style="display:flex; align-items:center; gap:9px; flex:0 0 auto;">
-        <span style="display:flex; align-items:center; justify-content:center; width:27px; height:27px; border-radius:7px; background:linear-gradient(160deg,#211c18,#141110); border:1px dashed rgba(255,255,255,0.22); font-family:'JetBrains Mono',monospace; font-size:7px; letter-spacing:0.04em; color:#6b655c; text-align:center; line-height:1.05;">LOGO</span>
+        <img src="public/assets/kota/app-icons/icon.png" alt="Kota" width="27" height="27" style="display:block; border-radius:7px; flex:0 0 auto;">
         <span style="font-weight:700; font-size:18px; letter-spacing:-0.02em; color:#f1ece5;">kota</span>
       </a>
       <nav style="display:flex; gap:22px; flex:1 1 auto; flex-wrap:wrap; font-size:14px; color:#b3aca2;">
@@ -54,7 +54,7 @@
         <a href="#" style="{{ heroBtnStyle }}" style-hover="{{ heroBtnHover }}">
           <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
           <span style="{{ heroInnerStyle }}">
-            <span aria-hidden="true" style="display:flex; align-items:center; justify-content:center; width:40px; height:40px; border-radius:11px; background:linear-gradient(160deg,#2c241d,#15110e); box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), inset 0 -2px 4px rgba(0,0,0,0.4); flex:0 0 auto; font-family:'JetBrains Mono',monospace; font-size:8px; font-weight:700; letter-spacing:0.04em; color:rgba(243,236,226,0.55);">LOGO</span>
+            <img src="public/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
             <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
               <span style="font-weight:750; font-size:17px; letter-spacing:-0.01em; color:#f4ede3;">Download Kota</span>
               <span style="font-size:11.5px; font-weight:600; letter-spacing:0.02em; color:rgba(244,237,227,0.6);">macOS · Apple Silicon</span>
@@ -64,15 +64,15 @@
       </div>
     </section>
 
-    <section style="padding:32px 0 28px; display:flex; flex-wrap:wrap; gap:24px; align-items:stretch;">
+    <section style="padding:32px 0 28px; display:flex; flex-wrap:wrap; gap:24px; align-items:flex-start;">
       <div style="flex:1 1 320px; min-width:0; display:flex; flex-direction:column; gap:16px;">
-        <section id="whats-new" style="flex:1 1 auto; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.025),rgba(255,255,255,0)); padding:16px 20px; display:flex; flex-direction:column; gap:12px;">
+        <section id="whats-new" style="flex:0 0 auto; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.025),rgba(255,255,255,0)); padding:16px 20px; display:flex; flex-direction:column; gap:12px;">
           <div>
             <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:{{ accent }}; margin-bottom:7px;">What's new</div>
-            <div style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">v{{ version }} — first public release</div>
+            <div style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">v{{ version }} — {{ title }}</div>
             <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7e7870;">{{ date }}</div>
           </div>
-          <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; justify-content:space-between; flex:1 1 auto; min-width:0;">
+          <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:11px; min-width:0;">
             <sc-for list="{{ news }}" as="n" hint-placeholder-count="4">
               <li style="display:flex; gap:10px; align-items:baseline; font-size:13px; color:#c8c1b7; line-height:1.35;">
                 <span style="flex:0 0 auto; width:5px; height:5px; border-radius:2px; background:{{ accent }}; transform:translateY(-1px);"></span>
@@ -108,9 +108,9 @@
                 <span style="width:10px; height:10px; border-radius:50%; background:#3a342e;"></span>
                 <span style="margin-left:7px; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#6f6960; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ s.file }}</span>
               </div>
-              <div style="position:relative; flex:1 1 auto; background:repeating-linear-gradient(135deg,#1a1612 0 12px,#15110e 12px 24px); display:flex; align-items:center; justify-content:center;">
-                <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#6b655c; letter-spacing:0.05em; padding:6px 12px; border:1px dashed rgba(255,255,255,0.14); border-radius:7px; text-align:center;">{{ s.shot }}</span>
-                <span style="position:absolute; left:11px; bottom:10px; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.08em; text-transform:uppercase; color:{{ accent }};">{{ s.tag }}</span>
+              <div style="position:relative; flex:1 1 auto; background:#0d0b09; overflow:hidden; display:flex;">
+                <img src="{{ s.image }}" alt="{{ s.title }}" loading="lazy" style="width:100%; height:100%; object-fit:cover; object-position:center; display:block;">
+                <span style="position:absolute; left:11px; bottom:10px; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.08em; text-transform:uppercase; color:{{ accent }}; background:rgba(13,11,9,0.72); padding:2px 6px; border-radius:4px;">{{ s.tag }}</span>
               </div>
             </div>
           </sc-for>
@@ -192,7 +192,7 @@
     <div style="max-width:1180px; margin:0 auto; padding:54px 24px 30px; display:flex; flex-wrap:wrap; gap:40px 34px;">
       <div style="flex:1 1 260px; min-width:220px;">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px;">
-          <span style="display:block; width:18px; height:20px; border-radius:5px 5px 2px 2px; background:linear-gradient(160deg,#2a241f,#15110e); border:1px solid rgba(255,255,255,0.12); box-shadow:inset 0 6px 0 -4px {{ accent }};"></span>
+          <img src="public/assets/kota/app-icons/icon.png" alt="Kota" width="20" height="20" style="display:block; border-radius:5px;">
           <span style="font-weight:700; font-size:19px; letter-spacing:-0.02em;">kota</span>
         </div>
         <p style="font-size:14px; color:#7e7870; line-height:1.55; max-width:30ch; margin:0;">A home for your agents and projects.</p>
@@ -217,7 +217,7 @@
   <a href="#" style="{{ stickyBtnStyle }}" style-hover="{{ stickyBtnHover }}">
     <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
     <span style="{{ stickyInnerStyle }}">
-      <span aria-hidden="true" style="display:flex; align-items:center; justify-content:center; width:40px; height:40px; border-radius:11px; background:linear-gradient(160deg,#2c241d,#15110e); box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), inset 0 -2px 4px rgba(0,0,0,0.4); flex:0 0 auto; font-family:'JetBrains Mono',monospace; font-size:8px; font-weight:700; letter-spacing:0.04em; color:rgba(243,236,226,0.55);">LOGO</span>
+      <img src="public/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
       <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
         <span style="font-weight:700; font-size:17px; color:#f4ede3;">Download Kota</span>
         <span style="font-size:11.5px; font-weight:600; letter-spacing:0.03em; color:rgba(244,237,227,0.55);">macOS · Apple Silicon</span>
@@ -229,7 +229,7 @@
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#d98a4f&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;options&quot;:[&quot;#d98a4f&quot;,&quot;#c0524a&quot;,&quot;#5b8c6e&quot;,&quot;#4a72b0&quot;,&quot;#b8a14a&quot;]},&quot;variety&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;},&quot;reducedMotion&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;}}">
 class Component extends DCLogic {
-  state = { scrolled: false };
+  state = { scrolled: false, whatsNew: null };
   canvasRef = React.createRef();
   scrambleRef = React.createRef();
   swapContainerRef = React.createRef();
@@ -246,6 +246,12 @@ class Component extends DCLogic {
     };
     window.addEventListener('scroll', this._onScroll, { passive: true });
     this._onScroll();
+
+    fetch('/whats-new.json', { cache: 'no-cache' })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .catch(() => fetch('public/whats-new.json', { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null)))
+      .then((d) => { if (d) this.setState({ whatsNew: d }); })
+      .catch(() => {});
 
     this._startFlame();
     this._initScramble();
@@ -779,8 +785,8 @@ class Component extends DCLogic {
     const flowArc = `conic-gradient(from 0deg, transparent 0deg, ${accent} 30deg, transparent 64deg, transparent 180deg, ${accent} 210deg, transparent 244deg, transparent 360deg)`;
     const dlGlowStyle = { position: 'absolute', top: '50%', left: '50%', width: '420px', height: '420px', background: flowArc, transform: 'translate(-50%,-50%)', animation: (this.props.reducedMotion ?? false) ? 'none' : 'kotaSpin 5s linear infinite', zIndex: 0, pointerEvents: 'none' };
     const dlInner = { position: 'relative', zIndex: 1, display: 'inline-flex', alignItems: 'center', background: 'linear-gradient(165deg,#241d18 0%,#16110e 100%)', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -3px 8px rgba(0,0,0,0.45)' };
-    const heroInnerStyle = { ...dlInner, gap: '15px', minWidth: '290px', padding: '12px 32px 12px 13px', borderRadius: '13px' };
-    const stickyInnerStyle = { ...dlInner, gap: '14px', minWidth: '272px', padding: '12px 30px 12px 12px', borderRadius: '14px', whiteSpace: 'nowrap' };
+    const heroInnerStyle = { ...dlInner, justifyContent: 'center', gap: '15px', padding: '12px 22px', borderRadius: '13px' };
+    const stickyInnerStyle = { ...dlInner, justifyContent: 'center', gap: '14px', padding: '12px 22px', borderRadius: '14px', whiteSpace: 'nowrap' };
     const heroBtnStyle = {
       position: 'relative', display: 'inline-flex', padding: '1.5px', borderRadius: '15px', overflow: 'hidden',
       background: '#16110e', cursor: 'pointer', isolation: 'isolate',
@@ -810,12 +816,19 @@ class Component extends DCLogic {
       boxShadow: `0 30px 58px -16px rgba(0,0,0,0.95), 0 0 0 1px ${this.hexA(accent, 0.28)}, 0 0 40px -8px ${this.hexA(accent, 0.6)}`,
     };
 
-    const news = [
+    const wn = this.state.whatsNew;
+    const news = (wn && Array.isArray(wn.highlights) && wn.highlights.length)
+      ? wn.highlights
+      : [
       'First public release — macOS on Apple Silicon, signed and notarized.',
       'Multi-agent project rooms with a shared room chat timeline.',
       'Agent handoff with an explicit, human-readable review step.',
       'Local-first workspace data and a checkable update flow via version.json.',
     ];
+    const fmtDate = (iso) => { try { return new Date(iso + 'T00:00:00Z').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }); } catch (e) { return iso; } };
+    const wnVersion = (wn && wn.version) ? wn.version : '0.1.1';
+    const wnDate = (wn && wn.date) ? fmtDate(wn.date) : 'June 25, 2026';
+    const wnTitle = (wn && wn.title) ? wn.title : 'first public release';
     const icon = (slug) => `https://api.iconify.design/simple-icons/${slug}.svg?color=%23e9e1d0`;
     const iconStyle = (slug) => ({ width: '16px', height: '16px', backgroundImage: `url(${icon(slug)})`, backgroundSize: 'contain', backgroundRepeat: 'no-repeat', backgroundPosition: 'center' });
     const clis = [
@@ -842,10 +855,10 @@ class Component extends DCLogic {
 
     // ---- CardSwap window stack ----
     const shotData = [
-      { title: 'Room overview', file: 'kota — atlas / room', shot: 'app screenshot · room view', tag: 'ROOMS' },
-      { title: 'Room chat', file: 'kota — atlas / chat', shot: 'app screenshot · chat timeline', tag: 'CHAT' },
-      { title: 'Handoff & review', file: 'kota — atlas / review', shot: 'app screenshot · review diff', tag: 'REVIEW' },
-      { title: 'Worktree status', file: 'kota — atlas / worktree', shot: 'app screenshot · worktree', tag: 'WORKTREE' },
+      { title: 'Project room', file: 'kota — atlas / room', tag: 'ROOMS', image: 'public/assets/screenshots/room-tavern.png' },
+      { title: 'Room chat', file: 'kota — atlas / chat', tag: 'CHAT', image: 'public/assets/screenshots/room-chat.png' },
+      { title: 'Agent setup', file: 'kota — atlas / agent', tag: 'AGENT', image: 'public/assets/screenshots/agent-profile.png' },
+      { title: 'Source heroes', file: 'kota — atlas / heroes', tag: 'HEROES', image: 'public/assets/screenshots/heroes.png' },
     ];
     const N = shotData.length;
     const M0 = this._swapMetrics(540, N);
@@ -878,7 +891,7 @@ class Component extends DCLogic {
 
     return {
       accent, accentShadow: this.hexA(accent, 0.55),
-      version: '0.1.1', date: 'June 25, 2026',
+      version: wnVersion, date: wnDate, title: wnTitle,
       cards, navHover, heroBtnStyle, heroBtnHover, stickyBtnStyle, stickyBtnHover, dlGlowStyle, heroInnerStyle, stickyInnerStyle,
       news, clis, footerCols, srOnly, canvasRef: this.canvasRef, scrambleRef: this.scrambleRef,
       shots, swapContainerStyle, swapStackStyle,
