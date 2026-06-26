@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/version.json", "destination": "/public/version.json" },
+    { "source": "/whats-new.json", "destination": "/public/whats-new.json" }
+  ]
+}
