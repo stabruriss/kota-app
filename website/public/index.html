@@ -49,7 +49,7 @@
         </div>
         <h1 style="{{ srOnly }}">kota — a home for your agents and projects</h1>
 
-        <p ref="{{ scrambleRef }}" style="font-family:'JetBrains Mono',monospace; font-size:clamp(15px,1.95vw,20px); line-height:1.55; letter-spacing:-0.01em; color:#cfc8bd; margin:0 0 26px; cursor:default; min-height:1.6em;">A home for your agents and projects.</p>
+        <p ref="{{ scrambleRef }}" data-scramble style="font-family:'JetBrains Mono',monospace; font-size:clamp(15px,1.95vw,20px); line-height:1.55; letter-spacing:-0.01em; color:#cfc8bd; margin:0 0 26px; cursor:default; min-height:1.6em;">A home for your agents and projects.</p>
 
         <a href="#" style="{{ heroBtnStyle }}" style-hover="{{ heroBtnHover }}">
           <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
@@ -69,14 +69,14 @@
         <section id="whats-new" style="flex:0 0 auto; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.025),rgba(255,255,255,0)); padding:16px 20px; display:flex; flex-direction:column; gap:12px;">
           <div>
             <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:{{ accent }}; margin-bottom:7px;">What's new</div>
-            <div style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">v{{ version }} — {{ title }}</div>
-            <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7e7870;">{{ date }}</div>
+            <div data-scramble style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">v{{ version }} — {{ title }}</div>
+            <div data-scramble style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7e7870;">{{ date }}</div>
           </div>
           <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:11px; min-width:0;">
             <sc-for list="{{ news }}" as="n" hint-placeholder-count="4">
               <li style="display:flex; gap:10px; align-items:baseline; font-size:13px; color:#c8c1b7; line-height:1.35;">
                 <span style="flex:0 0 auto; width:5px; height:5px; border-radius:2px; background:{{ accent }}; transform:translateY(-1px);"></span>
-                <span style="min-width:0;">{{ n }}</span>
+                <span data-scramble style="min-width:0;">{{ n }}</span>
               </li>
             </sc-for>
           </ul>
@@ -253,7 +253,7 @@ class Component extends DCLogic {
     fetch('/whats-new.json', { cache: 'no-cache' })
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .catch(() => fetch('whats-new.json', { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null)))
-      .then((d) => { if (d) this.setState({ whatsNew: d }); })
+      .then((d) => { if (d) { this.setState({ whatsNew: d }); setTimeout(() => this._initScramble(), 90); } })
       .catch(() => {});
 
     this._startFlame();
@@ -279,16 +279,18 @@ class Component extends DCLogic {
     if (this._swapRO) this._swapRO.disconnect();
     if (this._cardRO) this._cardRO.disconnect();
     if (this._swapTl) this._swapTl.kill();
-    if (this._scrRaf) cancelAnimationFrame(this._scrRaf);
-    if (this._scrEl && this._scrMove) { this._scrEl.removeEventListener('pointermove', this._scrMove); this._scrEl.removeEventListener('pointerleave', this._scrLeave); }
+    document.querySelectorAll('[data-scramble]').forEach((el) => { if (el._scrMove) el.removeEventListener('pointermove', el._scrMove); });
   }
 
   // ---- ScrambledText (proximity scramble, ported from React Bits / GSAP ScrambleText) ----
   _initScramble(tries) {
-    const el = this.scrambleRef.current;
-    if (!el) { if ((tries || 0) < 20) setTimeout(() => this._initScramble((tries || 0) + 1), 120); return; }
-    if (el._kotaScrambled) return;
-    el._kotaScrambled = true;
+    const els = document.querySelectorAll('[data-scramble]');
+    if (!els.length) { if ((tries || 0) < 20) setTimeout(() => this._initScramble((tries || 0) + 1), 120); return; }
+    els.forEach((el) => this._scrambleEl(el));
+  }
+
+  _scrambleEl(el) {
+    if (el._scrMove) el.removeEventListener('pointermove', el._scrMove);
 
     const radius = 120, duration = 1.2, speed = 0.5;
     const chars = '.:';
@@ -311,12 +313,11 @@ class Component extends DCLogic {
       }
       el.appendChild(word);
     });
-    this._scrSpans = spans;
-    this._scrEl = el;
     if (reduced) return;
 
     const rnd = () => chars[(Math.random() * chars.length) | 0];
     const cadence = 38 + 70 * speed;
+    let raf = 0;
     const tick = (now) => {
       let active = false;
       for (const sp of spans) {
@@ -327,7 +328,7 @@ class Component extends DCLogic {
           sp.el.textContent = sp.orig;
         }
       }
-      this._scrRaf = active ? requestAnimationFrame(tick) : 0;
+      raf = active ? requestAnimationFrame(tick) : 0;
     };
     const onMove = (e) => {
       const now = performance.now();
@@ -342,11 +343,10 @@ class Component extends DCLogic {
           if (now + d > sp.until) sp.until = now + d;
         }
       }
-      if (!this._scrRaf) this._scrRaf = requestAnimationFrame(tick);
+      if (!raf) raf = requestAnimationFrame(tick);
     };
-    this._scrMove = onMove;
-    this._scrLeave = () => {};
     el.addEventListener('pointermove', onMove);
+    el._scrMove = onMove;
   }
 
   // ---- CardSwap window stack (GSAP-driven) ----
