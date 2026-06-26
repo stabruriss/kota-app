@@ -146,7 +146,10 @@
                       </div>
                     </div>
                     <div style="{{ c.stubStyle }}">
-                      <div style="{{ c.eyeStyle }}"><div style="{{ c.eyePupilStyle }}"></div></div>
+                      <div style="{{ c.checkColStyle }}">
+                        <div style="{{ c.checkRowStyle }}"><span style="{{ c.humanBoxStyle }}"></span><span style="{{ c.checkLabelStyle }}">Human</span></div>
+                        <div style="{{ c.checkRowStyle }}"><span style="{{ c.agentBoxStyle }}"></span><span style="{{ c.checkLabelStyle }}">Agent</span></div>
+                      </div>
                       <div style="{{ c.stubVStyle }}">ADMIT ONE PER ROOM</div>
                       <div style="{{ c.tStampStyle }}">{{ c.num }}</div>
                     </div>
@@ -161,7 +164,7 @@
                       <div style="{{ c.tStubHeadStyle }}">KOTA 2026 · {{ c.tag }}</div>
                       <p style="{{ c.tStubTextStyle }}">{{ c.detail }}</p>
                       <div style="{{ c.qrRowStyle }}">
-                        <div style="{{ c.qrStyle }}"></div>
+                        <img src="/assets/kota/qr/kota-place.png" alt="Scan for kota.place" onerror="this.style.visibility='hidden'" style="{{ c.qrStyle }}">
                         <div style="{{ c.qrMetaStyle }}"><div>{{ c.model }}</div><div style="{{ c.tStubSubStyle }}">SCAN TO OPEN</div></div>
                       </div>
                     </div>
@@ -742,16 +745,22 @@ class Component extends DCLogic {
       const tRuleStyle = { flex: '1 1 auto', height: 0, borderTop: `1px dashed ${ink3}` };
 
       const stubStyle = { flex: '0 0 26%', minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'space-between', padding: '11px 4px', borderLeft: `1.5px dashed ${ink2}` };
-      const eyeStyle = { flex: '0 0 auto', width: '26px', height: '16px', border: `2px solid ${ink}`, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' };
-      const eyePupilStyle = { width: '7px', height: '7px', borderRadius: '50%', background: ink };
-      const stubVStyle = { writingMode: 'vertical-rl', transform: 'rotate(180deg)', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: ink2, whiteSpace: 'nowrap' };
+      const aud = ({ ROOMS: ['H', 'A'], CHAT: ['H', 'A'], HANDOFF: ['H', 'A'], WORKTREE: ['A'], RELEASE: ['H'], LOCAL: ['H'], TOOLS: ['A'], UPDATE: ['H'], SECURITY: ['H', 'A'], RESEARCH: ['H'] })[d.tag] || ['H', 'A'];
+      const human = aud.includes('H'), agent = aud.includes('A');
+      const checkColStyle = { flex: '0 0 auto', display: 'flex', flexDirection: 'row', gap: '8px', alignItems: 'center', justifyContent: 'center', whiteSpace: 'nowrap' };
+      const checkRowStyle = { display: 'flex', alignItems: 'center', gap: '4px' };
+      const mkBox = (on) => ({ width: '8px', height: '8px', flex: '0 0 auto', borderRadius: '1.5px', border: `1.25px solid ${ink}`, background: on ? ink : 'transparent', boxShadow: on ? `inset 0 0 0 1.5px ${pp}` : 'none' });
+      const humanBoxStyle = mkBox(human);
+      const agentBoxStyle = mkBox(agent);
+      const checkLabelStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '6.5px', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: ink2 };
+      const stubVStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: ink2, textAlign: 'center', lineHeight: 1.5 };
       const tStampStyle = { flex: '0 0 auto', width: '30px', height: '30px', borderRadius: '50%', border: `2px solid ${a0}`, color: a0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: "'Hanken Grotesk',sans-serif", fontWeight: 800, fontSize: '11px', transform: 'rotate(-10deg)', opacity: 0.92 };
 
       const backMainStyle = { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', padding: '11px 13px', gap: '6px' };
       const tStubHeadStyle = { flex: '0 0 auto', fontFamily: "'Hanken Grotesk',sans-serif", fontWeight: 800, fontSize: '14px', lineHeight: 1, letterSpacing: '0.01em', textTransform: 'uppercase', color: ink };
       const tStubTextStyle = { flex: '1 1 auto', margin: 0, fontFamily: "'Hanken Grotesk',sans-serif", fontStyle: 'italic', fontSize: '10px', lineHeight: 1.42, color: 'rgba(44,34,24,0.78)', textWrap: 'pretty', overflow: 'hidden' };
       const qrRowStyle = { flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '9px' };
-      const qrStyle = { flex: '0 0 auto', width: '40px', height: '40px', borderRadius: '2px', border: `1.5px solid ${ink}`, background: `repeating-conic-gradient(${ink} 0% 25%, ${pp} 0% 50%)`, backgroundSize: '8px 8px', boxShadow: `inset 0 0 0 2px ${pp}` };
+      const qrStyle = { flex: '0 0 auto', width: '40px', height: '40px', borderRadius: '2px', border: `1.5px solid ${ink}`, background: pp, objectFit: 'contain', padding: '2px', display: 'block' };
       const qrMetaStyle = { display: 'flex', flexDirection: 'column', gap: '2px', fontFamily: "'JetBrains Mono',monospace", fontSize: '8px', fontWeight: 600, letterSpacing: '0.05em', color: ink2 };
       const tStubSubStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: ink3 };
 
@@ -772,7 +781,7 @@ class Component extends DCLogic {
         shellStyle, glowStyle, flipStyle, frontStyle, backStyle,
         edgeLStyle, edgeRStyle, edgeTStyle, edgeBStyle,
         frameStyle, mainStyle, imgBoxStyle, tShotStyle, tImgTagStyle, textColStyle, tHeadRowStyle, tTitleStyle, tLocStyle, tRuleStyle,
-        stubStyle, eyeStyle, eyePupilStyle, stubVStyle, tStampStyle,
+        stubStyle, checkColStyle, checkRowStyle, humanBoxStyle, agentBoxStyle, checkLabelStyle, stubVStyle, tStampStyle,
         backMainStyle, tStubHeadStyle, tStubTextStyle, qrRowStyle, qrStyle, qrMetaStyle, tStubSubStyle,
         backStubStyle, stubImgStyle, stubImgTxtStyle,
         nTL, nTR, nBL, nBR, nSeamT, nSeamB,
