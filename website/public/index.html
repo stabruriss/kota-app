@@ -109,7 +109,8 @@
                 <span style="margin-left:7px; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#6f6960; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ s.file }}</span>
               </div>
               <div style="position:relative; flex:1 1 auto; background:#0d0b09; overflow:hidden; display:flex;">
-                <img src="{{ s.image }}" alt="{{ s.title }}" loading="lazy" style="width:100%; height:100%; object-fit:cover; object-position:center; display:block;">
+                <div style="{{ s.imgStyle }}"></div>
+                <div style="{{ s.vignetteStyle }}"></div>
                 <span style="position:absolute; left:11px; bottom:10px; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.08em; text-transform:uppercase; color:{{ accent }}; background:rgba(13,11,9,0.72); padding:2px 6px; border-radius:4px;">{{ s.tag }}</span>
               </div>
             </div>
@@ -136,6 +137,11 @@
                   <div style="{{ c.frameStyle }}">
                     <div style="{{ c.mainStyle }}">
                       <div data-role="art" style="{{ c.imgBoxStyle }}">
+                        <div style="{{ c.splitTLStyle }}"></div>
+                        <div style="{{ c.splitBRStyle }}"></div>
+                        <div style="{{ c.splitDividerStyle }}"></div>
+                        <div style="{{ c.singleImgStyle }}"></div>
+                        <div style="{{ c.artWrapStyle }}"><img src="{{ c.frontImg }}" alt="{{ c.title }}" loading="lazy" style="{{ c.artScreenshotStyle }}"><div style="{{ c.frameOverlayStyle }}"></div></div>
                         <span style="{{ c.tShotStyle }}">{{ c.tag }}</span>
                         <div style="{{ c.tImgTagStyle }}">{{ c.tag }}</div>
                       </div>
@@ -743,9 +749,36 @@ class Component extends DCLogic {
       const frameStyle = { position: 'absolute', inset: '6px', borderRadius: '4px', border: `1.5px solid ${ink}`, boxShadow: `inset 0 0 0 2px ${pp}, inset 0 0 0 3px ${ink3}`, display: 'flex', overflow: 'hidden' };
 
       const mainStyle = { flex: '1 1 0', minWidth: 0, display: 'flex' };
-      const frontImg = ({ ROOMS: '/assets/kota/card-front/ROOMS.png', CHAT: '/assets/kota/card-front/CHAT.png', AGENTS: '/assets/kota/card-front/AGENTS.png', CLI: '/assets/kota/card-front/CLI.png' })[d.tag] || '';
-      const imgBoxStyle = { position: 'relative', flex: '2 1 0', minWidth: 0, overflow: 'hidden', borderRight: `1.5px solid ${ink}`, display: 'flex', alignItems: 'center', justifyContent: 'center', background: frontImg ? `#14100c url("${frontImg}") center / contain no-repeat` : `linear-gradient(165deg, ${a1} 0%, #a99a76 34%, #8d8064 100%)` };
-      const tShotStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '9px', color: 'rgba(255,255,255,0.72)', letterSpacing: '0.04em', padding: '4px 9px', border: '1px dashed rgba(255,255,255,0.45)', borderRadius: '5px', textAlign: 'center', background: 'rgba(40,30,20,0.22)', display: frontImg ? 'none' : 'inline-block' };
+      const frontImg = ({ CLI_SINGLE_DISABLED: '' })[d.tag] || '';
+      const splitMap = {
+        ROOMS: { tl: 'ROOMS-tl.png', tlSize: '161%', tlPos: '42% 100%', br: 'ROOMS-br.png', brSize: '70%', brPos: '97% 42%', dw: 0, diag: 'tlbr-out' },
+        CHAT: { tl: 'CHAT-tl.png', tlSize: '106%', tlPos: '50% 50%', br: 'CHAT-br.png', brSize: '152%', brPos: '60% 100%', dw: 0, diag: 'tlbr-out' },
+        AGENTS: { tl: 'AGENTS-tl.png', tlSize: '82%', tlPos: '0% 32%', br: 'AGENTS-br.png', brSize: '101%', brPos: '0% 20%', dw: 0, diag: 'tlbr-out' },
+        CLI: { tl: 'CLI-tl.png', tlSize: '125%', tlPos: '0% 0%', br: 'CLI-br.png', brSize: '100%', brPos: '100% 100%', dw: 0, diag: 'trbl-out' },
+        PTY: { tl: 'PTY-tl.png', tlSize: '151%', tlPos: '0% 7%', br: 'PTY-br.png', brSize: '166%', brPos: '4% 0%', dw: 0, diag: 'trbl-out' },
+      };
+      const sp = splitMap[d.tag];
+      const splitMode = !!sp;
+      const splitTrbl = splitMode && sp.diag === 'trbl-out';
+      const clipA = splitTrbl ? 'polygon(0 0, 100% 0, 100% 100%)' : 'polygon(0 0, 100% 0, 0 100%)';
+      const clipB = splitTrbl ? 'polygon(0 0, 100% 100%, 0 100%)' : 'polygon(100% 0, 100% 100%, 0 100%)';
+      const dividerDir = splitTrbl ? 'to bottom left' : 'to bottom right';
+      const splitTLStyle = splitMode ? { position: 'absolute', inset: '0', backgroundImage: `url("/assets/kota/card-front/split/${sp.tl}")`, backgroundSize: sp.tlSize, backgroundPosition: sp.tlPos, backgroundRepeat: 'no-repeat', clipPath: clipA } : { display: 'none' };
+      const splitBRStyle = splitMode ? { position: 'absolute', inset: '0', backgroundImage: `url("/assets/kota/card-front/split/${sp.br}")`, backgroundSize: sp.brSize, backgroundPosition: sp.brPos, backgroundRepeat: 'no-repeat', clipPath: clipB } : { display: 'none' };
+      const splitDividerStyle = (splitMode && sp.dw) ? { position: 'absolute', inset: '0', pointerEvents: 'none', background: `linear-gradient(${dividerDir}, transparent calc(50% - ${sp.dw / 2}px), #14100c calc(50% - ${sp.dw / 2}px), #14100c calc(50% + ${sp.dw / 2}px), transparent calc(50% + ${sp.dw / 2}px))`, zIndex: 3 } : { display: 'none' };
+      const singleMap = {
+        SKILLS: { img: 'SKILLS.png', size: '106%', pos: '0% 7.8%' },
+      };
+      const sg = singleMap[d.tag];
+      const singleMode = !!sg;
+      const singleImgStyle = singleMode ? { position: 'absolute', inset: '0', backgroundImage: `url("/assets/kota/card-front/single/${sg.img}")`, backgroundSize: sg.size, backgroundPosition: sg.pos, backgroundRepeat: 'no-repeat' } : { display: 'none' };
+      const imgBoxStyle = (frontImg || splitMode || singleMode)
+        ? { position: 'relative', flex: '2 1 0', minWidth: 0, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `linear-gradient(165deg, ${a1} 0%, #a99a76 34%, #8d8064 100%)` }
+        : { position: 'relative', flex: '2 1 0', minWidth: 0, overflow: 'hidden', borderRight: `1.5px solid ${ink}`, display: 'flex', alignItems: 'center', justifyContent: 'center', background: `linear-gradient(165deg, ${a1} 0%, #a99a76 34%, #8d8064 100%)` };
+      const tShotStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: '9px', color: 'rgba(255,255,255,0.72)', letterSpacing: '0.04em', padding: '4px 9px', border: '1px dashed rgba(255,255,255,0.45)', borderRadius: '5px', textAlign: 'center', background: 'rgba(40,30,20,0.22)', display: (frontImg || splitMode || singleMode) ? 'none' : 'inline-block' };
+      const artWrapStyle = frontImg ? { position: 'relative', display: 'inline-block', maxWidth: '100%', maxHeight: '100%', lineHeight: 0 } : { display: 'none' };
+      const artScreenshotStyle = frontImg ? { maxWidth: '100%', maxHeight: '100%', display: 'block' } : { display: 'none' };
+      const frameOverlayStyle = frontImg ? { position: 'absolute', inset: '0', pointerEvents: 'none', border: '3px solid transparent', borderImageSource: `url("/assets/kota/card-front/frame/frame.png")`, borderImageSlice: 96, borderImageRepeat: 'round', opacity: 0.7 } : { display: 'none' };
       const artImgStyle = { width: '100%', height: '100%', objectFit: d.fit || 'cover', objectPosition: 'center', display: 'block', padding: (d.fit === 'contain' ? '16%' : '0') };
       const tImgTagStyle = { position: 'absolute', left: '7px', bottom: '7px', fontFamily: "'JetBrains Mono',monospace", fontSize: '7px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', color: '#f6efe0', background: 'rgba(20,14,8,0.5)', padding: '2px 5px', borderRadius: '2px' };
       const textColStyle = { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '11px 11px' };
@@ -796,7 +829,7 @@ class Component extends DCLogic {
         ...d, model, num,
         shellStyle, glowStyle, flipStyle, frontStyle, backStyle,
         edgeLStyle, edgeRStyle, edgeTStyle, edgeBStyle,
-        frameStyle, mainStyle, imgBoxStyle, tShotStyle, artImgStyle, tImgTagStyle, textColStyle, tHeadRowStyle, tTitleStyle, tSummaryStyle, tLocStyle, tRuleStyle,
+        frameStyle, mainStyle, frontImg, splitTLStyle, splitBRStyle, splitDividerStyle, singleImgStyle, imgBoxStyle, tShotStyle, artWrapStyle, artScreenshotStyle, frameOverlayStyle, artImgStyle, tImgTagStyle, textColStyle, tHeadRowStyle, tTitleStyle, tSummaryStyle, tLocStyle, tRuleStyle,
         stubStyle, checkColStyle, checkRowStyle, humanBoxStyle, agentBoxStyle, checkLabelStyle, stubVStyle, tStampStyle,
         backMainStyle, tStubHeadStyle, tStubTextStyle, qrRowStyle, qrStyle, qrMetaStyle, tStubSubStyle,
         backStubStyle, stubImgStyle, stubImgTxtStyle, backImg, backImgStyle,
@@ -880,10 +913,10 @@ class Component extends DCLogic {
 
     // ---- CardSwap window stack ----
     const shotData = [
-      { title: 'Project room', file: 'kota — atlas / room', tag: 'ROOMS', image: '/assets/screenshots/room-tavern.png' },
-      { title: 'Room chat', file: 'kota — atlas / chat', tag: 'CHAT', image: '/assets/screenshots/room-chat.png' },
-      { title: 'Agent setup', file: 'kota — atlas / agent', tag: 'AGENT', image: '/assets/screenshots/agent-profile.png' },
-      { title: 'Source heroes', file: 'kota — atlas / heroes', tag: 'HEROES', image: '/assets/screenshots/heroes.png' },
+      { title: 'Project room', file: 'kota — atlas / room', tag: 'ROOMS', image: '/assets/screenshots/room-tavern.png', size: '132%', pos: '42.8% 20%' },
+      { title: 'Room chat', file: 'kota — atlas / chat', tag: 'CHAT', image: '/assets/screenshots/room-chat.png', size: '171%', pos: '0% 97%' },
+      { title: 'Agent setup', file: 'kota — atlas / agent', tag: 'AGENT', image: '/assets/screenshots/agent-profile.png', size: '164%', pos: '82.9% 32.3%' },
+      { title: 'Source heroes', file: 'kota — atlas / heroes', tag: 'HEROES', image: '/assets/screenshots/heroes.png', size: '188%', pos: '48.3% 4.8%' },
     ];
     const N = shotData.length;
     const M0 = this._swapMetrics(540, N);
@@ -901,6 +934,8 @@ class Component extends DCLogic {
         ...s, idx: i,
         ref: (el) => { if (el) this._swapCards[i] = el; },
         onClick: () => { if (this._advanceSwap) this._advanceSwap(); },
+        imgStyle: { position: 'absolute', inset: 0, backgroundImage: `url("${s.image}")`, backgroundSize: s.size, backgroundPosition: s.pos, backgroundRepeat: 'no-repeat' },
+        vignetteStyle: { position: 'absolute', inset: 0, pointerEvents: 'none', boxShadow: 'inset 0 0 34px 13px rgba(0,0,0,0.6)' },
         style: {
           position: 'absolute', top: '50%', left: '50%',
           width: M0.cardW + 'px', height: M0.cardH + 'px',

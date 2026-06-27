@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kota Card Art Tuner</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, system-ui, "PingFang SC", sans-serif; background: #1a1714; color: #e8e0d4; padding: 24px; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .sub { font-size: 12px; color: #9a8f7e; margin-bottom: 18px; line-height: 1.6; }
+  .wrap { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; }
+  .left { flex: 0 0 auto; }
+  .right { flex: 1 1 340px; min-width: 320px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+  .toolbar label { font-size: 12px; color: #c5b9a5; }
+  select, button, input[type=text] { background: #2a251f; color: #e8e0d4; border: 1px solid #4a4036; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+  select, button { cursor: pointer; }
+  button:hover { background: #352e26; }
+  button.primary { background: #c9a25a; color: #1a1714; border-color: #c9a25a; font-weight: 600; }
+  .preview-frame { position: relative; width: 480px; height: 403px; border: 1.5px solid #4a4036; border-radius: 6px; overflow: hidden; background: linear-gradient(165deg, #c98a3a, #a99a76, #8d8064); user-select: none; }
+  .region { position: absolute; inset: 0; background-repeat: no-repeat; cursor: grab; }
+  .region:active { cursor: grabbing; }
+  .divider { position: absolute; inset: 0; pointer-events: none; }
+  .group { background: #221e19; border: 1px solid #3a332b; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .group h3 { font-size: 13px; margin-bottom: 10px; color: #c9a25a; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .row label { font-size: 11px; width: 48px; color: #9a8f7e; }
+  .row input[type=range] { flex: 1; accent-color: #c9a25a; }
+  .row .val { font-size: 11px; width: 50px; text-align: right; font-variant-numeric: tabular-nums; color: #c5b9a5; }
+  .row select, .row input[type=file] { flex: 1; font-size: 11px; }
+  textarea { width: 100%; height: 140px; background: #14100c; color: #c5d8c5; border: 1px solid #3a332b; border-radius: 6px; padding: 10px; font-family: ui-monospace, monospace; font-size: 11px; resize: vertical; margin-top: 8px; }
+  .hint { font-size: 11px; color: #7a7060; margin-top: 8px; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <h1>Kota Card Art Tuner 🪶</h1>
+  <div class="sub">调好图片在卡片大图区里的<b>缩放</b>和<b>位置</b> → 复制底部参数发给雪燕锁定。<br>预览框已用 headless 实测校准为真实比例 (≈1.19:1,很方)。双图斜切 / 单图都支持,所有卡片通用。</div>
+  <div class="wrap">
+    <div class="left">
+      <div class="toolbar">
+        <label>卡片</label><input type="text" id="cardTag" value="ROOMS" size="8" placeholder="ROOMS">
+        <label>模式</label>
+        <select id="mode"><option value="split">双图斜切</option><option value="single">单图</option></select>
+        <label>斜线</label>
+        <select id="diag"><option value="tlbr-out">╲ 左上 + 右下</option><option value="trbl-out">╱ 左下 + 右上</option></select>
+      </div>
+      <div class="preview-frame" id="frame">
+        <div class="region" id="regA"></div>
+        <div class="region" id="regB"></div>
+        <div class="divider" id="divider"></div>
+      </div>
+      <div class="hint">在图上 <b>拖拽</b> 调位置 · <b>滚轮</b> 缩放 · 或用右侧滑块精调。上传可换图。</div>
+    </div>
+    <div class="right">
+      <div class="group" id="groupA">
+        <h3 id="titleA">左上区 (A)</h3>
+        <div class="row"><label>图片</label><select class="imgsel" data-r="A"></select></div>
+        <div class="row"><label>上传</label><input type="file" accept="image/*" data-r="A" class="upload"></div>
+        <div class="row"><label>缩放</label><input type="range" min="40" max="360" value="150" data-r="A" data-k="scale"><span class="val" id="valA-scale">150%</span></div>
+        <div class="row"><label>水平</label><input type="range" min="0" max="100" value="50" data-r="A" data-k="posX"><span class="val" id="valA-posX">50%</span></div>
+        <div class="row"><label>垂直</label><input type="range" min="0" max="100" value="50" data-r="A" data-k="posY"><span class="val" id="valA-posY">50%</span></div>
+      </div>
+      <div class="group" id="groupB">
+        <h3 id="titleB">右下区 (B)</h3>
+        <div class="row"><label>图片</label><select class="imgsel" data-r="B"></select></div>
+        <div class="row"><label>上传</label><input type="file" accept="image/*" data-r="B" class="upload"></div>
+        <div class="row"><label>缩放</label><input type="range" min="40" max="360" value="150" data-r="B" data-k="scale"><span class="val" id="valB-scale">150%</span></div>
+        <div class="row"><label>水平</label><input type="range" min="0" max="100" value="50" data-r="B" data-k="posX"><span class="val" id="valB-posX">50%</span></div>
+        <div class="row"><label>垂直</label><input type="range" min="0" max="100" value="50" data-r="B" data-k="posY"><span class="val" id="valB-posY">50%</span></div>
+      </div>
+      <div class="group">
+        <h3>斜线 Divider</h3>
+        <div class="row"><label>粗细</label><input type="range" min="0" max="14" value="4" data-r="D" data-k="width"><span class="val" id="valD-width">4px</span></div>
+        <div class="row"><label>颜色</label><input type="color" value="#14100c" id="divColor"></div>
+      </div>
+      <button class="primary" onclick="copyOut()">复制参数</button>
+      <span id="copied" style="font-size:11px;color:#8ac98a;margin-left:8px;"></span>
+      <textarea id="output" readonly></textarea>
+    </div>
+  </div>
+<script>
+  var BASE = '/assets/kota/card-front/';
+  var PRESETS = {
+    'ROOMS 圆桌 (split tl)': BASE + 'split/ROOMS-tl.png',
+    'ROOMS providers (split br)': BASE + 'split/ROOMS-br.png',
+    'CHAT': BASE + 'CHAT.png',
+    'AGENTS': BASE + 'AGENTS.png',
+    'CLI': BASE + 'CLI.png',
+    'ROOMS (single)': BASE + 'ROOMS.png'
+  };
+  var state = {
+    mode: 'split', diag: 'tlbr-out', tag: 'ROOMS',
+    A: { img: BASE + 'split/ROOMS-tl.png', scale: 150, posX: 50, posY: 50 },
+    B: { img: BASE + 'split/ROOMS-br.png', scale: 150, posX: 50, posY: 50 },
+    D: { width: 4, color: '#14100c' }
+  };
+  document.querySelectorAll('.imgsel').forEach(function (sel) {
+    var r = sel.dataset.r;
+    Object.keys(PRESETS).forEach(function (name) {
+      var o = document.createElement('option'); o.value = PRESETS[name]; o.textContent = name; sel.appendChild(o);
+    });
+    sel.value = state[r].img;
+    sel.onchange = function () { state[r].img = sel.value; render(); };
+  });
+  document.querySelectorAll('.upload').forEach(function (up) {
+    up.onchange = function () { var f = up.files[0]; if (f) { state[up.dataset.r].img = URL.createObjectURL(f); render(); } };
+  });
+  document.querySelectorAll('input[type=range]').forEach(function (sl) {
+    sl.oninput = function () {
+      var r = sl.dataset.r, k = sl.dataset.k; state[r][k] = +sl.value;
+      document.getElementById('val' + r + '-' + k).textContent = sl.value + (k === 'width' ? 'px' : '%'); render();
+    };
+  });
+  document.getElementById('cardTag').oninput = function (e) { state.tag = e.target.value.trim().toUpperCase(); updateOutput(); };
+  document.getElementById('mode').onchange = function (e) { state.mode = e.target.value; render(); };
+  document.getElementById('diag').onchange = function (e) { state.diag = e.target.value; render(); };
+  document.getElementById('divColor').oninput = function (e) { state.D.color = e.target.value; render(); };
+
+  function clips() {
+    if (state.diag === 'tlbr-out') return { A: 'polygon(0 0, 100% 0, 0 100%)', B: 'polygon(100% 0, 100% 100%, 0 100%)' };
+    return { A: 'polygon(0 0, 100% 0, 100% 100%)', B: 'polygon(0 0, 100% 100%, 0 100%)' };
+  }
+  function dividerBg() {
+    var c = state.D.color, w = state.D.width; if (w <= 0) return 'none';
+    var dir = state.diag === 'tlbr-out' ? 'to bottom right' : 'to bottom left';
+    return 'linear-gradient(' + dir + ', transparent calc(50% - ' + (w / 2) + 'px), ' + c + ' calc(50% - ' + (w / 2) + 'px), ' + c + ' calc(50% + ' + (w / 2) + 'px), transparent calc(50% + ' + (w / 2) + 'px))';
+  }
+  function applyRegion(el, s, clip) {
+    el.style.backgroundImage = 'url("' + s.img + '")';
+    el.style.backgroundSize = s.scale + '%';
+    el.style.backgroundPosition = s.posX + '% ' + s.posY + '%';
+    el.style.clipPath = clip === 'none' ? 'none' : clip;
+    el.style.display = 'block';
+  }
+  function render() {
+    var regA = document.getElementById('regA'), regB = document.getElementById('regB'), div = document.getElementById('divider');
+    var c = clips();
+    if (state.mode === 'single') {
+      applyRegion(regA, state.A, 'none'); regB.style.display = 'none'; div.style.background = 'none';
+      document.getElementById('groupB').style.opacity = 0.3; document.getElementById('titleA').textContent = '单图 (A)';
+    } else {
+      applyRegion(regA, state.A, c.A); applyRegion(regB, state.B, c.B); div.style.background = dividerBg();
+      document.getElementById('groupB').style.opacity = 1;
+      document.getElementById('titleA').textContent = state.diag === 'tlbr-out' ? '左上区 (A)' : '右上区 (A)';
+      document.getElementById('titleB').textContent = state.diag === 'tlbr-out' ? '右下区 (B)' : '左下区 (B)';
+    }
+    updateOutput();
+  }
+  function shortName(u) { return u.indexOf('blob:') === 0 ? '上传图(记得发我文件)' : u.split('/').pop(); }
+  function updateOutput() {
+    var L = [];
+    L.push('# card: ' + state.tag + '   mode: ' + state.mode + (state.mode === 'split' ? '   diag: ' + state.diag : ''));
+    L.push('A img=' + shortName(state.A.img) + '  size=' + state.A.scale + '%  pos=' + state.A.posX + '% ' + state.A.posY + '%');
+    if (state.mode === 'split') {
+      L.push('B img=' + shortName(state.B.img) + '  size=' + state.B.scale + '%  pos=' + state.B.posX + '% ' + state.B.posY + '%');
+      L.push('divider width=' + state.D.width + 'px  color=' + state.D.color);
+    }
+    document.getElementById('output').value = L.join('\n');
+  }
+  function copyOut() {
+    var t = document.getElementById('output'); t.select(); document.execCommand('copy');
+    var c = document.getElementById('copied'); c.textContent = '已复制 ✓'; setTimeout(function () { c.textContent = ''; }, 1500);
+  }
+  var dragging = null;
+  ['regA', 'regB'].forEach(function (id) {
+    var el = document.getElementById(id), r = id === 'regA' ? 'A' : 'B';
+    el.addEventListener('mousedown', function (e) { dragging = { r: r, x: e.clientX, y: e.clientY }; e.preventDefault(); });
+    el.addEventListener('wheel', function (e) {
+      e.preventDefault(); var s = state[r]; s.scale = Math.max(40, Math.min(360, s.scale + (e.deltaY < 0 ? 5 : -5))); sync(r); render();
+    }, { passive: false });
+  });
+  window.addEventListener('mousemove', function (e) {
+    if (!dragging) return; var s = state[dragging.r];
+    s.posX = Math.max(0, Math.min(100, s.posX - (e.clientX - dragging.x) * 0.3));
+    s.posY = Math.max(0, Math.min(100, s.posY - (e.clientY - dragging.y) * 0.3));
+    dragging.x = e.clientX; dragging.y = e.clientY; sync(dragging.r); render();
+  });
+  window.addEventListener('mouseup', function () { dragging = null; });
+  function sync(r) {
+    ['scale', 'posX', 'posY'].forEach(function (k) {
+      var sl = document.querySelector('input[data-r="' + r + '"][data-k="' + k + '"]');
+      if (sl) { sl.value = Math.round(state[r][k]); document.getElementById('val' + r + '-' + k).textContent = Math.round(state[r][k]) + '%'; }
+    });
+  }
+  render();
+</script>
+</body>
+</html>

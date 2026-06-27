@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kota Shot Tuner (What's New)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, system-ui, "PingFang SC", sans-serif; background: #16130f; color: #e8e0d4; padding: 24px; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .sub { font-size: 12px; color: #9a8f7e; margin-bottom: 18px; line-height: 1.6; }
+  .wrap { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; }
+  .left { flex: 0 0 auto; }
+  .right { flex: 1 1 320px; min-width: 300px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+  .toolbar label { font-size: 12px; color: #c5b9a5; }
+  select, button, input[type=text] { background: #2a251f; color: #e8e0d4; border: 1px solid #4a4036; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+  select, button { cursor: pointer; }
+  button:hover { background: #352e26; }
+  button.primary { background: #c9a25a; color: #16130f; border-color: #c9a25a; font-weight: 600; }
+  .preview-frame { position: relative; width: 480px; height: 269px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.13); overflow: hidden; background: #100e0c; box-shadow: 0 24px 50px -22px rgba(0,0,0,0.9); user-select: none; }
+  .shot { position: absolute; inset: 0; background-repeat: no-repeat; cursor: grab; }
+  .shot:active { cursor: grabbing; }
+  .group { background: #211d18; border: 1px solid #3a332b; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .group h3 { font-size: 13px; margin-bottom: 10px; color: #c9a25a; }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .row label { font-size: 11px; width: 48px; color: #9a8f7e; }
+  .row input[type=range] { flex: 1; accent-color: #c9a25a; }
+  .row .val { font-size: 11px; width: 50px; text-align: right; font-variant-numeric: tabular-nums; color: #c5b9a5; }
+  .row select, .row input[type=file] { flex: 1; font-size: 11px; }
+  textarea { width: 100%; height: 130px; background: #100c08; color: #c5d8c5; border: 1px solid #3a332b; border-radius: 6px; padding: 10px; font-family: ui-monospace, monospace; font-size: 11px; resize: vertical; margin-top: 8px; }
+  .hint { font-size: 11px; color: #7a7060; margin-top: 8px; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <h1>Kota Shot Tuner 🪶 <span style="font-size:12px;color:#9a8f7e;font-weight:400;">What's New 切换卡</span></h1>
+  <div class="sub">调好四张桌面截图在切换卡里的<b>缩放</b>和<b>位置</b> → 复制参数发雪燕锁定。<br>预览框 = 切换卡真实比例 <b>1.786:1</b>。单图,无斜切。逐张调,每调完一张复制一次。</div>
+  <div class="wrap">
+    <div class="left">
+      <div class="toolbar">
+        <label>当前截图</label>
+        <select id="picker"></select>
+      </div>
+      <div class="preview-frame" id="frame">
+        <div class="shot" id="shot"></div>
+      </div>
+      <div class="hint">在图上 <b>拖拽</b> 调位置 · <b>滚轮</b> 缩放 · 或右侧滑块精调。上传可换图。</div>
+    </div>
+    <div class="right">
+      <div class="group">
+        <h3 id="title">截图调节</h3>
+        <div class="row"><label>上传</label><input type="file" accept="image/*" id="upload"></div>
+        <div class="row"><label>缩放</label><input type="range" min="40" max="320" value="100" data-k="scale"><span class="val" id="val-scale">100%</span></div>
+        <div class="row"><label>水平</label><input type="range" min="0" max="100" value="50" data-k="posX"><span class="val" id="val-posX">50%</span></div>
+        <div class="row"><label>垂直</label><input type="range" min="0" max="100" value="50" data-k="posY"><span class="val" id="val-posY">50%</span></div>
+      </div>
+      <button class="primary" onclick="copyOut()">复制当前截图参数</button>
+      <button onclick="copyAll()">复制全部四张</button>
+      <span id="copied" style="font-size:11px;color:#8ac98a;margin-left:8px;"></span>
+      <textarea id="output" readonly></textarea>
+    </div>
+  </div>
+<script>
+  var BASE = '/assets/screenshots/';
+  var SHOTS = [
+    { tag: 'ROOMS  (room-tavern)', file: 'room-tavern.png' },
+    { tag: 'CHAT   (room-chat)', file: 'room-chat.png' },
+    { tag: 'AGENT  (agent-profile)', file: 'agent-profile.png' },
+    { tag: 'HEROES (heroes)', file: 'heroes.png' }
+  ];
+  var state = {};
+  SHOTS.forEach(function (s) { state[s.file] = { img: BASE + s.file, scale: 100, posX: 50, posY: 50, tag: s.tag }; });
+  var cur = SHOTS[0].file;
+
+  var picker = document.getElementById('picker');
+  SHOTS.forEach(function (s) { var o = document.createElement('option'); o.value = s.file; o.textContent = s.tag; picker.appendChild(o); });
+  picker.onchange = function () { cur = picker.value; syncSliders(); render(); };
+
+  document.getElementById('upload').onchange = function () {
+    var f = this.files[0]; if (f) { state[cur].img = URL.createObjectURL(f); state[cur].uploaded = f.name; render(); }
+  };
+  document.querySelectorAll('input[type=range]').forEach(function (sl) {
+    sl.oninput = function () {
+      var k = sl.dataset.k; state[cur][k] = +sl.value;
+      document.getElementById('val-' + k).textContent = sl.value + '%'; render();
+    };
+  });
+
+  function render() {
+    var s = state[cur], el = document.getElementById('shot');
+    el.style.backgroundImage = 'url("' + s.img + '")';
+    el.style.backgroundSize = s.scale + '%';
+    el.style.backgroundPosition = s.posX + '% ' + s.posY + '%';
+    document.getElementById('title').textContent = s.tag;
+    updateOutput();
+  }
+  function fmt(file) {
+    var s = state[file];
+    var name = s.uploaded ? s.uploaded + ' (上传,记得发我)' : file;
+    return name + '  size=' + s.scale + '%  pos=' + s.posX + '% ' + s.posY + '%';
+  }
+  function updateOutput() { document.getElementById('output').value = '# What\'s New shot: ' + state[cur].tag.split(' ')[0] + '\n' + fmt(cur); }
+  function allOut() {
+    var L = ['# What\'s New shots (4)'];
+    SHOTS.forEach(function (s) { L.push(s.tag.split(' ')[0] + '  ' + fmt(s.file)); });
+    return L.join('\n');
+  }
+  function flash() { var c = document.getElementById('copied'); c.textContent = '已复制 ✓'; setTimeout(function () { c.textContent = ''; }, 1500); }
+  function copyOut() { var t = document.getElementById('output'); t.value = updateOutput() || t.value; t.select(); document.execCommand('copy'); flash(); }
+  function copyAll() { var t = document.getElementById('output'); t.value = allOut(); t.select(); document.execCommand('copy'); flash(); }
+
+  var dragging = null;
+  var shotEl = document.getElementById('shot');
+  shotEl.addEventListener('mousedown', function (e) { dragging = { x: e.clientX, y: e.clientY }; e.preventDefault(); });
+  shotEl.addEventListener('wheel', function (e) {
+    e.preventDefault(); var s = state[cur]; s.scale = Math.max(40, Math.min(320, s.scale + (e.deltaY < 0 ? 4 : -4))); syncSliders(); render();
+  }, { passive: false });
+  window.addEventListener('mousemove', function (e) {
+    if (!dragging) return; var s = state[cur];
+    s.posX = Math.max(0, Math.min(100, s.posX - (e.clientX - dragging.x) * 0.3));
+    s.posY = Math.max(0, Math.min(100, s.posY - (e.clientY - dragging.y) * 0.3));
+    dragging.x = e.clientX; dragging.y = e.clientY; syncSliders(); render();
+  });
+  window.addEventListener('mouseup', function () { dragging = null; });
+  function syncSliders() {
+    ['scale', 'posX', 'posY'].forEach(function (k) {
+      var sl = document.querySelector('input[data-k="' + k + '"]');
+      if (sl) { sl.value = Math.round(state[cur][k]); document.getElementById('val-' + k).textContent = Math.round(state[cur][k]) + '%'; }
+    });
+  }
+  syncSliders(); render();
+</script>
+</body>
+</html>
