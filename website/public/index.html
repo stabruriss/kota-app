@@ -137,10 +137,12 @@
                   <div style="{{ c.frameStyle }}">
                     <div style="{{ c.mainStyle }}">
                       <div data-role="art" style="{{ c.imgBoxStyle }}">
+                        <div style="{{ c.artInnerStyle }}">
                         <div style="{{ c.splitTLStyle }}"></div>
                         <div style="{{ c.splitBRStyle }}"></div>
                         <div style="{{ c.splitDividerStyle }}"></div>
                         <div style="{{ c.singleImgStyle }}"></div>
+                        </div>
                         <div style="{{ c.artWrapStyle }}"><img src="{{ c.frontImg }}" alt="{{ c.title }}" loading="lazy" style="{{ c.artScreenshotStyle }}"><div style="{{ c.frameOverlayStyle }}"></div></div>
                         <span style="{{ c.tShotStyle }}">{{ c.tag }}</span>
                         <div style="{{ c.tImgTagStyle }}">{{ c.tag }}</div>
@@ -756,6 +758,9 @@ class Component extends DCLogic {
         AGENTS: { tl: 'AGENTS-tl.png', tlSize: '82%', tlPos: '0% 32%', br: 'AGENTS-br.png', brSize: '101%', brPos: '0% 20%', dw: 0, diag: 'tlbr-out' },
         CLI: { tl: 'CLI-tl.png', tlSize: '125%', tlPos: '0% 0%', br: 'CLI-br.png', brSize: '100%', brPos: '100% 100%', dw: 0, diag: 'trbl-out' },
         PTY: { tl: 'PTY-tl.png', tlSize: '151%', tlPos: '0% 7%', br: 'PTY-br.png', brSize: '166%', brPos: '4% 0%', dw: 0, diag: 'trbl-out' },
+        RULES: { tl: 'RULES-tl.png', tlSize: '104%', tlPos: '92% 6%', br: 'RULES-br.png', brSize: '104%', brPos: '1% 100%', dw: 0, diag: 'tlbr-out' },
+        SYNC: { tl: 'SYNC-tl.png', tlSize: '73%', tlPos: '100% 0%', br: 'SYNC-br.png', brSize: '93%', brPos: '0% 100%', dw: 0, diag: 'trbl-out' },
+        REMOTE: { tl: 'REMOTE-tl.png', tlSize: '163%', tlPos: '0% 0%', br: 'REMOTE-br.png', brSize: '273%', brPos: '0% 80.8%', dw: 0, diag: 'tlbr-out' },
       };
       const sp = splitMap[d.tag];
       const splitMode = !!sp;
@@ -768,10 +773,18 @@ class Component extends DCLogic {
       const splitDividerStyle = (splitMode && sp.dw) ? { position: 'absolute', inset: '0', pointerEvents: 'none', background: `linear-gradient(${dividerDir}, transparent calc(50% - ${sp.dw / 2}px), #14100c calc(50% - ${sp.dw / 2}px), #14100c calc(50% + ${sp.dw / 2}px), transparent calc(50% + ${sp.dw / 2}px))`, zIndex: 3 } : { display: 'none' };
       const singleMap = {
         SKILLS: { img: 'SKILLS.png', size: '106%', pos: '0% 7.8%' },
+        HISTORY: { img: 'HISTORY.png', size: '103%', pos: '51% 41%' },
+        SHELL: { img: 'SHELL.png', size: '100%', pos: '55% 32%' },
+        BBS: { img: 'BBS.png', size: '164%', pos: '1% 3%' },
+        DIFF: { img: 'DIFF.png', size: '101%', pos: '75% 49%' },
+        CANVAS: { img: 'CANVAS.png', size: '78%', pos: '56% 47%' },
+        TIMED: { img: 'TIMED.png', size: '152%', pos: '0% 0%' },
+        DREAMS: { img: 'DREAMS.png', size: '268%', pos: '67% 80%' },
       };
       const sg = singleMap[d.tag];
       const singleMode = !!sg;
       const singleImgStyle = singleMode ? { position: 'absolute', inset: '0', backgroundImage: `url("/assets/kota/card-front/single/${sg.img}")`, backgroundSize: sg.size, backgroundPosition: sg.pos, backgroundRepeat: 'no-repeat' } : { display: 'none' };
+      const artInnerStyle = { position: 'absolute', inset: '0', transform: 'scale(0.95)', transformOrigin: 'center', border: '2px solid #1e1812', boxShadow: '0 0 8px 1px rgba(0,0,0,0.5)' };
       const imgBoxStyle = (frontImg || splitMode || singleMode)
         ? { position: 'relative', flex: '2 1 0', minWidth: 0, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `linear-gradient(165deg, ${a1} 0%, #a99a76 34%, #8d8064 100%)` }
         : { position: 'relative', flex: '2 1 0', minWidth: 0, overflow: 'hidden', borderRight: `1.5px solid ${ink}`, display: 'flex', alignItems: 'center', justifyContent: 'center', background: `linear-gradient(165deg, ${a1} 0%, #a99a76 34%, #8d8064 100%)` };
@@ -829,7 +842,7 @@ class Component extends DCLogic {
         ...d, model, num,
         shellStyle, glowStyle, flipStyle, frontStyle, backStyle,
         edgeLStyle, edgeRStyle, edgeTStyle, edgeBStyle,
-        frameStyle, mainStyle, frontImg, splitTLStyle, splitBRStyle, splitDividerStyle, singleImgStyle, imgBoxStyle, tShotStyle, artWrapStyle, artScreenshotStyle, frameOverlayStyle, artImgStyle, tImgTagStyle, textColStyle, tHeadRowStyle, tTitleStyle, tSummaryStyle, tLocStyle, tRuleStyle,
+        frameStyle, mainStyle, frontImg, artInnerStyle, splitTLStyle, splitBRStyle, splitDividerStyle, singleImgStyle, imgBoxStyle, tShotStyle, artWrapStyle, artScreenshotStyle, frameOverlayStyle, artImgStyle, tImgTagStyle, textColStyle, tHeadRowStyle, tTitleStyle, tSummaryStyle, tLocStyle, tRuleStyle,
         stubStyle, checkColStyle, checkRowStyle, humanBoxStyle, agentBoxStyle, checkLabelStyle, stubVStyle, tStampStyle,
         backMainStyle, tStubHeadStyle, tStubTextStyle, qrRowStyle, qrStyle, qrMetaStyle, tStubSubStyle,
         backStubStyle, stubImgStyle, stubImgTxtStyle, backImg, backImgStyle,
