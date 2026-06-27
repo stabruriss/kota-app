@@ -82,16 +82,20 @@
 <script>
   var BASE = '/assets/kota/card-front/';
   var PRESETS = {
-    'ROOMS 圆桌 (split tl)': BASE + 'split/ROOMS-tl.png',
-    'ROOMS providers (split br)': BASE + 'split/ROOMS-br.png',
-    'CHAT': BASE + 'CHAT.png',
-    'AGENTS': BASE + 'AGENTS.png',
-    'CLI': BASE + 'CLI.png',
-    'ROOMS (single)': BASE + 'ROOMS.png'
+    'BBS (single)': BASE + 'single/BBS.png',
+    'SKILLS (single)': BASE + 'single/SKILLS.png',
+    'HISTORY (single)': BASE + 'single/HISTORY.png',
+    'SHELL (single)': BASE + 'single/SHELL.png',
+    'DIFF (single)': BASE + 'single/DIFF.png',
+    'CANVAS (single)': BASE + 'single/CANVAS.png',
+    'TIMED (single)': BASE + 'single/TIMED.png',
+    'DREAMS (single)': BASE + 'single/DREAMS.png',
+    'ROOMS (split tl)': BASE + 'split/ROOMS-tl.png',
+    'ROOMS (split br)': BASE + 'split/ROOMS-br.png'
   };
   var state = {
-    mode: 'split', diag: 'tlbr-out', tag: 'ROOMS',
-    A: { img: BASE + 'split/ROOMS-tl.png', scale: 150, posX: 50, posY: 50 },
+    mode: 'single', diag: 'tlbr-out', tag: 'BBS',
+    A: { img: BASE + 'single/BBS.png', scale: 140, posX: 0, posY: 7 },
     B: { img: BASE + 'split/ROOMS-br.png', scale: 150, posX: 50, posY: 50 },
     D: { width: 4, color: '#14100c' }
   };
