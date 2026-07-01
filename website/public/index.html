@@ -916,11 +916,13 @@ class Component extends DCLogic {
     const wnTitle = (wn && wn.title) ? wn.title : 'first public release';
     const icon = (slug) => `https://api.iconify.design/simple-icons/${slug}.svg?color=%23e9e1d0`;
     const iconStyle = (slug) => ({ width: '16px', height: '16px', backgroundImage: `url(${icon(slug)})`, backgroundSize: 'contain', backgroundRepeat: 'no-repeat', backgroundPosition: 'center' });
+    const iconLocal = (path) => ({ width: '16px', height: '16px', backgroundImage: `url(${path})`, backgroundSize: 'contain', backgroundRepeat: 'no-repeat', backgroundPosition: 'center' });
     const clis = [
       { name: 'Claude Code', iconStyle: iconStyle('claude') },
       { name: 'Codex', iconStyle: iconStyle('openai') },
       { name: 'Gemini', iconStyle: iconStyle('googlegemini') },
       { name: 'OpenCode', iconStyle: iconStyle('opencode') },
+      { name: 'Pi', iconStyle: iconLocal('/assets/kota/icons/pi.svg') },
       { name: 'GitHub', iconStyle: iconStyle('github') },
     ];
     const footerCols = [
