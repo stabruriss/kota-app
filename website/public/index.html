@@ -262,15 +262,15 @@ class Component extends DCLogic {
     window.addEventListener('scroll', this._onScroll, { passive: true });
     this._onScroll();
 
-    fetch('/whats-new.json', { cache: 'no-cache' })
+    fetch('/whats-new.json?_=' + Date.now(), { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .catch(() => fetch('whats-new.json', { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null)))
+      .catch(() => fetch('whats-new.json?_=' + Date.now(), { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)))
       .then((d) => { if (d) { this.setState({ whatsNew: d }); setTimeout(() => this._initScramble(), 90); } })
       .catch(() => {});
 
-    fetch('/version.json', { cache: 'no-cache' })
+    fetch('/version.json?_=' + Date.now(), { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .catch(() => fetch('version.json', { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null)))
+      .catch(() => fetch('version.json?_=' + Date.now(), { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)))
       .then((d) => {
         if (!d || !Array.isArray(d.artifacts)) return;
         const a = d.artifacts.find((x) => x && x.platform === 'macos' && x.arch === 'arm64' && x.download_url);
@@ -911,7 +911,7 @@ class Component extends DCLogic {
       'Local-first workspace data and a checkable update flow via version.json.',
     ];
     const fmtDate = (iso) => { try { return new Date(iso + 'T00:00:00Z').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }); } catch (e) { return iso; } };
-    const wnVersion = (wn && wn.version) ? wn.version : '0.1.1';
+    const wnVersion = (wn && wn.version) ? wn.version : '0.1';
     const wnDate = (wn && wn.date) ? fmtDate(wn.date) : 'June 25, 2026';
     const wnTitle = (wn && wn.title) ? wn.title : 'first public release';
     const icon = (slug) => `https://api.iconify.design/simple-icons/${slug}.svg?color=%23e9e1d0`;
