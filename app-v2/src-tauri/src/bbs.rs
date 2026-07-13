@@ -1087,8 +1087,8 @@ mod tests {
             "Kota App"
         );
         assert_eq!(
-            display_project_name_with_fallback("stabruriss-one-alpha-docs", None),
-            "One Alpha Docs"
+            display_project_name_with_fallback("example-cedar-lantern", None),
+            "Cedar Lantern"
         );
         assert_eq!(
             display_project_name_with_fallback("stabruriss-kota-app", Some("kota-app")),
