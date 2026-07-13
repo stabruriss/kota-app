@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# TypeScript build cache
+*.tsbuildinfo
+
+src-tauri/target/
+src-tauri/bin/
+src-tauri/gen/schemas/
+
+# Vitest coverage output
+coverage/

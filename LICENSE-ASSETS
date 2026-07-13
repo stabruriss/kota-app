@@ -18,9 +18,17 @@ unless a specific file or notice says otherwise:
   Man, BBS, and Puppeteer;
 - official website, release, and marketing assets.
 
-You may not copy, redistribute, modify, or use these reserved assets in a way
-that suggests official status, endorsement, sponsorship, or affiliation without
-permission from Nan Wu.
+## Repository Use Permission
+
+You may clone or fork this repository and build, run, test, and modify the
+reserved assets as part of using, evaluating, or developing this repository or
+a fork of it.
+
+This permission does not allow distributing the reserved assets separately
+from the repository. It also does not allow using the reserved assets, modified
+versions, or derivative branding to present an unofficial product, service, or
+fork as an official Kota release, or to suggest official status, endorsement,
+sponsorship, or affiliation without permission from Nan Wu.
 
 ## Source Code
 

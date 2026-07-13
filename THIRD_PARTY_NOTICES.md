@@ -40,6 +40,20 @@ The Kota app bundle includes these default account skills:
 Source distributions include upstream license or notice files shipped inside
 bundled defaults where applicable.
 
+## Tavern SVG Icons
+
+Kota includes seven Tavern SVG icons:
+
+- `app-v2/src/assets/tavern/icons/commends.svg`
+- `app-v2/src/assets/tavern/icons/ghost.svg`
+- `app-v2/src/assets/tavern/icons/incarnation.svg`
+- `app-v2/src/assets/tavern/icons/shell.svg`
+- `app-v2/src/assets/tavern/icons/skills.svg`
+- `app-v2/src/assets/tavern/icons/token.svg`
+- `app-v2/src/assets/tavern/icons/turns.svg`
+
+SVG Repo License — https://www.svgrepo.com/page/licensing/
+
 ## Fonts
 
 Kota includes self-hosted font files under:

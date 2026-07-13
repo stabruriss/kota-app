@@ -1,0 +1,394 @@
+/** useAgentRuntime — M6.A frontend bookkeeping for live agent PTYs.
+ *
+ *  Maintains:
+ *    - `liveAgents`: which agentIds have a running PTY
+ *    - `grids`: per-agent latest GridSnapshot (passed to Stage → TerminalGrid)
+ *    - `recruit(req)`: spawn a CLI in `pty/agent.rs`, subscribe to events
+ *    - `send(agentId, input)`: write to that agent's stdin
+ *    - `dismiss(agentId)`: kill the PTY
+ *
+ *  Per ARCHITECTURE-INVARIANTS:
+ *    I-4 PTY = real terminal, alacritty grid render
+ *    I-5 zero protocol parsing — backend's `GridSnapshot` is the SoT
+ *    I-6 InputBar → write to selected agent's stdin                       */
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  closeAgentPty,
+  onAgentExit,
+  onAgentOutput,
+  onAgentStatus,
+  onAgentWorkState,
+  spawnAgentPty,
+  submitAgentPromptPty,
+  writeAgentPty,
+} from '../pty-client';
+import {
+  linesToGridSnapshot,
+  type AgentSpawnRequest,
+  type AgentStatusEvent,
+  type AgentWorkStateEvent,
+  type GridSnapshot,
+} from '../types/agent-pty';
+import type { AgentId } from '../types/scene';
+
+const AGENT_WORK_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+const AGENT_WORK_PRUNE_INTERVAL_MS = 30 * 1000;
+
+function workEventRemainingMs(timestamp: string | null | undefined): number | null {
+  if (!timestamp) return null;
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) return null;
+  const elapsed = Math.max(0, Date.now() - parsed);
+  return Math.max(0, AGENT_WORK_INACTIVITY_TIMEOUT_MS - elapsed);
+}
+
+function compactPath(path: string): string {
+  const marker = '/.agent-workspaces/';
+  const idx = path.indexOf(marker);
+  if (idx >= 0) return `…${path.slice(idx)}`;
+  return path.length > 82 ? `…${path.slice(-81)}` : path;
+}
+
+function statusPhaseLabel(phase: AgentStatusEvent['phase'] | undefined): string {
+  if (phase === 'spawned') return 'process spawned';
+  if (phase === 'firstBytes') return 'first PTY bytes received';
+  if (phase === 'terminalQuery') return 'terminal query answered';
+  if (phase === 'exited') return 'process exited';
+  return 'launch requested';
+}
+
+/** Synthetic grid shown the moment recruit is fired, replaced as soon
+ *  as the first real snapshot arrives from the PTY reader thread. CC
+ *  cold start can be 1-3 s — without this the seat looks frozen. */
+function spawningPlaceholderGrid(
+  cli: string,
+  progress?: Partial<AgentStatusEvent>,
+): GridSnapshot {
+  const phase = statusPhaseLabel(progress?.phase);
+  const elapsed =
+    typeof progress?.elapsedMs === 'number' ? ` · ${progress.elapsedMs}ms` : '';
+  const lines = [
+    { text: '' },
+    { text: `  · spawning ${cli} …` },
+    { text: '' },
+    { text: `  phase: ${phase}${elapsed}` },
+    progress?.detail ? { text: `  detail: ${progress.detail}` } : null,
+    progress?.resolvedBin ? { text: `  bin: ${compactPath(progress.resolvedBin)}` } : null,
+    progress?.ttyName ? { text: `  tty: ${progress.ttyName}` } : null,
+    progress?.cwd ? { text: `  cwd: ${compactPath(progress.cwd)}` } : null,
+    { text: '  waiting for the first visible terminal frame' },
+  ];
+  return linesToGridSnapshot(lines.filter((line): line is { text: string } => line != null));
+}
+
+interface AgentRuntimeState {
+  liveAgents: Set<AgentId>;
+  grids: Map<AgentId, GridSnapshot>;
+  status: Map<AgentId, AgentStatusEvent>;
+  workState: Map<AgentId, AgentWorkStateEvent>;
+  /** agentIds that have produced at least one snapshot with non-blank
+   *  content. Until then we keep the "spawning…" placeholder visible —
+   *  Codex specifically emits a screen-clear snapshot before the banner
+   *  arrives 3 s later, which would otherwise wipe the placeholder. */
+  seenContent: Set<AgentId>;
+}
+
+export interface AgentRuntime {
+  liveAgents: Set<AgentId>;
+  grids: Map<AgentId, GridSnapshot>;
+  status: Map<AgentId, AgentStatusEvent>;
+  workState: Map<AgentId, AgentWorkStateEvent>;
+  recruit: (req: AgentSpawnRequest) => Promise<void>;
+  send: (agentId: AgentId, input: string) => Promise<void>;
+  submitPrompt: (agentId: AgentId, input: string) => Promise<void>;
+  dismiss: (agentId: AgentId) => Promise<void>;
+}
+
+export function useAgentRuntime(): AgentRuntime {
+  const [state, setState] = useState<AgentRuntimeState>(() => ({
+    liveAgents: new Set(),
+    grids: new Map(),
+    status: new Map(),
+    workState: new Map(),
+    seenContent: new Set(),
+  }));
+
+  // unlisten functions, keyed by agentId, so re-recruiting an agent
+  // tears down the old subscriptions cleanly.
+  const unlistenRefs = useRef<Map<AgentId, Array<() => void | Promise<void>>>>(
+    new Map(),
+  );
+  const workTimeoutRefs = useRef<Map<AgentId, number>>(new Map());
+
+  const clearWorkTimer = useCallback((agentId: AgentId) => {
+    const timer = workTimeoutRefs.current.get(agentId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      workTimeoutRefs.current.delete(agentId);
+    }
+  }, []);
+
+  const scheduleWorkTimeout = useCallback((agentId: AgentId, lastActivityAt?: string | null) => {
+    clearWorkTimer(agentId);
+    const remainingMs = workEventRemainingMs(lastActivityAt);
+    const timer = window.setTimeout(() => {
+      workTimeoutRefs.current.delete(agentId);
+      setState((s) => {
+        if (!s.workState.has(agentId)) return s;
+        const workState = new Map(s.workState);
+        workState.delete(agentId);
+        return { ...s, workState };
+      });
+    }, remainingMs ?? AGENT_WORK_INACTIVITY_TIMEOUT_MS);
+    workTimeoutRefs.current.set(agentId, timer);
+  }, [clearWorkTimer]);
+
+  const pruneExpiredWorkStates = useCallback(() => {
+    setState((s) => {
+      let changed = false;
+      const workState = new Map(s.workState);
+      for (const [agentId, evt] of workState) {
+        const remainingMs = workEventRemainingMs(evt.lastActivityAt ?? evt.timestamp);
+        if (remainingMs !== 0) continue;
+        workState.delete(agentId);
+        clearWorkTimer(agentId);
+        changed = true;
+      }
+      return changed ? { ...s, workState } : s;
+    });
+  }, [clearWorkTimer]);
+
+  const applyWorkEvent = useCallback((evt: AgentWorkStateEvent) => {
+    const agentId = evt.agentId as AgentId;
+    setState((s) => {
+      if (!s.liveAgents.has(agentId)) return s;
+
+      const existing = s.workState.get(agentId);
+      const timestamp = evt.timestamp || new Date().toISOString();
+      const existingTime = existing?.lastActivityAt ?? existing?.timestamp;
+      const eventTime = timestamp;
+      const eventParsed = Date.parse(eventTime);
+      const eventOlderThanExisting =
+        !!existingTime &&
+        Number.isFinite(eventParsed) &&
+        Date.parse(eventTime) < Date.parse(existingTime) - 1000;
+      if (eventOlderThanExisting) {
+        return s;
+      }
+
+      const isTerminalState =
+        evt.state === 'idle' || evt.state === 'failed' || evt.state === 'interrupted';
+      const remainingMs = workEventRemainingMs(timestamp);
+      if (!isTerminalState && remainingMs === 0) {
+        if (!existing) return s;
+        const workState = new Map(s.workState);
+        workState.delete(agentId);
+        clearWorkTimer(agentId);
+        return { ...s, workState };
+      }
+
+      if (
+        existing &&
+        existing.state === evt.state &&
+        existing.timestamp === evt.timestamp &&
+        existing.sessionId === evt.sessionId &&
+        existing.nativeEventId === evt.nativeEventId &&
+        existing.turnId === evt.turnId
+      ) {
+        return s;
+      }
+
+      const workState = new Map(s.workState);
+      if (isTerminalState) {
+        workState.delete(agentId);
+        clearWorkTimer(agentId);
+        return { ...s, workState };
+      }
+
+      const resetStartedAt =
+        !existing ||
+        (evt.sessionId && evt.sessionId !== existing.sessionId) ||
+        (evt.turnId && evt.turnId !== existing.turnId) ||
+        evt.reason === 'prompt-submitted';
+      workState.set(agentId, {
+        ...evt,
+        agentId,
+        timestamp,
+        startedAt: resetStartedAt
+          ? timestamp
+          : (existing.startedAt ?? existing.timestamp ?? timestamp),
+        lastActivityAt: timestamp,
+      });
+      scheduleWorkTimeout(agentId, timestamp);
+      return { ...s, workState };
+    });
+  }, [clearWorkTimer, scheduleWorkTimeout]);
+
+  useEffect(() => {
+    pruneExpiredWorkStates();
+    const timer = window.setInterval(pruneExpiredWorkStates, AGENT_WORK_PRUNE_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [pruneExpiredWorkStates]);
+
+  // On unmount, drop all subscriptions.
+  useEffect(() => {
+    return () => {
+      for (const [, fns] of unlistenRefs.current) {
+        for (const fn of fns) Promise.resolve(fn()).catch(() => {});
+      }
+      unlistenRefs.current.clear();
+      for (const [, timer] of workTimeoutRefs.current) window.clearTimeout(timer);
+      workTimeoutRefs.current.clear();
+    };
+  }, [applyWorkEvent, clearWorkTimer]);
+
+  const recruit = useCallback(async (req: AgentSpawnRequest) => {
+    const agentId = req.agentId as AgentId;
+
+    // Tear down any prior subscriptions for this agentId.
+    const prior = unlistenRefs.current.get(agentId);
+    if (prior) {
+      for (const fn of prior) Promise.resolve(fn()).catch(() => {});
+      unlistenRefs.current.delete(agentId);
+    }
+
+    // Reset accumulated state + show "spawning {cli}…" placeholder so
+    // the seat doesn't look stuck during the 1-3 s CC/Codex cold start.
+    setState((s) => {
+      const live = new Set(s.liveAgents);
+      const grids = new Map(s.grids);
+      const st = new Map(s.status);
+      const workState = new Map(s.workState);
+      const seen = new Set(s.seenContent);
+      grids.set(
+        agentId,
+        spawningPlaceholderGrid(req.cli, {
+          cwd: req.cwd,
+          detail: 'output/status/exit listeners armed',
+        }),
+      );
+      live.add(agentId);
+      st.delete(agentId);
+      workState.delete(agentId);
+      clearWorkTimer(agentId);
+      seen.delete(agentId);
+      return { liveAgents: live, grids, status: st, workState, seenContent: seen };
+    });
+
+    // ── Subscribe BEFORE spawn ──
+    // Tauri's `emit` is fire-and-forget — listeners must be in place
+    // before the reader thread first emits, or the welcome banner is
+    // lost. Spawn returns the AgentRoute synchronously, so we set up
+    // listeners against the predictable topic names first, then spawn.
+    const offOutput = await onAgentOutput(req.agentId, (evt) => {
+      const snap = evt.snapshot;
+      // Cheap existence check (short-circuits) — only used to suppress
+      // blank snapshots until we've seen real content.
+      const hasContent = snap.cells.some((c) => c.ch !== ' ' && c.ch !== '');
+      setState((s) => {
+        // Suppress blank snapshots until we've seen real content. Codex
+        // emits ~3 s of clear-screen escapes before its banner; without
+        // this the placeholder gets wiped to blackness immediately.
+        if (!s.seenContent.has(agentId) && !hasContent) {
+          return s;
+        }
+        const grids = new Map(s.grids);
+        const seen = new Set(s.seenContent);
+        if (hasContent) seen.add(agentId);
+        grids.set(agentId, snap);
+        return { ...s, grids, seenContent: seen };
+      });
+    });
+    const offStatus = await onAgentStatus(req.agentId, (evt) => {
+      console.log(`[agent:${agentId}] status evt`, evt);
+      setState((s) => {
+        const st = new Map(s.status);
+        const grids = new Map(s.grids);
+        st.set(agentId, evt);
+        if (!s.seenContent.has(agentId)) {
+          grids.set(agentId, spawningPlaceholderGrid(evt.cli, evt));
+        }
+        return { ...s, grids, status: st };
+      });
+    });
+    const offExit = await onAgentExit(req.agentId, (evt) => {
+      console.warn(`[agent:${agentId}] exit evt`, evt);
+      setState((s) => {
+        const live = new Set(s.liveAgents);
+        const workState = new Map(s.workState);
+        live.delete(agentId);
+        workState.delete(agentId);
+        clearWorkTimer(agentId);
+        return { ...s, liveAgents: live, workState };
+      });
+    });
+    const offWork = await onAgentWorkState(req.agentId, applyWorkEvent);
+
+    unlistenRefs.current.set(agentId, [offOutput, offStatus, offExit, offWork]);
+
+    // Backend kills any existing PTY for this agent_id and starts fresh.
+    console.log(`[agent:${agentId}] calling pty_agent_spawn…`);
+    try {
+      await spawnAgentPty(req);
+    } catch (err) {
+      const fns = unlistenRefs.current.get(agentId);
+      if (fns) {
+        for (const fn of fns) Promise.resolve(fn()).catch(() => {});
+        unlistenRefs.current.delete(agentId);
+      }
+      setState((s) => {
+        const live = new Set(s.liveAgents);
+        const grids = new Map(s.grids);
+        const st = new Map(s.status);
+        const workState = new Map(s.workState);
+        const seen = new Set(s.seenContent);
+        live.delete(agentId);
+        grids.delete(agentId);
+        st.delete(agentId);
+        workState.delete(agentId);
+        seen.delete(agentId);
+        clearWorkTimer(agentId);
+        return { liveAgents: live, grids, status: st, workState, seenContent: seen };
+      });
+      throw err;
+    }
+    console.log(`[agent:${agentId}] pty_agent_spawn returned`);
+  }, []);
+
+  const send = useCallback(async (agentId: AgentId, input: string) => {
+    await writeAgentPty(agentId, input);
+  }, []);
+
+  const submitPrompt = useCallback(async (agentId: AgentId, input: string) => {
+    await submitAgentPromptPty(agentId, input);
+  }, []);
+
+  const dismiss = useCallback(async (agentId: AgentId) => {
+    await closeAgentPty(agentId);
+    const fns = unlistenRefs.current.get(agentId);
+    if (fns) {
+      for (const fn of fns) Promise.resolve(fn()).catch(() => {});
+      unlistenRefs.current.delete(agentId);
+    }
+    setState((s) => {
+      const live = new Set(s.liveAgents);
+      const workState = new Map(s.workState);
+      live.delete(agentId);
+      workState.delete(agentId);
+      clearWorkTimer(agentId);
+      return { ...s, liveAgents: live, workState };
+    });
+  }, [clearWorkTimer]);
+
+  return {
+    liveAgents: state.liveAgents,
+    grids: state.grids,
+    status: state.status,
+    workState: state.workState,
+    recruit,
+    send,
+    submitPrompt,
+    dismiss,
+  };
+}

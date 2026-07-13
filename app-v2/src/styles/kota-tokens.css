@@ -1,0 +1,416 @@
+/* ═══════════════════════════════════════════════════════════════
+   Kota Design System — colors_and_type.css
+   "A greenhouse growing in the ruins"
+   Quiet graphite room · crafted functional desktop
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Title easter-egg fonts (CDN — CSP is open, see tauri.conf.json).
+   Falls back gracefully to local Cinzel/Cormorant if CDN unreachable. */
+@import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700;900&family=Uncial+Antiqua&family=Great+Vibes&family=Marcellus&family=Noto+Serif+TC:wght@400;500;600;700&display=swap');
+
+/* ── FONTS ── */
+@font-face {
+  font-family: 'Cinzel';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/kota-design/fonts/cinzel-regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cinzel';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/kota-design/fonts/cinzel-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cinzel';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/kota-design/fonts/cinzel-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cinzel';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/kota-design/fonts/cinzel-700.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cinzel';
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  src: url('/kota-design/fonts/cinzel-900.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Cormorant Garamond';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/kota-design/fonts/cormorant-regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cormorant Garamond';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/kota-design/fonts/cormorant-italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cormorant Garamond';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/kota-design/fonts/cormorant-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cormorant Garamond';
+  font-style: italic;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/kota-design/fonts/cormorant-500italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cormorant Garamond';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/kota-design/fonts/cormorant-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cormorant Garamond';
+  font-style: italic;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/kota-design/fonts/cormorant-600italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cormorant Garamond';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/kota-design/fonts/cormorant-700.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Cormorant Garamond';
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/kota-design/fonts/cormorant-700italic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Nunito';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/kota-design/fonts/nunito-regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Nunito';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/kota-design/fonts/nunito-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Nunito';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/kota-design/fonts/nunito-600.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Nunito';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/kota-design/fonts/nunito-700.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/kota-design/fonts/jetbrains-mono-regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/kota-design/fonts/jetbrains-mono-500.woff2') format('woff2');
+}
+
+/* ─────────────────────────────────────────────────────
+   TOKENS
+   ───────────────────────────────────────────────────── */
+:root {
+  /* ── Font families ── */
+  --font-display: 'Cinzel', 'Playfair Display', Georgia, serif;
+  --font-serif:   'Cormorant Garamond', 'Libre Baskerville', Georgia, serif;
+  --font-sans:    'Nunito', 'DM Sans', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  /* ── Base surfaces — neutral graphite, never pure black ── */
+  --bg-base:       #111213;   /* outermost graphite */
+  --bg-panel:      #191A1C;   /* panels, sidebars */
+  --bg-surface:    #222326;   /* inset card surfaces */
+  --bg-elevated:   #2B2C2F;   /* hovered surface */
+  --bg-deep:       #0C0D0E;   /* deepest (center canvas / terminal edge) */
+  --bg-ink:        #08090A;   /* terminal / code block */
+  --bg-ivory:      #E7E2D7;   /* light material callouts, rare */
+
+  /* ── Muted metal family (primary accent) ── */
+  --brass:         #8E897F;
+  --brass-hi:      #AAA397;
+  --brass-bright:  #C5BBAA;
+  --brass-lo:      #625F59;
+  --brass-deep:    #46433F;
+
+  /* ── Copper-green (nature / success / agent status) ── */
+  --copper:        #647A6D;
+  --copper-hi:     #84A091;
+  --moss:          #778773;
+
+  /* ── Terracotta (fire / warm accents / notifications) ── */
+  --terra:         #9D735F;
+  --terra-hi:      #BA8A73;
+
+  /* ── Sky (user messages / cool contrast) ── */
+  --sky:           #6E8290;
+  --sky-hi:        #93A8B5;
+
+  /* ── Mist (subtle / lavender / secondary info) ── */
+  --mist:          #827D91;
+  --mist-hi:       #9D98AD;
+
+  /* ── Wildflower accents (agent personality colors) ── */
+  --poppy:         #A35E5E;  /* destructive / error ONLY */
+  --cornflower:    #687A9C;
+  --buttercup:     #A99A62;
+  --lavender:      #7D7198;
+  --dandelion:     #A77F5D;
+
+  /* ── Text (ivory/cream on dark) ── */
+  --text:          #E5E1D8;  /* primary */
+  --text-2:        #B2AEA6;  /* secondary */
+  --text-3:        #817D77;  /* tertiary / muted */
+  --text-4:        #5B5854;  /* disabled / faint */
+  --text-on-ivory: #1D1D1F;  /* dark text on light surfaces (rare) */
+  --ink-serif:     #252422;  /* serif body on light material */
+
+  /* ── Borders ── */
+  --border:        rgba(218, 214, 204, 0.15);
+  --border-hi:     rgba(218, 214, 204, 0.32);
+  --border-strong: rgba(218, 214, 204, 0.52);
+  --border-edge:   rgba(255, 255, 255, 0.05);
+
+  /* ── Glows ── */
+  --glow-warm:     rgba(197, 187, 170, 0.10);
+  --glow-fire:     rgba(186, 138, 115, 0.12);
+  --glow-copper:   rgba(132, 160, 145, 0.12);
+  --glow-sky:      rgba(147, 168, 181, 0.12);
+
+  /* ── Shadows ── */
+  --shadow-xs:     0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-sm:     0 2px 8px rgba(0, 0, 0, 0.26);
+  --shadow-md:     0 4px 18px rgba(0, 0, 0, 0.32);
+  --shadow-lg:     0 18px 48px rgba(0, 0, 0, 0.46);
+  --shadow-inset:  inset 0 1px rgba(255, 255, 255, 0.04);
+  --shadow-glow:   0 0 18px var(--glow-warm);
+
+  /* ── Radii — everything rounded, never sharp ── */
+  --r-xs:  4px;
+  --r-sm:  6px;
+  --r-md:  8px;
+  --r-lg:  12px;
+  --r-xl:  16px;
+  --r-2xl: 20px;
+  --r-pill: 999px;
+  --r-circle: 50%;
+
+  /* ── Spacing (4pt base, warm rhythm) ── */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  --s-12: 48px;
+  --s-16: 64px;
+
+  /* ── Motion — spring-like, mechanical warmth ── */
+  --ease-out:       cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-spring:    cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-in-out:    cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast:       150ms;
+  --dur-base:       220ms;
+  --dur-slow:       320ms;
+  --dur-bloom:      520ms;
+
+  /* ── Typography scale (T-shirt) ── */
+  --fs-xxs: 10px;   /* brass labels, overline */
+  --fs-xs:  11px;
+  --fs-sm:  12px;   /* UI body */
+  --fs-md:  13px;
+  --fs-lg:  15px;
+  --fs-xl:  17px;
+  --fs-2xl: 22px;   /* subhead */
+  --fs-3xl: 30px;   /* panel title */
+  --fs-4xl: 44px;   /* display */
+  --fs-5xl: 64px;   /* hero */
+
+  /* ── Semantic hooks (the big three) ── */
+  --fg:      var(--text);
+  --fg-2:    var(--text-2);
+  --fg-3:    var(--text-3);
+  --bg:      var(--bg-base);
+  --surface: var(--bg-panel);
+  --accent:  var(--brass-hi);
+  --success: var(--copper-hi);
+  --warning: var(--terra-hi);
+  --danger:  var(--poppy);
+  --info:    var(--sky);
+}
+
+/* ─────────────────────────────────────────────────────
+   SEMANTIC ELEMENT STYLES
+   Drop this stylesheet onto a page and headings, body,
+   code, etc. immediately feel like Kota.
+   ───────────────────────────────────────────────────── */
+
+html, body {
+  background: var(--bg-base);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, .h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--fs-4xl);
+  letter-spacing: 0.08em;
+  line-height: 1.15;
+  color: var(--brass-bright);
+  text-shadow: 0 0 24px rgba(197,187,170,0.10);
+}
+
+h2, .h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-3xl);
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  color: var(--brass-hi);
+}
+
+h3, .h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  font-style: italic;
+  font-size: var(--fs-2xl);
+  line-height: 1.3;
+  color: var(--text);
+}
+
+h4, .h4 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--brass);
+}
+
+h5, .h5 {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+
+p, .p {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: var(--fs-sm);
+  line-height: 1.65;
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+
+.lead {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: var(--fs-xl);
+  line-height: 1.5;
+  color: var(--text);
+}
+
+small, .small {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.eyebrow {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--brass);
+}
+
+code, .code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+  background: rgba(0,0,0,0.22);
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--border);
+}
+
+pre {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text);
+  background: var(--bg-ink);
+  padding: var(--s-4);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+}
+
+a {
+  color: var(--sky-hi);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--sky);
+  transition: color var(--dur-fast) var(--ease-out);
+}
+a:hover { color: var(--brass-bright); border-bottom-color: var(--brass); }
+
+hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border-hi), transparent);
+  margin: var(--s-6) 0;
+}
+
+::selection { background: rgba(197,187,170,0.28); color: var(--text); }
+
+/* Scrollbars — brass leather strap */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(218,214,204,0.16); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(218,214,204,0.32); }

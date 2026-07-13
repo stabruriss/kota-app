@@ -1,0 +1,1 @@
+Resolve the conflict between GitHub upstream changes and the local room version. Inspect the competing changes, update only the files needed for your assigned task, commit the fix in your worktree, and do not edit the source worktree directly.

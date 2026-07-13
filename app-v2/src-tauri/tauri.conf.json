@@ -1,0 +1,50 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicholasxjy/tauri-v2-schema/main/schema.json",
+  "productName": "Kota",
+  "mainBinaryName": "kota-v2",
+  "version": "0.1.7",
+  "identifier": "com.kota.v2",
+  "build": {
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist",
+    "beforeDevCommand": "npm run build:sidecars:dev && npm run dev",
+    "beforeBuildCommand": "npm run build && npm run build:sidecars"
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "externalBin": ["bin/kota-bbs", "bin/kota-agent-bus", "bin/kota-bartender", "bin/kota-ember"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "Kota",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "decorations": true,
+        "resizable": true,
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 14, "y": 18 }
+      }
+    ],
+    "security": {
+      "csp": null,
+      "dangerousDisableAssetCspModification": true
+    }
+  }
+}
