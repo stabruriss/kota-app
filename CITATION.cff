@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use Kota, please cite it as below."
+message: "If you use Kota, please cite it as below. For version-specific citation, use the tagged release at https://github.com/stabruriss/kota-app/releases/latest."
 title: "Kota"
 authors:
   - family-names: "Wu"
@@ -7,5 +7,3 @@ authors:
 url: "https://kota.place"
 repository-code: "https://github.com/stabruriss/kota-app"
 license: "Apache-2.0"
-version: "0.1.1"
-date-released: "2026-06-25"

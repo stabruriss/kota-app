@@ -6,7 +6,8 @@ project-scoped rooms.
 This public repository is the release home for Kota source, downloads, public
 documentation, legal notices, citation metadata, and the `kota.place` website.
 
-Current public release: 0.1.1, released 2026-06-25.
+The latest public release is available from the
+[latest GitHub Release](https://github.com/stabruriss/kota-app/releases/latest).
 
 ## What Lives Here
 
