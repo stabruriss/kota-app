@@ -6,6 +6,30 @@
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
       ]
+    },
+    {
+      "source": "/docs/manifest.json",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/docs/research/:slug/:version/:path*",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    }
+  ],
+  "redirects": [
+    {
+      "source": "/docs/research/long-term-teammates",
+      "destination": "/docs/research/long-term-teammates/v1/",
+      "permanent": false
+    },
+    {
+      "source": "/docs/research/long-term-teammates/",
+      "destination": "/docs/research/long-term-teammates/v1/",
+      "permanent": false
     }
   ]
 }

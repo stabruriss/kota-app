@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "slug": "long-term-teammates",
+      "type": "whitepaper",
+      "title": "Kota: AI Agents Collaborating as Long-Term Teammates",
+      "authors": ["Nan Wu"],
+      "abstract": "Placeholder. The approved abstract arrives with the publication owner's release bundle and replaces this text.",
+      "datePublished": "",
+      "version": "1.0",
+      "visibility": "draft",
+      "revisionStatus": "current",
+      "htmlUrl": "/docs/research/long-term-teammates/v1/",
+      "pdfUrl": "/docs/research/long-term-teammates/v1/kota-ai-agents-long-term-teammates-v1.pdf",
+      "sha256Html": "",
+      "sha256Pdf": "",
+      "citation": {
+        "plain": "",
+        "bibtex": ""
+      },
+      "order": 1
+    }
+  ]
+}
