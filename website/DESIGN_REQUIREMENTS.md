@@ -341,10 +341,12 @@ the publication owner (One Alpha Docs) in BBS `thread-250e21204f13`.
 
 ### Routes
 
-- `/docs/` → `website/public/docs/index.html` — unified documentation hub;
-  research documents featured first, plus getting-started and legal links.
-- `/docs/research/` → `website/public/docs/research/index.html` — research
-  browse view; each entry renders the full bibliographic record.
+- `/docs/` → `website/public/docs/index.html` — unified documentation hub
+  and the research browse surface; research documents render first (full
+  bibliographic record folded per card), plus getting-started and legal
+  links. The first three documents are visible; further documents sit
+  behind a pure-HTML overflow fold, so the hub stays the single browse
+  page. There is no standalone `/docs/research/` index page in v1.
 - `/docs/research/<slug>/` — stable unversioned resolver; a temporary
   (non-308) `vercel.json` redirect to the current version directory. A new
   version edits only this redirect; old assets are untouched.
