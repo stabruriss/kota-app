@@ -346,7 +346,10 @@ the publication owner (One Alpha Docs) in BBS `thread-250e21204f13`.
   bibliographic record folded per card), plus getting-started and legal
   links. The first three documents are visible; further documents sit
   behind a pure-HTML overflow fold, so the hub stays the single browse
-  page. There is no standalone `/docs/research/` index page in v1.
+  page. There is no standalone `/docs/research/` index page in v1. Card
+  actions: `Read` (primary) plus a quiet secondary `PDF` link when the
+  record has a `pdfUrl` (owner decision; supersedes the earlier
+  Read-only-card rule).
 - `/docs/research/<slug>/` — stable unversioned resolver; a temporary
   (non-308) `vercel.json` redirect to the current version directory. A new
   version edits only this redirect; old assets are untouched.

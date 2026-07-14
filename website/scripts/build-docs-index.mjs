@@ -141,6 +141,8 @@ function recordDetails(doc) {
 function card(doc) {
   const href = doc.htmlUrl || doc.externalCanonicalUrl;
   const year = doc.datePublished ? ` <span>· ${esc(doc.datePublished.slice(0, 4))}</span>` : '';
+  const pdf = doc.pdfUrl ? `<a class="pdf" href="${esc(doc.pdfUrl)}">PDF&nbsp;↓</a>
+          ` : '';
   return `<article class="doc-card">
         <div class="chips">
           ${chipRow(doc)}
@@ -150,7 +152,7 @@ function card(doc) {
         <p class="abstract">${esc(doc.abstract)}</p>
         ${recordDetails(doc)}
         <div class="doc-foot">
-          <a class="read" href="${esc(href)}">Read&nbsp;→</a>
+          ${pdf}<a class="read" href="${esc(href)}">Read&nbsp;→</a>
         </div>
       </article>`;
 }
@@ -254,9 +256,11 @@ const page = `<!DOCTYPE html>
   .rec-body pre{ margin:0; padding:12px 14px; background:#0f0d0b; border:1px solid rgba(255,255,255,0.06); border-radius:9px; font-family:'JetBrains Mono',monospace; font-size:11.5px; line-height:1.6; color:#cfc8bd; white-space:pre-wrap; overflow-wrap:anywhere; }
   .rec-body pre i{ color:#6f6960; font-style:italic; }
 
-  .doc-foot{ margin-top:18px; display:flex; justify-content:flex-end; }
+  .doc-foot{ margin-top:18px; display:flex; justify-content:flex-end; align-items:center; gap:10px; }
   .read{ display:inline-flex; align-items:center; gap:8px; font-weight:600; font-size:13.5px; letter-spacing:0.02em; color:#ece1c8; border:1px solid rgba(227,212,182,0.42); border-radius:999px; padding:9px 18px; transition:background 0.15s ease, color 0.15s ease; }
   .read:hover{ background:#e3d4b6; color:#16110e; }
+  .pdf{ display:inline-flex; align-items:center; font-weight:600; font-size:13px; letter-spacing:0.02em; color:#8a847a; border:1px solid rgba(255,255,255,0.10); border-radius:999px; padding:9px 15px; transition:color 0.15s ease, border-color 0.15s ease; }
+  .pdf:hover{ color:#ece1c8; border-color:rgba(227,212,182,0.42); }
 
   details.more{ border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:transparent; }
   details.more > summary{ list-style:none; cursor:pointer; padding:13px 18px; text-align:center; font-family:'JetBrains Mono',monospace; font-weight:600; font-size:10.5px; letter-spacing:0.2em; color:#a99a76; }
