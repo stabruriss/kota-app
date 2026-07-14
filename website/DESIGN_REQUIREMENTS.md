@@ -55,8 +55,11 @@ The website must expose:
 - `/` for the main download and feature overview page;
 - `/download` for the current macOS Apple Silicon download surface;
 - `/whats-new` for release notes;
-- `/docs` for public documentation;
-- `/research` for papers, whitepapers, citation, and long-form material;
+- `/docs/` for the unified documentation hub (getting started, guides,
+  research);
+- `/docs/research/` for papers, whitepapers, citation, and long-form material
+  (unified under the `/docs/` hub; supersedes the earlier separate top-level
+  `/research` route — BBS `thread-250e21204f13`);
 - `/feedback` for the public wishing wall;
 - `/legal` for license, notices, trademark, assets, security, privacy, and
   citation links;
@@ -330,6 +333,91 @@ allows future platforms without a schema change.
 - Canonical release notes are the GitHub Release body; the website renders only
   the summary and highlights.
 - `app-v2/` source sync is a separate track from release-metadata updates.
+
+## Document Library Contract
+
+The `/docs/` surface is an extensible document library. Contract agreed with
+the publication owner (One Alpha Docs) in BBS `thread-250e21204f13`.
+
+### Routes
+
+- `/docs/` → `website/public/docs/index.html` — unified documentation hub;
+  research documents featured first, plus getting-started and legal links.
+- `/docs/research/` → `website/public/docs/research/index.html` — research
+  browse view; each entry renders the full bibliographic record.
+- `/docs/research/<slug>/` — stable unversioned resolver; a temporary
+  (non-308) `vercel.json` redirect to the current version directory. A new
+  version edits only this redirect; old assets are untouched.
+- `/docs/research/<slug>/<version>/` — immutable versioned document. The
+  publication owner's self-contained HTML is served byte-verbatim as its own
+  page; the site never rewrites or injects into it.
+- `/docs/research/<slug>/<version>/<pdf-filename>` — immutable same-version
+  PDF in the same directory (Google Scholar `citation_pdf_url` target).
+
+First document (identifiers confirmed by the publication owner):
+
+- slug `long-term-teammates`, version directory `v1` (document version
+  `1.0`);
+- PDF filename `kota-ai-agents-long-term-teammates-v1.pdf`.
+
+### `docs/manifest.json` fields
+
+`website/public/docs/manifest.json` is the single machine-readable record of
+library items. Per document:
+
+- `slug` (string): stable; never regenerated from a title change.
+- `type` (string): `whitepaper`, `paper`, `technical-report`, etc.
+- `title` (string), `authors[]` (string array), `abstract` (string).
+- `datePublished` (string): `YYYY-MM-DD`; empty until release.
+- `version` (string): document version, e.g. `"1.0"`.
+- `visibility` (string): `draft` | `published`.
+- `revisionStatus` (string): `current` | `superseded`.
+- `htmlUrl` (string), `pdfUrl` (string, optional).
+- `sha256Html` / `sha256Pdf` (string): release checksums; empty until release.
+- `citation.plain` / `citation.bibtex` (string): supplied with the release.
+- `order` (number): index ordering; lower renders first.
+
+Optional future fields: `externalCanonicalUrl`, `role`
+(`canonical` / `preprint` / `author-copy`), `versionHistory[]`.
+
+### Rendering rule
+
+Hub and browse pages are generated from the manifest at commit time
+(`website/scripts/build-docs-index.mjs`) and committed as static HTML. Google
+Scholar requires plain crawlable `<a href>` links from browse pages;
+client-side fetch-and-render is JS-only discovery and is not acceptable for
+research listings. Nothing document-specific is hard-coded in page structure;
+adding a document = add a manifest record, rerun the generator, commit.
+
+Two detail modes:
+
+1. full self-contained HTML — the delivered artifact is the page;
+2. abstract-only landing generated from the record (future venue papers),
+   emitting `citation_*` meta and external canonical/PDF links.
+
+### Publication handoff split
+
+The website serves the delivered HTML byte-verbatim, so the artifact itself
+must contain: Highwire `citation_*` meta tags (including an absolute
+same-directory `citation_pdf_url`), the visible `Download PDF` action, a
+minimal back-link to `/docs/`, and a self-canonical to its own versioned URL.
+The unversioned slug route is a current-version resolver, not the
+bibliographic canonical.
+
+Intake checks before a release commit: searchable, unencrypted PDF under
+5 MB; `sha256` values match the manifest; versioned paths are new (an
+existing version directory is never overwritten).
+
+### Boundaries
+
+- `visibility: draft` removes a record from rendered pages, but any file
+  deployed under `public/` is URL-reachable. The enforceable gate is that
+  draft artifacts are never committed to main or deployed.
+- Versioned document directories are served with
+  `Cache-Control: public, max-age=31536000, immutable`; `docs/manifest.json`
+  revalidates like the release JSON files.
+- No live deployment of a candidate document without explicit owner release
+  GO.
 
 ## Accessibility And Quality
 
