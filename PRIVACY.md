@@ -51,6 +51,11 @@ Website analytics are not used to collect project files, local workspace data,
 chat history, provider credentials, or coding-agent content from the desktop
 app.
 
+Currently, page analytics on `kota.place` use the hosting provider's
+aggregated, cookieless measurement of page views, referrers, and coarse
+device/browser information. No analytics cookies are set, and no user-level
+profiles are built.
+
 ## Security Reports
 
 Please do not include secrets, API keys, private project data, or vulnerability
