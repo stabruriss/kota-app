@@ -14,7 +14,13 @@
       ]
     },
     {
-      "source": "/docs/research/:slug/:version/:path*",
+      "source": "/docs/research/:slug/:version/",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
+      "source": "/docs/research/:slug/:version/:path+",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
       ]
