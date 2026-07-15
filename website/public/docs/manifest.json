@@ -4,22 +4,35 @@
     {
       "slug": "long-term-teammates",
       "type": "whitepaper",
-      "title": "Kota: AI Agents Collaborating as Long-Term Teammates",
-      "authors": ["Nan Wu"],
-      "abstract": "Placeholder. The approved abstract arrives with the publication owner's release bundle and replaces this text.",
-      "datePublished": "",
+      "title": "Kota: AI Agents Collaborating as Long‑Term Teammates",
+      "authors": [
+        "Nan Wu"
+      ],
+      "abstract": "A design whitepaper on persistent AI teammates, shared project memory, inspectable handoffs, and conflict-safe collaboration.",
+      "datePublished": "2026-07-14",
       "version": "1.0",
-      "visibility": "draft",
+      "visibility": "published",
       "revisionStatus": "current",
       "htmlUrl": "/docs/research/long-term-teammates/v1/",
       "pdfUrl": "/docs/research/long-term-teammates/v1/kota-ai-agents-long-term-teammates-v1.pdf",
-      "sha256Html": "",
-      "sha256Pdf": "",
+      "sha256Html": "8d20b6008180288356f3b9bd755e280169a71e69ea7d505353a767eb38e784d5",
+      "sha256Pdf": "1b340193ea4e58825805df3ca3d8e6d76557497445c911b0b708504d559b96a0",
       "citation": {
-        "plain": "",
-        "bibtex": ""
+        "plain": "Wu, Nan. \"Kota: AI Agents Collaborating as Long‑Term Teammates.\" Kota whitepaper, version 1.0, 2026-07-14. https://www.kota.place/docs/research/long-term-teammates/v1/",
+        "bibtex": "@misc{wu2026kotalongtermteammates,\n  author       = {Wu, Nan},\n  title        = {Kota: AI Agents Collaborating as Long‑Term Teammates},\n  year         = {2026},\n  howpublished = {Kota whitepaper, version 1.0},\n  url          = {https://www.kota.place/docs/research/long-term-teammates/v1/}\n}"
       },
-      "order": 1
+      "order": 1,
+      "role": "canonical",
+      "versionHistory": [
+        {
+          "version": "1.0",
+          "date": "2026-07-14",
+          "sha256Html": "8d20b6008180288356f3b9bd755e280169a71e69ea7d505353a767eb38e784d5",
+          "sha256Pdf": "1b340193ea4e58825805df3ca3d8e6d76557497445c911b0b708504d559b96a0",
+          "change": "Initial release"
+        }
+      ],
+      "rights": "Creative Commons Attribution 4.0 International (CC BY 4.0)"
     }
   ]
 }

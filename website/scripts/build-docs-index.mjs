@@ -98,7 +98,7 @@ function chipRow(doc) {
   ];
   if (doc.revisionStatus === 'superseded') {
     chips.push('<span class="chip">SUPERSEDED</span>');
-  } else if (doc.revisionStatus === 'current' && (doc.versionHistory?.length ?? 0) > 0) {
+  } else if (doc.revisionStatus === 'current' && (doc.versionHistory?.length ?? 0) > 1) {
     chips.push('<span class="chip cur">CURRENT</span>');
   }
   if (doc.visibility === 'draft') {
