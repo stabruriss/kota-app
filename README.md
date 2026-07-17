@@ -54,6 +54,10 @@ product feedback.
 Kota is not accepting external code pull requests. See
 [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
+## Contact
+
+For general project inquiries, email [nan@kota.place](mailto:nan@kota.place).
+
 ## Security
 
 Please do not report security vulnerabilities in public issues. See

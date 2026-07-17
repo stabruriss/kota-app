@@ -5,6 +5,8 @@ Please do not report security vulnerabilities in public issues.
 Use GitHub Private Vulnerability Reporting for the public Kota repository.
 This lets security researchers report vulnerabilities privately through the
 repository's Security tab without publishing details in issues or discussions.
+If you do not have a GitHub account, email
+[security@kota.place](mailto:security@kota.place) instead.
 
 Include:
 
