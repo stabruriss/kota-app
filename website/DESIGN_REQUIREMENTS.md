@@ -59,7 +59,7 @@ The website must expose:
   research);
 - `/docs/research/` for papers, whitepapers, citation, and long-form material
   (unified under the `/docs/` hub; supersedes the earlier separate top-level
-  `/research` route — BBS `thread-250e21204f13`);
+  `/research` route);
 - `/feedback` for the public wishing wall;
 - `/legal` for license, notices, trademark, assets, security, privacy, and
   citation links;
@@ -336,8 +336,8 @@ allows future platforms without a schema change.
 
 ## Document Library Contract
 
-The `/docs/` surface is an extensible document library. Contract agreed with
-the publication owner (One Alpha Docs) in BBS `thread-250e21204f13`.
+The `/docs/` surface is an extensible document library. It follows the
+publication contract described below.
 
 ### Routes
 
