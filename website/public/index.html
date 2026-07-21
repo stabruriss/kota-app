@@ -24,6 +24,19 @@
   ::selection{ background:rgba(217,138,79,0.32); }
   @keyframes kotaPulse{ 0%{ box-shadow:0 0 0 0 rgba(217,138,79,0.42); } 70%{ box-shadow:0 0 0 14px rgba(217,138,79,0); } 100%{ box-shadow:0 0 0 0 rgba(217,138,79,0); } }
   @keyframes kotaSpin{ from{ transform:translate(-50%,-50%) rotate(0deg); } to{ transform:translate(-50%,-50%) rotate(360deg); } }
+  .hero-cta-row{ display:flex; flex-wrap:wrap; gap:16px; align-items:stretch; justify-content:center; }
+  .star-cta{ position:relative; display:inline-flex; padding:1.5px; border-radius:15px; overflow:hidden; isolation:isolate; background:rgba(255,255,255,0.13); cursor:pointer; transition:transform .25s ease, box-shadow .25s ease; box-shadow:0 8px 22px -14px rgba(0,0,0,0.8), 0 2px 6px rgba(0,0,0,0.35); }
+  .star-cta:hover{ transform:translateY(-2px); box-shadow:0 14px 30px -14px rgba(0,0,0,0.75), 0 3px 8px rgba(0,0,0,0.4); }
+  .star-cta .star-flow{ position:absolute; top:50%; left:50%; width:420px; height:420px; z-index:0; pointer-events:none; opacity:0; background:conic-gradient(from 0deg, rgba(236,225,200,0) 0deg, rgba(236,225,200,0) 130deg, rgba(236,225,200,0.8) 170deg, rgba(236,225,200,0) 215deg, rgba(236,225,200,0) 360deg); transform:translate(-50%,-50%); animation:kotaSpin 7s linear infinite; transition:opacity .3s ease; }
+  .star-cta:hover .star-flow{ opacity:1; }
+  .star-cta .star-inner{ position:relative; z-index:1; display:inline-flex; align-items:center; justify-content:center; gap:12px; padding:12px 22px; border-radius:13.5px; min-height:64px; background:linear-gradient(165deg,#221c17 0%,#141009 100%); box-shadow:inset 0 1px 0 rgba(255,255,255,0.07), inset 0 -3px 8px rgba(0,0,0,0.4); }
+  .star-cta svg{ width:22px; height:22px; display:block; color:#e9e1d0; opacity:0.92; }
+  .star-cta .star-lbl{ font-weight:700; font-size:15.5px; letter-spacing:-0.005em; color:#ece1c8; }
+  .star-cta .star-count{ font-family:'JetBrains Mono',monospace; font-weight:600; font-size:12px; letter-spacing:0.04em; color:#e3d4b6; padding:3px 9px; border-radius:999px; border:1px solid rgba(227,212,182,0.32); }
+  .star-cta .star-count:empty{ display:none; }
+  .star-cta.sticky-star{ border-radius:16px; }
+  .star-cta.sticky-star .star-inner{ border-radius:14.5px; }
+  @media (max-width:520px){ .star-cta.sticky-star{ display:none; } }
   @media (prefers-reduced-motion: reduce){ *{ transition-duration:0.001ms !important; animation:none !important; scroll-behavior:auto !important; } }
 </style>
 </helmet>
@@ -56,16 +69,26 @@
 
         <p ref="{{ scrambleRef }}" data-scramble style="font-family:'JetBrains Mono',monospace; font-size:clamp(15px,1.95vw,20px); line-height:1.55; letter-spacing:-0.01em; color:#cfc8bd; margin:0 0 26px; cursor:default; min-height:1.6em;">A home for your agents and projects.</p>
 
-        <a href="https://github.com/stabruriss/kota-app/releases/latest" data-download-cta style="{{ heroBtnStyle }}" style-hover="{{ heroBtnHover }}">
-          <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
-          <span style="{{ heroInnerStyle }}">
-            <img src="/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
-            <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
-              <span style="font-weight:750; font-size:17px; letter-spacing:-0.01em; color:#f4ede3;">Download Kota</span>
-              <span style="font-size:11.5px; font-weight:600; letter-spacing:0.02em; color:rgba(244,237,227,0.6);">macOS · Apple Silicon</span>
+        <div class="hero-cta-row">
+          <a href="https://github.com/stabruriss/kota-app/releases/latest" data-download-cta style="{{ heroBtnStyle }}" style-hover="{{ heroBtnHover }}">
+            <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
+            <span style="{{ heroInnerStyle }}">
+              <img src="/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
+              <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
+                <span style="font-weight:750; font-size:17px; letter-spacing:-0.01em; color:#f4ede3;">Download Kota</span>
+                <span style="font-size:11.5px; font-weight:600; letter-spacing:0.02em; color:rgba(244,237,227,0.6);">macOS · Apple Silicon</span>
+              </span>
             </span>
-          </span>
-        </a>
+          </a>
+          <a class="star-cta" href="https://github.com/stabruriss/kota-app" target="_blank" rel="noopener">
+            <span class="star-flow" aria-hidden="true"></span>
+            <span class="star-inner">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12c0 5.303 3.438 9.8 8.205 11.385c.6.113.82-.258.82-.577c0-.285-.01-1.04-.015-2.04c-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729c1.205.084 1.838 1.236 1.838 1.236c1.07 1.835 2.809 1.305 3.495.998c.108-.776.417-1.305.76-1.605c-2.665-.3-5.466-1.332-5.466-5.93c0-1.31.465-2.38 1.235-3.22c-.135-.303-.54-1.523.105-3.176c0 0 1.005-.322 3.3 1.23c.96-.267 1.98-.399 3-.405c1.02.006 2.04.138 3 .405c2.28-1.552 3.285-1.23 3.285-1.23c.645 1.653.24 2.873.12 3.176c.765.84 1.23 1.91 1.23 3.22c0 4.61-2.805 5.625-5.475 5.92c.42.36.81 1.096.81 2.22c0 1.606-.015 2.896-.015 3.286c0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+              <span class="star-lbl">Star on GitHub</span>
+              <span class="star-count" data-star-count></span>
+            </span>
+          </a>
+        </div>
       </div>
     </section>
 
@@ -230,16 +253,26 @@
     </div>
   </footer>
 
-  <a href="https://github.com/stabruriss/kota-app/releases/latest" data-download-cta style="{{ stickyBtnStyle }}" style-hover="{{ stickyBtnHover }}">
-    <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
-    <span style="{{ stickyInnerStyle }}">
-      <img src="/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
-      <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
-        <span style="font-weight:700; font-size:17px; color:#f4ede3;">Download Kota</span>
-        <span style="font-size:11.5px; font-weight:600; letter-spacing:0.03em; color:rgba(244,237,227,0.55);">macOS · Apple Silicon</span>
+  <div style="{{ stickyWrapStyle }}">
+    <a href="https://github.com/stabruriss/kota-app/releases/latest" data-download-cta style="{{ stickyBtnStyle }}" style-hover="{{ stickyBtnHover }}">
+      <span aria-hidden="true" data-flow style="{{ dlGlowStyle }}"></span>
+      <span style="{{ stickyInnerStyle }}">
+        <img src="/assets/kota/app-icons/icon.png" alt="" aria-hidden="true" width="40" height="40" style="display:block; border-radius:11px; flex:0 0 auto;">
+        <span style="display:flex; flex-direction:column; line-height:1.16; text-align:left;">
+          <span style="font-weight:700; font-size:17px; color:#f4ede3;">Download Kota</span>
+          <span style="font-size:11.5px; font-weight:600; letter-spacing:0.03em; color:rgba(244,237,227,0.55);">macOS · Apple Silicon</span>
+        </span>
       </span>
-    </span>
-  </a>
+    </a>
+    <a class="star-cta sticky-star" href="https://github.com/stabruriss/kota-app" target="_blank" rel="noopener">
+      <span class="star-flow" aria-hidden="true"></span>
+      <span class="star-inner">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12c0 5.303 3.438 9.8 8.205 11.385c.6.113.82-.258.82-.577c0-.285-.01-1.04-.015-2.04c-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729c1.205.084 1.838 1.236 1.838 1.236c1.07 1.835 2.809 1.305 3.495.998c.108-.776.417-1.305.76-1.605c-2.665-.3-5.466-1.332-5.466-5.93c0-1.31.465-2.38 1.235-3.22c-.135-.303-.54-1.523.105-3.176c0 0 1.005-.322 3.3 1.23c.96-.267 1.98-.399 3-.405c1.02.006 2.04.138 3 .405c2.28-1.552 3.285-1.23 3.285-1.23c.645 1.653.24 2.873.12 3.176c.765.84 1.23 1.91 1.23 3.22c0 4.61-2.805 5.625-5.475 5.92c.42.36.81 1.096.81 2.22c0 1.606-.015 2.896-.015 3.286c0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+        <span class="star-lbl">Star on GitHub</span>
+        <span class="star-count" data-star-count></span>
+      </span>
+    </a>
+  </div>
 
 </div>
 </x-dc>
@@ -278,6 +311,26 @@ class Component extends DCLogic {
         if (a) document.querySelectorAll('[data-download-cta]').forEach((el) => el.setAttribute('href', a.download_url));
       })
       .catch(() => {});
+
+    const starEls = document.querySelectorAll('[data-star-count]');
+    if (starEls.length) {
+      const renderStars = (n) => {
+        if (n < 100) return;
+        const txt = n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : String(n);
+        starEls.forEach((el) => { el.textContent = txt; });
+      };
+      let cached = null;
+      try { cached = JSON.parse(localStorage.getItem('kota-star-count') || 'null'); } catch (e) {}
+      if (cached && Date.now() - cached.t < 3600e3) renderStars(cached.n);
+      else fetch('https://api.github.com/repos/stabruriss/kota-app')
+        .then((r) => (r.ok ? r.json() : Promise.reject()))
+        .then((d) => {
+          if (typeof d.stargazers_count !== 'number') return;
+          try { localStorage.setItem('kota-star-count', JSON.stringify({ n: d.stargazers_count, t: Date.now() })); } catch (e) {}
+          renderStars(d.stargazers_count);
+        })
+        .catch(() => {});
+    }
 
     this._startFlame();
     this._initScramble();
@@ -885,20 +938,24 @@ class Component extends DCLogic {
     };
 
     const on = this.state.scrolled;
-    const stickyBtnStyle = {
+    const stickyWrapStyle = {
       position: 'fixed', left: '50%', bottom: 'calc(24px + env(safe-area-inset-bottom,0px))',
-      zIndex: 80, display: 'inline-flex', padding: '1.5px', borderRadius: '16px', overflow: 'hidden',
-      background: '#16110e', cursor: 'pointer',
+      zIndex: 80, display: 'flex', alignItems: 'stretch', gap: '12px',
       transform: on ? 'translateX(-50%) translateY(0)' : 'translateX(-50%) translateY(220%)',
       opacity: on ? 1 : 0,
       pointerEvents: on ? 'auto' : 'none',
+      transition: 'transform .42s cubic-bezier(.2,.8,.2,1), opacity .42s ease',
+    };
+    const stickyBtnStyle = {
+      position: 'relative', display: 'inline-flex', padding: '1.5px', borderRadius: '16px', overflow: 'hidden',
+      background: '#16110e', cursor: 'pointer', isolation: 'isolate',
       boxShadow: on
         ? `0 24px 48px -16px rgba(0,0,0,0.92), 0 0 0 1px ${this.hexA(accent, 0.18)}, 0 0 34px -10px ${this.hexA(accent, 0.5)}`
         : 'none',
-      transition: 'transform .42s cubic-bezier(.2,.8,.2,1), opacity .42s ease, box-shadow .42s ease',
+      transition: 'transform .25s ease, box-shadow .42s ease',
     };
     const stickyBtnHover = {
-      transform: 'translateX(-50%) translateY(-3px)',
+      transform: 'translateY(-3px)',
       boxShadow: `0 30px 58px -16px rgba(0,0,0,0.95), 0 0 0 1px ${this.hexA(accent, 0.28)}, 0 0 40px -8px ${this.hexA(accent, 0.6)}`,
     };
 
@@ -983,7 +1040,7 @@ class Component extends DCLogic {
     return {
       accent, accentShadow: this.hexA(accent, 0.55),
       version: wnVersion, date: wnDate, title: wnTitle,
-      cards, navHover, heroBtnStyle, heroBtnHover, stickyBtnStyle, stickyBtnHover, dlGlowStyle, heroInnerStyle, stickyInnerStyle,
+      cards, navHover, heroBtnStyle, heroBtnHover, stickyWrapStyle, stickyBtnStyle, stickyBtnHover, dlGlowStyle, heroInnerStyle, stickyInnerStyle,
       news, clis, footerCols, srOnly, canvasRef: this.canvasRef, scrambleRef: this.scrambleRef,
       shots, swapContainerStyle, swapStackStyle,
       swapContainerRef: this.swapContainerRef, swapStackRef: this.swapStackRef,
