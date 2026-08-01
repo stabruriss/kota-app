@@ -648,6 +648,9 @@ function projectAgentShellProviderMeta(detail: ProjectAgentDetail | null): { lab
   if (provider === 'pi') {
     return { label: 'Pi', className: 'provider-pi' };
   }
+  if (['kimi', 'kimi-code'].includes(provider)) {
+    return { label: 'Kimi Code', className: 'provider-kimi' };
+  }
   if (provider === 'github') {
     return { label: 'GitHub', className: 'provider-github' };
   }

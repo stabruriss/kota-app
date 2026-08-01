@@ -1,5 +1,6 @@
 export const VIOLET_COMPOSER_SENT_EVENT = 'kota:violet-composer-sent';
 export const VIOLET_COMPOSER_DELIVERY_EVENT = 'kota:violet-composer-delivery';
+export const VIOLET_COMPOSER_AGENT_EXIT_REASON = 'Agent exited before this prompt was confirmed.';
 const VIOLET_COMPOSER_SENT_HISTORY_LIMIT = 160;
 const VIOLET_COMPOSER_SENT_HISTORY: VioletComposerSentDetail[] = [];
 
@@ -11,6 +12,7 @@ export interface VioletComposerSentDetail {
   mentions?: { agentId: string; aka: string }[];
   timestamp: string;
   privacy: boolean;
+  delivery?: Omit<VioletComposerDeliveryDetail, 'id'>;
 }
 
 export interface VioletComposerDeliveryDetail {
@@ -64,9 +66,32 @@ export function emitVioletComposerSent(
 
 export function emitVioletComposerDelivery(detail: VioletComposerDeliveryDetail) {
   if (typeof window === 'undefined') return;
+  recordVioletComposerDelivery(detail);
   window.dispatchEvent(new CustomEvent<VioletComposerDeliveryDetail>(VIOLET_COMPOSER_DELIVERY_EVENT, {
     detail,
   }));
+}
+
+export function recordVioletComposerDelivery(detail: VioletComposerDeliveryDetail) {
+  const historyIndex = VIOLET_COMPOSER_SENT_HISTORY.findIndex((item) => item.id === detail.id);
+  if (historyIndex < 0) return;
+  const current = VIOLET_COMPOSER_SENT_HISTORY[historyIndex]!;
+  const { id: _id, ...delivery } = detail;
+  if (
+    current.delivery?.status === delivery.status &&
+    current.delivery.reason === delivery.reason &&
+    (current.delivery.retryTargetAgentIds ?? []).join('|') ===
+      (delivery.retryTargetAgentIds ?? []).join('|')
+  ) return;
+  VIOLET_COMPOSER_SENT_HISTORY[historyIndex] = {
+    ...current,
+    delivery: {
+      ...delivery,
+      retryTargetAgentIds: delivery.retryTargetAgentIds
+        ? [...delivery.retryTargetAgentIds]
+        : undefined,
+    },
+  };
 }
 
 function normalizeProjectRoot(projectRoot?: string | null): string | null {

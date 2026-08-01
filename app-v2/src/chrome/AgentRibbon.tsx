@@ -38,6 +38,7 @@ import { useFileTreeAgentHover } from '../lib/file-tree-agent-hover';
 import { MAX_AGENT_SLOTS } from '../lib/agent-slots';
 
 const EMPTY_AGENT_ID_SET: ReadonlySet<AgentId> = new Set();
+const EMPTY_UNSUPPORTED_AGENT_PROVIDERS: ReadonlyMap<AgentId, string> = new Map();
 
 export interface AgentRibbonProps {
   onTable: readonly AgentAtTable[];
@@ -59,6 +60,7 @@ export interface AgentRibbonProps {
   onAgentContextMenu?: (id: AgentId, point: { x: number; y: number }) => void;
   onCommendAgent?: (id: AgentId, source: ProjectAgentCommendSource) => void;
   agentMeta?: Readonly<Record<AgentId, Agent>>;
+  unsupportedAgentProviders?: ReadonlyMap<AgentId, string>;
   agentRecords?: Readonly<Record<AgentId, ProjectAgentRecord>>;
   /** W4 — agents that have a live PTY (= a window somewhere). */
   liveAgents?: ReadonlySet<AgentId>;
@@ -97,6 +99,7 @@ export function AgentRibbon({
   onAgentContextMenu,
   onCommendAgent,
   agentMeta,
+  unsupportedAgentProviders = EMPTY_UNSUPPORTED_AGENT_PROVIDERS,
   agentRecords,
   liveAgents,
   workingAgents,
@@ -400,6 +403,7 @@ export function AgentRibbon({
                 id={id}
                 hero={heroById.get(id)}
                 agentMeta={agentMeta}
+                unsupportedProvider={unsupportedAgentProviders.get(id)}
                 state={a.state}
                 captain={a.captain}
                 target={id === targetAgent}
@@ -444,6 +448,7 @@ export function AgentRibbon({
                     id={a.id}
                     hero={heroById.get(a.id)}
                     agentMeta={agentMeta}
+                    unsupportedProvider={unsupportedAgentProviders.get(a.id)}
                     off
                     live={liveSet.has(a.id)}
                     working={workingSet.has(a.id)}
@@ -636,6 +641,7 @@ function AgentChip({
   disabled,
   hostRef,
   agentMeta,
+  unsupportedProvider,
   onClick,
   onDoubleClick,
   onContextMenu,
@@ -660,6 +666,7 @@ function AgentChip({
   disabled?: boolean;
   hostRef?: (node: HTMLSpanElement | null) => void;
   agentMeta?: Readonly<Record<AgentId, Agent>>;
+  unsupportedProvider?: string;
   onClick: () => void;
   onDoubleClick?: () => void;
   onContextMenu?: (id: AgentId, point: { x: number; y: number }) => void;
@@ -677,6 +684,8 @@ function AgentChip({
   const avatarClass = agent.avatarClass ?? hero?.avatarClass ?? providerAvatarClass(hero?.cli, id);
   const avatarStyle = avatarImageStyleForId(agent.avatarId ?? hero?.avatarId);
   const offline = !live;
+  const unsupported = !!unsupportedProvider;
+  const interactionDisabled = !!disabled || unsupported;
 
   return (
     <span ref={hostRef} className="agent-commend-host chip-commend-host">
@@ -695,24 +704,34 @@ function AgentChip({
           privateMode ? 'private' : '',
           fileTreeHover ? 'file-tree-hover' : '',
           disabled ? 'hydrating' : '',
+          unsupported ? 'unsupported' : '',
         ].filter(Boolean).join(' ')}
-        disabled={disabled}
+        disabled={interactionDisabled}
         onClick={onClick}
-        onDoubleClick={onDoubleClick}
+        onDoubleClick={unsupported ? undefined : onDoubleClick}
         onContextMenu={(event) => {
+          if (unsupported) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
           if (!onContextMenu) return;
           event.preventDefault();
           event.stopPropagation();
           onContextMenu(id, { x: event.clientX, y: event.clientY });
         }}
         aria-pressed={!!target}
-        aria-label={`${displayName}${target ? ' (target)' : ''}${chatFilterActive ? ' (chat filter)' : ''}${unread ? ' (unread)' : ''}${privateMode ? ' (private)' : ''}${dreaming ? ' (dreaming)' : ''}${live ? (minimized ? ' (minimized)' : ' (live)') : ' (offline)'}`}
+        aria-label={unsupported
+          ? `${displayName} (Unsupported provider: ${unsupportedProvider})`
+          : `${displayName}${target ? ' (target)' : ''}${chatFilterActive ? ' (chat filter)' : ''}${unread ? ' (unread)' : ''}${privateMode ? ' (private)' : ''}${dreaming ? ' (dreaming)' : ''}${live ? (minimized ? ' (minimized)' : ' (live)') : ' (offline)'}`}
+        title={unsupported ? `Unsupported provider: ${unsupportedProvider}` : undefined}
         data-testid={`chip-${id}`}
         data-live={live ? 'true' : 'false'}
         data-working={working ? 'true' : 'false'}
         data-dreaming={dreaming ? 'true' : 'false'}
         data-minimized={minimized ? 'true' : 'false'}
         data-hydrating={disabled ? 'true' : 'false'}
+        data-unsupported-provider={unsupportedProvider}
       >
         <span className={`chip-avatar tavern-avatar-art ${avatarClass}`} style={avatarStyle} aria-hidden>
           <span />
@@ -729,15 +748,18 @@ function AgentChip({
           {captain && <span className="chip-star" aria-label="captain">★</span>}
           {privateMode && <LockMini />}
         </span>
+        {unsupported && <span className="chip-unsupported">Unsupported</span>}
         {unread && <span className="chip-unread-dot" aria-hidden />}
       </button>
-      <AgentCommendButton
-        agentId={id}
-        agentName={displayName}
-        source="agent-bar"
-        count={record?.commends}
-        onCommend={onCommend}
-      />
+      {!unsupported && (
+        <AgentCommendButton
+          agentId={id}
+          agentName={displayName}
+          source="agent-bar"
+          count={record?.commends}
+          onCommend={onCommend}
+        />
+      )}
     </span>
   );
 }

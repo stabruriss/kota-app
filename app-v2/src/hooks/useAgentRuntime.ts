@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   closeAgentPty,
-  onAgentExit,
+  onAgentExit as subscribeAgentExit,
   onAgentOutput,
   onAgentStatus,
   onAgentWorkState,
@@ -26,6 +26,7 @@ import {
 import {
   linesToGridSnapshot,
   type AgentSpawnRequest,
+  type AgentExitEvent,
   type AgentStatusEvent,
   type AgentWorkStateEvent,
   type GridSnapshot,
@@ -34,6 +35,33 @@ import type { AgentId } from '../types/scene';
 
 const AGENT_WORK_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 const AGENT_WORK_PRUNE_INTERVAL_MS = 30 * 1000;
+
+function normalizedWorkTurnId(event: AgentWorkStateEvent | undefined): string | null {
+  const turnId = event?.turnId?.trim();
+  return turnId || null;
+}
+
+// These projections provide an explicit lifecycle and a stable ID for the whole turn.
+function hasAuthoritativeActiveTurn(event: AgentWorkStateEvent | undefined): boolean {
+  return (
+    (event?.cli === 'codex' || event?.cli === 'kimi')
+    && normalizedWorkTurnId(event) != null
+    && (event.state === 'working' || event.state === 'maybeIdle')
+  );
+}
+
+function sharesLifecycleContext(
+  existing: AgentWorkStateEvent,
+  incoming: AgentWorkStateEvent,
+): boolean {
+  const cliMatches = !incoming.cli || !existing.cli || incoming.cli === existing.cli;
+  const sessionMatches = (
+    !incoming.sessionId
+    || !existing.sessionId
+    || incoming.sessionId === existing.sessionId
+  );
+  return cliMatches && sessionMatches;
+}
 
 function workEventRemainingMs(timestamp: string | null | undefined): number | null {
   if (!timestamp) return null;
@@ -105,7 +133,16 @@ export interface AgentRuntime {
   dismiss: (agentId: AgentId) => Promise<void>;
 }
 
-export function useAgentRuntime(): AgentRuntime {
+export interface AgentRuntimeExitContext {
+  event: AgentExitEvent;
+  request: AgentSpawnRequest;
+}
+
+export interface AgentRuntimeOptions {
+  onExit?: (context: AgentRuntimeExitContext) => void | Promise<void>;
+}
+
+export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime {
   const [state, setState] = useState<AgentRuntimeState>(() => ({
     liveAgents: new Set(),
     grids: new Map(),
@@ -120,6 +157,8 @@ export function useAgentRuntime(): AgentRuntime {
     new Map(),
   );
   const workTimeoutRefs = useRef<Map<AgentId, number>>(new Map());
+  const onExitRef = useRef(options.onExit);
+  onExitRef.current = options.onExit;
 
   const clearWorkTimer = useCallback((agentId: AgentId) => {
     const timer = workTimeoutRefs.current.get(agentId);
@@ -135,7 +174,12 @@ export function useAgentRuntime(): AgentRuntime {
     const timer = window.setTimeout(() => {
       workTimeoutRefs.current.delete(agentId);
       setState((s) => {
-        if (!s.workState.has(agentId)) return s;
+        const current = s.workState.get(agentId);
+        if (!current || hasAuthoritativeActiveTurn(current)) return s;
+        const currentRemainingMs = workEventRemainingMs(
+          current.lastActivityAt ?? current.timestamp,
+        );
+        if (currentRemainingMs != null && currentRemainingMs !== 0) return s;
         const workState = new Map(s.workState);
         workState.delete(agentId);
         return { ...s, workState };
@@ -149,6 +193,7 @@ export function useAgentRuntime(): AgentRuntime {
       let changed = false;
       const workState = new Map(s.workState);
       for (const [agentId, evt] of workState) {
+        if (hasAuthoritativeActiveTurn(evt)) continue;
         const remainingMs = workEventRemainingMs(evt.lastActivityAt ?? evt.timestamp);
         if (remainingMs !== 0) continue;
         workState.delete(agentId);
@@ -166,23 +211,60 @@ export function useAgentRuntime(): AgentRuntime {
 
       const existing = s.workState.get(agentId);
       const timestamp = evt.timestamp || new Date().toISOString();
+      const isTerminalState =
+        evt.state === 'idle' || evt.state === 'failed' || evt.state === 'interrupted';
+      const incomingTurnId = normalizedWorkTurnId(evt);
+      const workState = new Map(s.workState);
+      if (isTerminalState && existing && hasAuthoritativeActiveTurn(existing)) {
+        if (
+          !sharesLifecycleContext(existing, evt)
+          || (
+            incomingTurnId != null
+            && incomingTurnId !== normalizedWorkTurnId(existing)
+          )
+        ) {
+          return s;
+        }
+        workState.delete(agentId);
+        clearWorkTimer(agentId);
+        return { ...s, workState };
+      }
+
       const existingTime = existing?.lastActivityAt ?? existing?.timestamp;
-      const eventTime = timestamp;
-      const eventParsed = Date.parse(eventTime);
+      const eventParsed = Date.parse(timestamp);
       const eventOlderThanExisting =
         !!existingTime &&
         Number.isFinite(eventParsed) &&
-        Date.parse(eventTime) < Date.parse(existingTime) - 1000;
+        eventParsed < Date.parse(existingTime) - 1000;
       if (eventOlderThanExisting) {
         return s;
       }
 
-      const isTerminalState =
-        evt.state === 'idle' || evt.state === 'failed' || evt.state === 'interrupted';
+      if (isTerminalState) {
+        workState.delete(agentId);
+        clearWorkTimer(agentId);
+        return { ...s, workState };
+      }
+
+      const inheritedTurnId = (
+        !incomingTurnId
+        && existing
+        && hasAuthoritativeActiveTurn(existing)
+        && sharesLifecycleContext(existing, evt)
+      )
+        ? normalizedWorkTurnId(existing)
+        : null;
+      const nextEvent: AgentWorkStateEvent = {
+        ...evt,
+        turnId: incomingTurnId ?? inheritedTurnId,
+      };
+      const authoritativeActiveTurn = hasAuthoritativeActiveTurn(nextEvent);
       const remainingMs = workEventRemainingMs(timestamp);
-      if (!isTerminalState && remainingMs === 0) {
+      if (authoritativeActiveTurn && remainingMs === 0) {
+        return s;
+      }
+      if (!authoritativeActiveTurn && remainingMs === 0) {
         if (!existing) return s;
-        const workState = new Map(s.workState);
         workState.delete(agentId);
         clearWorkTimer(agentId);
         return { ...s, workState };
@@ -190,29 +272,22 @@ export function useAgentRuntime(): AgentRuntime {
 
       if (
         existing &&
-        existing.state === evt.state &&
-        existing.timestamp === evt.timestamp &&
-        existing.sessionId === evt.sessionId &&
-        existing.nativeEventId === evt.nativeEventId &&
-        existing.turnId === evt.turnId
+        existing.state === nextEvent.state &&
+        existing.timestamp === nextEvent.timestamp &&
+        existing.sessionId === nextEvent.sessionId &&
+        existing.nativeEventId === nextEvent.nativeEventId &&
+        existing.turnId === nextEvent.turnId
       ) {
         return s;
       }
 
-      const workState = new Map(s.workState);
-      if (isTerminalState) {
-        workState.delete(agentId);
-        clearWorkTimer(agentId);
-        return { ...s, workState };
-      }
-
       const resetStartedAt =
         !existing ||
-        (evt.sessionId && evt.sessionId !== existing.sessionId) ||
-        (evt.turnId && evt.turnId !== existing.turnId) ||
-        evt.reason === 'prompt-submitted';
+        (nextEvent.sessionId && nextEvent.sessionId !== existing.sessionId) ||
+        (nextEvent.turnId && nextEvent.turnId !== existing.turnId) ||
+        nextEvent.reason === 'prompt-submitted';
       workState.set(agentId, {
-        ...evt,
+        ...nextEvent,
         agentId,
         timestamp,
         startedAt: resetStartedAt
@@ -220,7 +295,11 @@ export function useAgentRuntime(): AgentRuntime {
           : (existing.startedAt ?? existing.timestamp ?? timestamp),
         lastActivityAt: timestamp,
       });
-      scheduleWorkTimeout(agentId, timestamp);
+      if (authoritativeActiveTurn) {
+        clearWorkTimer(agentId);
+      } else {
+        scheduleWorkTimeout(agentId, timestamp);
+      }
       return { ...s, workState };
     });
   }, [clearWorkTimer, scheduleWorkTimeout]);
@@ -312,7 +391,7 @@ export function useAgentRuntime(): AgentRuntime {
         return { ...s, grids, status: st };
       });
     });
-    const offExit = await onAgentExit(req.agentId, (evt) => {
+    const offExit = await subscribeAgentExit(req.agentId, (evt) => {
       console.warn(`[agent:${agentId}] exit evt`, evt);
       setState((s) => {
         const live = new Set(s.liveAgents);
@@ -322,6 +401,12 @@ export function useAgentRuntime(): AgentRuntime {
         clearWorkTimer(agentId);
         return { ...s, liveAgents: live, workState };
       });
+      const onExit = onExitRef.current;
+      if (onExit) {
+        void Promise.resolve(onExit({ event: evt, request: req })).catch((err) => {
+          console.warn(`[agent:${agentId}] exit reconciliation failed`, err);
+        });
+      }
     });
     const offWork = await onAgentWorkState(req.agentId, applyWorkEvent);
 

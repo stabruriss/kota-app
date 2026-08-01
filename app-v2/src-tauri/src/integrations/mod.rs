@@ -8,8 +8,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::Mutex;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -25,18 +25,86 @@ const GOOGLE_SECRET_ACCOUNT: &str = "google-drive";
 const GOOGLE_DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 const GOOGLE_IDENTITY_SCOPE: &str = "openid email profile";
 const DRIVE_FOLDER_MIME: &str = "application/vnd.google-apps.folder";
-const PROJECT_AGENT_ID_PREFIX: &str = "agent-";
+pub(crate) const PROJECT_AGENT_ID_PREFIX: &str = "agent-";
 const PROJECT_AGENT_ID_SUFFIX_LEN: usize = 10;
 const KOTA_HOME_DIR: &str = "Kota";
 const KOTA_WORKSPACES_DIR: &str = "Workspaces";
+const STORAGE_MEASUREMENT_CACHE_FILE: &str = "storage-measurement.json";
+const STORAGE_MEASUREMENT_CACHE_VERSION: u32 = 1;
+const STORAGE_MEASUREMENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const STORAGE_MEASUREMENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(not(test))]
 const LEGACY_KOTA_HOME_DIR: &str = ".kota";
 #[cfg(not(test))]
 const LEGACY_WORKSPACES_DIR: &str = "projects";
 
-#[derive(Default)]
 pub struct IntegrationManager {
     active_workspace: Mutex<Option<WorkspaceProject>>,
+    storage_measurement: StorageMeasurementController,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageMeasurementRecord {
+    version: u32,
+    on_disk_bytes: u64,
+    available_bytes: u64,
+    measured_at: i64,
+    app_version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageMeasurementStatus {
+    pub updating: bool,
+    pub on_disk_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub measured_at: Option<i64>,
+    pub error: Option<String>,
+}
+
+struct StorageMeasurementRuntime {
+    last_success: Option<StorageMeasurementRecord>,
+    updating: bool,
+    error: Option<String>,
+    active_job_id: u64,
+    child: Option<Child>,
+    shutting_down: bool,
+}
+
+struct StorageMeasurementController {
+    runtime: Arc<Mutex<StorageMeasurementRuntime>>,
+    account_root: PathBuf,
+    cache_path: PathBuf,
+}
+
+impl Default for IntegrationManager {
+    fn default() -> Self {
+        let account_root = kota_home();
+        let cache_path = account_root.join(STORAGE_MEASUREMENT_CACHE_FILE);
+        let last_success = match load_storage_measurement_record(&cache_path) {
+            Ok(record) => record,
+            Err(err) => {
+                eprintln!("Kota storage measurement cache ignored: {err}");
+                None
+            }
+        };
+        Self {
+            active_workspace: Mutex::new(None),
+            storage_measurement: StorageMeasurementController {
+                runtime: Arc::new(Mutex::new(StorageMeasurementRuntime {
+                    last_success,
+                    updating: false,
+                    error: None,
+                    active_job_id: 0,
+                    child: None,
+                    shutting_down: false,
+                })),
+                account_root,
+                cache_path,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -58,9 +126,7 @@ pub struct OAuthConfigStatus {
     pub app_path: String,
     pub google_drive_path: String,
     pub local_account_folder: String,
-    pub local_account_bytes: u64,
     pub local_project_root: String,
-    pub local_project_root_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,7 +155,6 @@ pub struct GoogleDriveStatus {
     pub folder_path: Option<String>,
     pub folder_url: Option<String>,
     pub local_account_folder: String,
-    pub local_account_bytes: u64,
     pub config_missing: bool,
     pub error: Option<String>,
 }
@@ -158,7 +223,7 @@ pub struct WorkspaceProject {
 #[serde(rename_all = "camelCase")]
 pub struct AgentLaunchSpec {
     pub agent_id: String,
-    pub cli: crate::pty::agent::AgentCli,
+    pub cli: WorkspaceAgentCli,
     pub cwd: String,
     pub project_root: String,
     pub worktree_root: String,
@@ -168,6 +233,65 @@ pub struct AgentLaunchSpec {
     pub project_id: String,
     pub project_remote: String,
     pub project_base_ref: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WorkspaceAgentCli {
+    Supported(crate::pty::agent::AgentCli),
+    Unsupported(String),
+}
+
+impl WorkspaceAgentCli {
+    fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        Some(
+            agent_cli_from_name(name)
+                .map(Self::Supported)
+                .unwrap_or_else(|| Self::Unsupported(name.to_string())),
+        )
+    }
+
+    pub fn supported(&self) -> Option<crate::pty::agent::AgentCli> {
+        match self {
+            Self::Supported(cli) => Some(*cli),
+            Self::Unsupported(_) => None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Supported(crate::pty::agent::AgentCli::Claude) => "claude",
+            Self::Supported(crate::pty::agent::AgentCli::Codex) => "codex",
+            Self::Supported(crate::pty::agent::AgentCli::Antigravity) => "antigravity",
+            Self::Supported(crate::pty::agent::AgentCli::Opencode) => "opencode",
+            Self::Supported(crate::pty::agent::AgentCli::Pi) => "pi",
+            Self::Supported(crate::pty::agent::AgentCli::Kimi) => "kimi",
+            Self::Unsupported(name) => name,
+        }
+    }
+
+    fn unsupported_name(&self) -> Option<&str> {
+        match self {
+            Self::Supported(_) => None,
+            Self::Unsupported(name) => Some(name),
+        }
+    }
+}
+
+impl From<crate::pty::agent::AgentCli> for WorkspaceAgentCli {
+    fn from(cli: crate::pty::agent::AgentCli) -> Self {
+        Self::Supported(cli)
+    }
+}
+
+impl PartialEq<crate::pty::agent::AgentCli> for WorkspaceAgentCli {
+    fn eq(&self, other: &crate::pty::agent::AgentCli) -> bool {
+        self.supported().as_ref() == Some(other)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -254,6 +378,18 @@ struct WorkspaceLocalState {
 }
 
 impl IntegrationManager {
+    pub fn storage_measure_status(&self) -> StorageMeasurementStatus {
+        self.storage_measurement.status()
+    }
+
+    pub fn storage_measure_start(&self) -> StorageMeasurementStatus {
+        self.storage_measurement.start()
+    }
+
+    pub fn shutdown_storage_measurement(&self) {
+        self.storage_measurement.shutdown();
+    }
+
     pub fn auth_config_status(&self) -> OAuthConfigStatus {
         let cfg = load_oauth_config().unwrap_or_default();
         let local_account_folder = kota_home();
@@ -275,9 +411,7 @@ impl IntegrationManager {
                 .unwrap_or_else(|_| "unknown".into()),
             google_drive_path: google_drive_path(&cfg),
             local_account_folder: local_account_folder.display().to_string(),
-            local_account_bytes: dir_size(&local_account_folder).unwrap_or(0),
             local_project_root: local_project_root.display().to_string(),
-            local_project_root_bytes: dir_size(&local_project_root).unwrap_or(0),
         }
     }
 
@@ -338,7 +472,6 @@ impl IntegrationManager {
                 folder_path: token.drive_folder_path,
                 folder_url: token.drive_folder_url,
                 local_account_folder: kota_home().display().to_string(),
-                local_account_bytes: dir_size(&kota_home()).unwrap_or(0),
                 config_missing,
                 error: None,
             },
@@ -351,7 +484,6 @@ impl IntegrationManager {
                 folder_path: None,
                 folder_url: None,
                 local_account_folder: kota_home().display().to_string(),
-                local_account_bytes: dir_size(&kota_home()).unwrap_or(0),
                 config_missing,
                 error: Some(err.to_string()),
             },
@@ -638,7 +770,12 @@ impl IntegrationManager {
             .expect("workspace state poisoned");
         if guard.is_none() {
             if let Ok(mut workspace) = load_active_workspace() {
-                let _ = prepare_loaded_workspace(&mut workspace);
+                let launch_is_unsupported = workspace.agents.iter().any(|existing| {
+                    existing.agent_id == agent_id && existing.cli.unsupported_name().is_some()
+                });
+                if !launch_is_unsupported {
+                    let _ = prepare_loaded_workspace(&mut workspace);
+                }
                 *guard = Some(workspace);
             }
         }
@@ -647,6 +784,17 @@ impl IntegrationManager {
             .ok_or_else(|| anyhow!("no active GitHub workspace; prepare a repo first"))?;
         if workspace.archived {
             bail!("active workspace is archived; resume it before launching agents");
+        }
+        if let Some(existing) = workspace
+            .agents
+            .iter()
+            .find(|existing| existing.agent_id == agent_id)
+        {
+            if let Some(provider) = existing.cli.unsupported_name() {
+                bail!(
+                    "agent {agent_id} uses unsupported CLI provider {provider:?}; update Kota before launching it"
+                );
+            }
         }
         let spec = materialize_workspace_agent(workspace, &agent_id, cli)?;
         if let Some(existing) = workspace
@@ -681,7 +829,6 @@ impl IntegrationManager {
             return Ok(());
         }
         if upsert_workspace_agent_spec(workspace, spec) {
-            refresh_workspace_sizes(workspace);
             save_active_workspace(workspace)?;
             save_workspace_files(workspace)?;
         }
@@ -1109,7 +1256,7 @@ fn materialize_github_workspace(access_token: &str, repo: GithubRepo) -> Result<
     }
 
     let base_ref = format!("origin/{}", repo.default_branch);
-    let mut workspace = WorkspaceProject {
+    let workspace = WorkspaceProject {
         project_id,
         repo_full_name: repo.full_name,
         remote_url: repo.clone_url,
@@ -1117,9 +1264,9 @@ fn materialize_github_workspace(access_token: &str, repo: GithubRepo) -> Result<
         default_branch: repo.default_branch,
         base_ref,
         local_root: path_str(&root),
-        local_root_bytes: dir_size(&root).unwrap_or(0),
+        local_root_bytes: 0,
         source_dir: path_str(&source),
-        source_dir_bytes: dir_size(&source).unwrap_or(0),
+        source_dir_bytes: 0,
         shared_dir: path_str(&shared),
         rules_dir: path_str(&rules),
         agents: Vec::new(),
@@ -1127,7 +1274,6 @@ fn materialize_github_workspace(access_token: &str, repo: GithubRepo) -> Result<
         archived_at: None,
     };
 
-    refresh_workspace_sizes(&mut workspace);
     save_workspace_files(&workspace)?;
     Ok(workspace)
 }
@@ -1180,7 +1326,7 @@ fn materialize_workspace_agent_with_auth(
     let adapter_path = ensure_agent_files(&cwd, &worktree_root, agent_id, cli)?;
     Ok(AgentLaunchSpec {
         agent_id: agent_id.to_string(),
-        cli,
+        cli: cli.into(),
         cwd: path_str(&cwd),
         project_root: workspace.local_root.clone(),
         worktree_root: path_str(&worktree_root),
@@ -1506,6 +1652,7 @@ fn ensure_agent_files(
                     crate::pty::agent::AgentCli::Antigravity => "antigravity",
                     crate::pty::agent::AgentCli::Opencode => "opencode",
                     crate::pty::agent::AgentCli::Pi => "pi",
+                    crate::pty::agent::AgentCli::Kimi => "kimi",
                 },
                 yaml_quote(&path_str(cwd)),
                 yaml_quote(&path_str(worktree_root)),
@@ -1521,7 +1668,8 @@ fn adapter_file_for_cli(cli: crate::pty::agent::AgentCli) -> &'static str {
         crate::pty::agent::AgentCli::Antigravity
         | crate::pty::agent::AgentCli::Codex
         | crate::pty::agent::AgentCli::Opencode
-        | crate::pty::agent::AgentCli::Pi => "AGENTS.md",
+        | crate::pty::agent::AgentCli::Pi
+        | crate::pty::agent::AgentCli::Kimi => "AGENTS.md",
     }
 }
 
@@ -1930,28 +2078,364 @@ fn expand_home(raw: &str) -> String {
     raw.to_string()
 }
 
-fn dir_size(path: &Path) -> Result<u64> {
-    if !path.exists() {
-        return Ok(0);
+impl StorageMeasurementController {
+    fn status(&self) -> StorageMeasurementStatus {
+        let runtime = storage_measurement_runtime(&self.runtime);
+        storage_measurement_status_from_runtime(&runtime)
     }
-    let mut total = 0_u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let meta = fs::symlink_metadata(&path)?;
-        if meta.file_type().is_symlink() {
-            continue;
+
+    fn start(&self) -> StorageMeasurementStatus {
+        let job_id = {
+            let mut runtime = storage_measurement_runtime(&self.runtime);
+            if runtime.shutting_down {
+                runtime.error = Some("Kota is shutting down".into());
+                return storage_measurement_status_from_runtime(&runtime);
+            }
+            if runtime.updating {
+                return storage_measurement_status_from_runtime(&runtime);
+            }
+            runtime.updating = true;
+            runtime.error = None;
+            runtime.active_job_id = runtime.active_job_id.wrapping_add(1).max(1);
+            runtime.active_job_id
+        };
+
+        let child = match storage_measurement_command(&self.account_root).spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                finish_storage_measurement_error(
+                    &self.runtime,
+                    job_id,
+                    format!("Could not start storage scan: {err}"),
+                );
+                return self.status();
+            }
+        };
+
+        let mut child = Some(child);
+        let accepted = {
+            let mut runtime = storage_measurement_runtime(&self.runtime);
+            if runtime.shutting_down
+                || !runtime.updating
+                || runtime.active_job_id != job_id
+                || runtime.child.is_some()
+            {
+                false
+            } else {
+                runtime.child = child.take();
+                true
+            }
+        };
+        if !accepted {
+            if let Some(child) = child.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return self.status();
         }
-        if meta.is_file() {
-            total = total.saturating_add(meta.len());
-            continue;
+
+        let runtime = Arc::clone(&self.runtime);
+        let account_root = self.account_root.clone();
+        let cache_path = self.cache_path.clone();
+        if let Err(err) = std::thread::Builder::new()
+            .name("kota-storage-measurement".into())
+            .spawn(move || {
+                run_storage_measurement_worker(runtime, account_root, cache_path, job_id)
+            })
+        {
+            let mut child = {
+                let mut state = storage_measurement_runtime(&self.runtime);
+                if state.active_job_id == job_id {
+                    state.child.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(child) = child.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            finish_storage_measurement_error(
+                &self.runtime,
+                job_id,
+                format!("Could not start storage scan worker: {err}"),
+            );
         }
-        if meta.is_dir() {
-            for entry in fs::read_dir(path)? {
-                stack.push(entry?.path());
+        self.status()
+    }
+
+    fn shutdown(&self) {
+        let mut child = {
+            let mut runtime = storage_measurement_runtime(&self.runtime);
+            runtime.shutting_down = true;
+            runtime.updating = false;
+            runtime.active_job_id = runtime.active_job_id.wrapping_add(1);
+            runtime.child.take()
+        };
+        if let Some(child) = child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn storage_measurement_runtime(
+    runtime: &Arc<Mutex<StorageMeasurementRuntime>>,
+) -> std::sync::MutexGuard<'_, StorageMeasurementRuntime> {
+    runtime
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn storage_measurement_status_from_runtime(
+    runtime: &StorageMeasurementRuntime,
+) -> StorageMeasurementStatus {
+    StorageMeasurementStatus {
+        updating: runtime.updating,
+        on_disk_bytes: runtime
+            .last_success
+            .as_ref()
+            .map(|record| record.on_disk_bytes),
+        available_bytes: runtime
+            .last_success
+            .as_ref()
+            .map(|record| record.available_bytes),
+        measured_at: runtime
+            .last_success
+            .as_ref()
+            .map(|record| record.measured_at),
+        error: runtime.error.clone(),
+    }
+}
+
+fn storage_measurement_command(account_root: &Path) -> Command {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("/usr/sbin/taskpolicy");
+        command.args([
+            "-c",
+            "background",
+            "-b",
+            "/usr/bin/nice",
+            "-n",
+            "10",
+            "/usr/bin/du",
+            "-skx",
+        ]);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut command = {
+        let mut command = Command::new("du");
+        command.args(["-skx"]);
+        command
+    };
+    command
+        .arg(account_root)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+enum StorageMeasurementPoll {
+    Pending,
+    Exited(Child),
+    Failed(Child, String),
+    TimedOut(Child),
+    Cancelled,
+}
+
+fn run_storage_measurement_worker(
+    runtime: Arc<Mutex<StorageMeasurementRuntime>>,
+    account_root: PathBuf,
+    cache_path: PathBuf,
+    job_id: u64,
+) {
+    let started_at = Instant::now();
+    loop {
+        let poll = {
+            let mut state = storage_measurement_runtime(&runtime);
+            if state.shutting_down || !state.updating || state.active_job_id != job_id {
+                StorageMeasurementPoll::Cancelled
+            } else if started_at.elapsed() >= STORAGE_MEASUREMENT_TIMEOUT {
+                match state.child.take() {
+                    Some(child) => StorageMeasurementPoll::TimedOut(child),
+                    None => StorageMeasurementPoll::Cancelled,
+                }
+            } else {
+                match state.child.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(_)) => StorageMeasurementPoll::Exited(
+                            state.child.take().expect("storage scan child disappeared"),
+                        ),
+                        Ok(None) => StorageMeasurementPoll::Pending,
+                        Err(err) => StorageMeasurementPoll::Failed(
+                            state.child.take().expect("storage scan child disappeared"),
+                            err.to_string(),
+                        ),
+                    },
+                    None => StorageMeasurementPoll::Cancelled,
+                }
+            }
+        };
+
+        match poll {
+            StorageMeasurementPoll::Pending => {
+                std::thread::sleep(STORAGE_MEASUREMENT_POLL_INTERVAL);
+            }
+            StorageMeasurementPoll::Cancelled => return,
+            StorageMeasurementPoll::TimedOut(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                finish_storage_measurement_error(
+                    &runtime,
+                    job_id,
+                    "Storage scan timed out after 10 minutes".into(),
+                );
+                return;
+            }
+            StorageMeasurementPoll::Failed(mut child, err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                finish_storage_measurement_error(
+                    &runtime,
+                    job_id,
+                    format!("Storage scan failed: {err}"),
+                );
+                return;
+            }
+            StorageMeasurementPoll::Exited(child) => {
+                let result = finish_storage_measurement(child, &account_root, &cache_path);
+                match result {
+                    Ok(record) => {
+                        let mut state = storage_measurement_runtime(&runtime);
+                        if !state.shutting_down && state.updating && state.active_job_id == job_id {
+                            state.last_success = Some(record);
+                            state.updating = false;
+                            state.error = None;
+                        }
+                    }
+                    Err(err) => {
+                        finish_storage_measurement_error(
+                            &runtime,
+                            job_id,
+                            format!("Storage scan failed: {err}"),
+                        );
+                    }
+                }
+                return;
             }
         }
     }
-    Ok(total)
+}
+
+fn finish_storage_measurement(
+    child: Child,
+    account_root: &Path,
+    cache_path: &Path,
+) -> Result<StorageMeasurementRecord> {
+    let output = child.wait_with_output().context("wait for storage scan")?;
+    if !output.status.success() {
+        bail!("du exited with {}", output.status);
+    }
+    let on_disk_bytes = parse_du_kib_output(&output.stdout)?;
+    let available_bytes = available_space_bytes(account_root)?;
+    let record = StorageMeasurementRecord {
+        version: STORAGE_MEASUREMENT_CACHE_VERSION,
+        on_disk_bytes,
+        available_bytes,
+        measured_at: now_ts(),
+        app_version: env!("CARGO_PKG_VERSION").into(),
+    };
+    save_storage_measurement_record(cache_path, &record)?;
+    Ok(record)
+}
+
+fn finish_storage_measurement_error(
+    runtime: &Arc<Mutex<StorageMeasurementRuntime>>,
+    job_id: u64,
+    error: String,
+) {
+    let mut state = storage_measurement_runtime(runtime);
+    if !state.shutting_down && state.active_job_id == job_id {
+        state.child = None;
+        state.updating = false;
+        state.error = Some(error);
+    }
+}
+
+fn parse_du_kib_output(stdout: &[u8]) -> Result<u64> {
+    let stdout = std::str::from_utf8(stdout).context("decode du output")?;
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| anyhow!("du returned no size"))?;
+    let kib = line
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow!("du returned no size"))?
+        .parse::<u64>()
+        .context("parse du size")?;
+    Ok(kib.saturating_mul(1024))
+}
+
+#[cfg(unix)]
+fn available_space_bytes(path: &Path) -> Result<u64> {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(path.as_os_str().as_bytes()).context("storage path contains NUL")?;
+    let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("read available disk space");
+    }
+    let stats = unsafe { stats.assume_init() };
+    let block_size = if stats.f_frsize > 0 {
+        stats.f_frsize as u64
+    } else {
+        stats.f_bsize as u64
+    };
+    Ok((stats.f_bavail as u64).saturating_mul(block_size))
+}
+
+#[cfg(not(unix))]
+fn available_space_bytes(_path: &Path) -> Result<u64> {
+    bail!("storage measurement is not supported on this platform")
+}
+
+fn load_storage_measurement_record(path: &Path) -> Result<Option<StorageMeasurementRecord>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    let record: StorageMeasurementRecord =
+        serde_json::from_slice(&bytes).with_context(|| format!("decode {}", path.display()))?;
+    if record.version != STORAGE_MEASUREMENT_CACHE_VERSION {
+        bail!(
+            "unsupported storage measurement cache version {}",
+            record.version
+        );
+    }
+    Ok(Some(record))
+}
+
+fn save_storage_measurement_record(path: &Path, record: &StorageMeasurementRecord) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(record)?)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("rename {}", path.display()));
+    }
+    Ok(())
 }
 
 fn active_workspace_path() -> PathBuf {
@@ -2095,13 +2579,20 @@ fn migrate_workspace_storage_layout(workspace: &mut WorkspaceProject) -> Result<
                 continue;
             }
             if agent_projection_needs_update(&cwd, &next_memory, &next_rules)? {
-                ensure_workspace_projections(
-                    &cwd,
-                    &next_memory,
-                    &next_rules,
-                    agent_workspace_cli(&cwd, None),
-                )?;
-                changed = true;
+                let fallback_cli =
+                    cwd.file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(|agent_id| {
+                            workspace
+                                .agents
+                                .iter()
+                                .find(|spec| spec.agent_id == agent_id)
+                                .map(|spec| &spec.cli)
+                        });
+                if let Some(cli) = agent_workspace_cli(&cwd, fallback_cli).supported() {
+                    ensure_workspace_projections(&cwd, &next_memory, &next_rules, cli)?;
+                    changed = true;
+                }
             }
         }
     }
@@ -2173,7 +2664,6 @@ fn prepare_loaded_workspace(workspace: &mut WorkspaceProject) -> Result<bool> {
     changed |= sync_workspace_agent_specs_from_disk(workspace)?;
     crate::bbs::ensure_project_projection(Path::new(&workspace.shared_dir))?;
     if changed {
-        refresh_workspace_sizes(workspace);
         save_workspace_files(workspace)?;
     }
     Ok(changed)
@@ -2249,9 +2739,18 @@ fn sync_workspace_agent_specs_from_disk(workspace: &mut WorkspaceProject) -> Res
         else {
             continue;
         };
-        let fallback_cli = existing.get(&agent_id).map(|spec| spec.cli);
+        let fallback_cli = existing.get(&agent_id).map(|spec| &spec.cli);
         let cli = agent_workspace_cli(&cwd, fallback_cli);
         let worktree_root = cwd.join("project-files");
+        let adapter_path = cli
+            .supported()
+            .map(|cli| path_str(&cwd.join(adapter_file_for_cli(cli))))
+            .or_else(|| {
+                existing
+                    .get(&agent_id)
+                    .map(|spec| spec.adapter_path.clone())
+            })
+            .unwrap_or_default();
         discovered.insert(
             agent_id.clone(),
             AgentLaunchSpec {
@@ -2262,7 +2761,7 @@ fn sync_workspace_agent_specs_from_disk(workspace: &mut WorkspaceProject) -> Res
                 worktree_root: path_str(&worktree_root),
                 shared_dir: workspace.shared_dir.clone(),
                 rules_dir: workspace.rules_dir.clone(),
-                adapter_path: path_str(&cwd.join(adapter_file_for_cli(cli))),
+                adapter_path,
                 project_id: workspace.project_id.clone(),
                 project_remote: workspace.remote_url.clone(),
                 project_base_ref: workspace.base_ref.clone(),
@@ -2287,17 +2786,14 @@ fn sync_workspace_agent_specs_from_disk(workspace: &mut WorkspaceProject) -> Res
     Ok(true)
 }
 
-fn agent_workspace_cli(
-    cwd: &Path,
-    fallback: Option<crate::pty::agent::AgentCli>,
-) -> crate::pty::agent::AgentCli {
+fn agent_workspace_cli(cwd: &Path, fallback: Option<&WorkspaceAgentCli>) -> WorkspaceAgentCli {
     read_agent_cli_yaml(&cwd.join("SHELL.yaml"))
         .or_else(|| read_agent_cli_yaml(&cwd.join("agent.yaml")))
-        .or(fallback)
-        .unwrap_or(crate::pty::agent::AgentCli::Codex)
+        .or_else(|| fallback.cloned())
+        .unwrap_or_else(|| crate::pty::agent::AgentCli::Codex.into())
 }
 
-fn read_agent_cli_yaml(path: &Path) -> Option<crate::pty::agent::AgentCli> {
+fn read_agent_cli_yaml(path: &Path) -> Option<WorkspaceAgentCli> {
     let parsed: AgentWorkspaceCliYaml =
         serde_yaml::from_str(&fs::read_to_string(path).ok()?).ok()?;
     parsed
@@ -2305,7 +2801,7 @@ fn read_agent_cli_yaml(path: &Path) -> Option<crate::pty::agent::AgentCli> {
         .as_deref()
         .or(parsed.command.as_deref())
         .or(parsed.shell.as_deref())
-        .and_then(agent_cli_from_name)
+        .and_then(WorkspaceAgentCli::from_name)
 }
 
 fn agent_cli_from_name(name: &str) -> Option<crate::pty::agent::AgentCli> {
@@ -2317,6 +2813,7 @@ fn agent_cli_from_name(name: &str) -> Option<crate::pty::agent::AgentCli> {
         }
         "opencode" | "open-code" => Some(crate::pty::agent::AgentCli::Opencode),
         "pi" => Some(crate::pty::agent::AgentCli::Pi),
+        "kimi" | "kimi-code" => Some(crate::pty::agent::AgentCli::Kimi),
         _ => None,
     }
 }
@@ -2611,11 +3108,6 @@ fn git_sync_warning_status(cwd: &Path) -> Option<String> {
     } else {
         None
     }
-}
-
-fn refresh_workspace_sizes(workspace: &mut WorkspaceProject) {
-    workspace.local_root_bytes = dir_size(Path::new(&workspace.local_root)).unwrap_or(0);
-    workspace.source_dir_bytes = dir_size(Path::new(&workspace.source_dir)).unwrap_or(0);
 }
 
 fn project_memory_dir(root: &Path) -> PathBuf {
@@ -3035,6 +3527,66 @@ mod tests {
         dir
     }
 
+    fn workspace_for_test(root: &Path, agents: Vec<AgentLaunchSpec>) -> WorkspaceProject {
+        WorkspaceProject {
+            project_id: "owner-repo".into(),
+            repo_full_name: "owner/repo".into(),
+            remote_url: "https://github.com/owner/repo.git".into(),
+            github_html_url: "https://github.com/owner/repo".into(),
+            default_branch: "main".into(),
+            base_ref: "origin/main".into(),
+            local_root: path_str(root),
+            local_root_bytes: 0,
+            source_dir: path_str(&root.join("source")),
+            source_dir_bytes: 0,
+            shared_dir: path_str(&root.join("project-memory")),
+            rules_dir: path_str(&root.join("project-rules")),
+            agents,
+            archived: false,
+            archived_at: None,
+        }
+    }
+
+    fn workspace_agent_for_test(
+        root: &Path,
+        agent_id: &str,
+        cli: WorkspaceAgentCli,
+    ) -> AgentLaunchSpec {
+        let cwd = root.join(".agent-workspaces").join(agent_id);
+        AgentLaunchSpec {
+            agent_id: agent_id.into(),
+            cli,
+            cwd: path_str(&cwd),
+            project_root: path_str(root),
+            worktree_root: path_str(&cwd.join("project-files")),
+            shared_dir: path_str(&root.join("project-memory")),
+            rules_dir: path_str(&root.join("project-rules")),
+            adapter_path: String::new(),
+            project_id: "owner-repo".into(),
+            project_remote: "https://github.com/owner/repo.git".into(),
+            project_base_ref: "origin/main".into(),
+        }
+    }
+
+    fn manager_with_workspace_for_test(workspace: WorkspaceProject) -> IntegrationManager {
+        let account_root = PathBuf::from(&workspace.local_root);
+        IntegrationManager {
+            active_workspace: Mutex::new(Some(workspace)),
+            storage_measurement: StorageMeasurementController {
+                runtime: Arc::new(Mutex::new(StorageMeasurementRuntime {
+                    last_success: None,
+                    updating: false,
+                    error: None,
+                    active_job_id: 0,
+                    child: None,
+                    shutting_down: false,
+                })),
+                cache_path: account_root.join(STORAGE_MEASUREMENT_CACHE_FILE),
+                account_root,
+            },
+        }
+    }
+
     fn init_git_repo(root: &Path) {
         run_git_plain(root, &["init"]).unwrap();
         run_git_plain(root, &["checkout", "-b", "main"]).unwrap();
@@ -3091,6 +3643,33 @@ mod tests {
         let yaml = serde_yaml::to_string(&meta).unwrap();
         assert!(yaml.contains("githubHtmlUrl: https://github.com/owner/repo"));
         assert!(yaml.contains("defaultBranch: main"));
+    }
+
+    #[test]
+    fn workspace_unknown_cli_round_trips_as_unsupported() {
+        let root = temp_dir("workspace-unknown-cli-roundtrip");
+        let workspace = workspace_for_test(
+            &root,
+            vec![workspace_agent_for_test(
+                &root,
+                "future-agent",
+                crate::pty::agent::AgentCli::Codex.into(),
+            )],
+        );
+        let mut json = serde_json::to_value(workspace).unwrap();
+        json["agents"][0]["cli"] = serde_json::Value::String("future-cli".into());
+
+        let loaded: WorkspaceProject = serde_json::from_value(json).unwrap();
+
+        assert_eq!(
+            loaded.agents[0].cli,
+            WorkspaceAgentCli::Unsupported("future-cli".into())
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["agents"][0]["cli"],
+            serde_json::Value::String("future-cli".into())
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3195,7 +3774,7 @@ mod tests {
             rules_dir: "/Users/me/Kota/Workspaces/owner-repo/project-rules".into(),
             agents: vec![AgentLaunchSpec {
                 agent_id: "alice".into(),
-                cli: crate::pty::agent::AgentCli::Codex,
+                cli: crate::pty::agent::AgentCli::Codex.into(),
                 cwd: "/Users/me/Kota/Workspaces/owner-repo/.agent-workspaces/alice".into(),
                 project_root: "/Users/me/Kota/Workspaces/owner-repo".into(),
                 worktree_root: "/Users/me/Kota/Workspaces/owner-repo/.agent-workspaces/alice"
@@ -3237,7 +3816,7 @@ mod tests {
             rules_dir: "/Users/me/.kota/projects/owner-repo/project-rules".into(),
             agents: vec![AgentLaunchSpec {
                 agent_id: "agent-123".into(),
-                cli: crate::pty::agent::AgentCli::Codex,
+                cli: crate::pty::agent::AgentCli::Codex.into(),
                 cwd: "/Users/me/.kota/projects/owner-repo/.agent-workspaces/agent-123".into(),
                 project_root: "/Users/me/.kota/projects/owner-repo".into(),
                 worktree_root:
@@ -3309,7 +3888,7 @@ mod tests {
             rules_dir: path_str(&root.join("project-rules")),
             agents: vec![AgentLaunchSpec {
                 agent_id: "stale".into(),
-                cli: crate::pty::agent::AgentCli::Codex,
+                cli: crate::pty::agent::AgentCli::Codex.into(),
                 cwd: path_str(&stale),
                 project_root: path_str(&root),
                 worktree_root: path_str(&stale.join("project-files")),
@@ -3331,6 +3910,93 @@ mod tests {
         assert!(workspace.agents[0]
             .worktree_root
             .ends_with(".agent-workspaces/jr-cc-47-1m/project-files"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_agent_sync_preserves_unknown_cli_without_provider_artifacts() {
+        let root = temp_dir("workspace-agent-sync-unknown");
+        let declared_cwd = root.join(".agent-workspaces/declared");
+        let missing_cwd = root.join(".agent-workspaces/missing");
+        for cwd in [&declared_cwd, &missing_cwd] {
+            fs::create_dir_all(cwd).unwrap();
+            fs::write(
+                cwd.join("agent.yaml"),
+                format!("id: {}\n", cwd.file_name().unwrap().to_string_lossy()),
+            )
+            .unwrap();
+        }
+        fs::write(declared_cwd.join("SHELL.yaml"), "provider: future-cli\n").unwrap();
+        fs::write(missing_cwd.join("SHELL.yaml"), "model: future-model\n").unwrap();
+
+        let mut workspace = workspace_for_test(
+            &root,
+            vec![
+                workspace_agent_for_test(
+                    &root,
+                    "declared",
+                    crate::pty::agent::AgentCli::Codex.into(),
+                ),
+                workspace_agent_for_test(
+                    &root,
+                    "missing",
+                    WorkspaceAgentCli::Unsupported("stored-future-cli".into()),
+                ),
+            ],
+        );
+
+        migrate_workspace_storage_layout(&mut workspace).unwrap();
+        assert!(sync_workspace_agent_specs_from_disk(&mut workspace).unwrap());
+        assert_eq!(
+            workspace.agents[0].cli,
+            WorkspaceAgentCli::Unsupported("future-cli".into())
+        );
+        assert_eq!(
+            workspace.agents[1].cli,
+            WorkspaceAgentCli::Unsupported("stored-future-cli".into())
+        );
+        for cwd in [&declared_cwd, &missing_cwd] {
+            assert!(!cwd.join("AGENTS.md").exists());
+            assert!(!cwd.join("CLAUDE.md").exists());
+            assert!(!cwd.join(".agents/skills").exists());
+            assert!(!cwd.join(".claude/skills").exists());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_agent_launch_rejects_existing_unsupported_cli_without_writes() {
+        let root = temp_dir("workspace-agent-launch-unknown");
+        let workspace = workspace_for_test(
+            &root,
+            vec![workspace_agent_for_test(
+                &root,
+                "future-agent",
+                WorkspaceAgentCli::Unsupported("future-cli".into()),
+            )],
+        );
+        let manager = manager_with_workspace_for_test(workspace);
+
+        let error = manager
+            .resolve_agent_launch("future-agent".into(), crate::pty::agent::AgentCli::Codex)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("unsupported CLI provider"));
+        assert!(error.contains("future-cli"));
+        assert!(!root.join(".agent-workspaces").exists());
+        assert!(!root.join("workspace.json").exists());
+        assert_eq!(
+            manager
+                .active_workspace
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .agents[0]
+                .cli,
+            WorkspaceAgentCli::Unsupported("future-cli".into())
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3425,6 +4091,127 @@ args:
         assert!(worktree_root.join(".git").exists());
         assert!(worktree_root.join("README.md").is_file());
         run_git_plain(&worktree_root, &["status", "--short"]).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn storage_measurement_parses_du_kib_as_bytes() {
+        assert_eq!(
+            parse_du_kib_output(b"47185920\t/Users/example/Kota\n").unwrap(),
+            48_318_382_080
+        );
+        assert!(parse_du_kib_output(b"").is_err());
+        assert!(parse_du_kib_output(b"not-a-size\t/tmp\n").is_err());
+    }
+
+    #[test]
+    fn storage_measurement_cache_round_trips_atomically() {
+        let root = temp_dir("storage-measurement-cache");
+        let path = root.join(STORAGE_MEASUREMENT_CACHE_FILE);
+        let record = StorageMeasurementRecord {
+            version: STORAGE_MEASUREMENT_CACHE_VERSION,
+            on_disk_bytes: 48_318_382_080,
+            available_bytes: 172_872_433_664,
+            measured_at: 1_753_000_000,
+            app_version: "0.1.7".into(),
+        };
+
+        save_storage_measurement_record(&path, &record).unwrap();
+
+        assert_eq!(
+            load_storage_measurement_record(&path).unwrap(),
+            Some(record)
+        );
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn storage_measurement_cache_rejects_unknown_versions() {
+        let root = temp_dir("storage-measurement-version");
+        let path = root.join(STORAGE_MEASUREMENT_CACHE_FILE);
+        fs::write(
+            &path,
+            r#"{"version":99,"onDiskBytes":1,"availableBytes":2,"measuredAt":3,"appVersion":"test"}"#,
+        )
+        .unwrap();
+
+        assert!(load_storage_measurement_record(&path).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn storage_measurement_status_keeps_stale_values_while_updating() {
+        let runtime = StorageMeasurementRuntime {
+            last_success: Some(StorageMeasurementRecord {
+                version: STORAGE_MEASUREMENT_CACHE_VERSION,
+                on_disk_bytes: 46,
+                available_bytes: 161,
+                measured_at: 123,
+                app_version: "test".into(),
+            }),
+            updating: true,
+            error: None,
+            active_job_id: 7,
+            child: None,
+            shutting_down: false,
+        };
+
+        assert_eq!(
+            storage_measurement_status_from_runtime(&runtime),
+            StorageMeasurementStatus {
+                updating: true,
+                on_disk_bytes: Some(46),
+                available_bytes: Some(161),
+                measured_at: Some(123),
+                error: None,
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn storage_measurement_runs_once_in_background_and_persists_success() {
+        let root = temp_dir("storage-measurement-worker");
+        fs::write(root.join("payload.bin"), vec![7_u8; 4096]).unwrap();
+        let cache_path = root.join(STORAGE_MEASUREMENT_CACHE_FILE);
+        let controller = StorageMeasurementController {
+            runtime: Arc::new(Mutex::new(StorageMeasurementRuntime {
+                last_success: None,
+                updating: false,
+                error: None,
+                active_job_id: 0,
+                child: None,
+                shutting_down: false,
+            })),
+            account_root: root.clone(),
+            cache_path: cache_path.clone(),
+        };
+
+        assert!(controller.start().updating);
+        assert!(controller.start().updating);
+        assert_eq!(
+            storage_measurement_runtime(&controller.runtime).active_job_id,
+            1
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            let status = controller.status();
+            if !status.updating {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "storage measurement did not finish");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        assert!(status.error.is_none(), "{:?}", status.error);
+        assert!(status.on_disk_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(status.available_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(load_storage_measurement_record(&cache_path)
+            .unwrap()
+            .is_some());
+        controller.shutdown();
         let _ = fs::remove_dir_all(root);
     }
 }

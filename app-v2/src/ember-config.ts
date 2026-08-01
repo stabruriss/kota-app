@@ -121,6 +121,7 @@ export const EMBER_DREAM_AGENT_PROMPT_TEMPLATE = dreamAgentPromptTemplate.trimEn
 export const EMBER_DREAM_CONSOLIDATE_PROMPT_TEMPLATE = dreamConsolidatePromptTemplate.trimEnd();
 // Must match HUMAN_TELEGRAM_TARGET_ID in src-tauri/src/ember.rs.
 export const HUMAN_TELEGRAM_TARGET_ID = '__kota_human_telegram__' as AgentId;
+export const EMBER_NOT_DELIVERED = 'Not Delivered';
 
 export function isHumanTelegramTarget(value: string | null | undefined): boolean {
   return typeof value === 'string' && value.trim() === HUMAN_TELEGRAM_TARGET_ID;
@@ -588,11 +589,11 @@ function normalizeHistoryRecord(value: unknown): EmberHistoryRecord[] {
     sentAt: typeof record.sentAt === 'string' ? record.sentAt : now,
     status: record.status === 'failed' ? 'failed' : 'delivered',
     triggeredBy: record.triggeredBy === 'manual' ? 'manual' : 'schedule',
-    error: typeof record.error === 'string' && record.error.trim() ? record.error.trim() : null,
+    error: normalizeEmberDeliveryError(record.error),
     scheduledFor: typeof record.scheduledFor === 'string' ? record.scheduledFor : null,
     startedAt: typeof record.startedAt === 'string' ? record.startedAt : null,
     finishedAt: typeof record.finishedAt === 'string' ? record.finishedAt : null,
-    reason: typeof record.reason === 'string' && record.reason.trim() ? record.reason.trim() : null,
+    reason: normalizeEmberDeliveryError(record.reason),
     missedRuns: normalizeNullablePositiveInt(record.missedRuns),
   }];
 }
@@ -664,7 +665,7 @@ function normalizeSchedule(value: unknown): EmberSchedule[] {
     lastRunAt: typeof schedule.lastRunAt === 'string' ? schedule.lastRunAt : null,
     runCount: normalizeNonNegativeInt(schedule.runCount, 0),
     status,
-    error: typeof schedule.error === 'string' ? schedule.error : null,
+    error: normalizeEmberDeliveryError(schedule.error),
     createdBy: normalizeActorRef(schedule.createdBy) ?? emberActorHuman(),
     updatedBy: normalizeActorRef(schedule.updatedBy) ?? normalizeActorRef(schedule.createdBy) ?? emberActorHuman(),
   }];
@@ -672,6 +673,12 @@ function normalizeSchedule(value: unknown): EmberSchedule[] {
 
 function emptyEmberState(): EmberState {
   return { drafts: [], schedules: [], history: [], appLastSeenAt: null };
+}
+
+function normalizeEmberDeliveryError(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const error = value.trim();
+  return error === 'app not running' ? EMBER_NOT_DELIVERED : error;
 }
 
 export function emberActorHuman(): EmberActorRef {

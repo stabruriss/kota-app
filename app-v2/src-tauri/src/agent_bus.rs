@@ -54,6 +54,12 @@ pub struct ActorDeliveryResult {
     pub duplicate: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ActorNoticeResult {
+    pub recorded: bool,
+    pub duplicate: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBusSendRequest {
@@ -290,6 +296,7 @@ impl AgentBusManager {
                 text: message.text.clone(),
                 target_agent_ids: vec![message.target_agent_id.clone()],
                 event_id: message.event_id.clone(),
+                actor_intent: Some(message.intent.clone()),
             },
         )?;
         violet::emit_room_changed(app, &message.project_root, "actor-message", changed_paths);
@@ -309,6 +316,7 @@ impl AgentBusManager {
                     text: skipped_text,
                     target_agent_ids: vec![message.target_agent_id.clone()],
                     event_id,
+                    actor_intent: Some("delivery-skipped".into()),
                 },
             )?;
             violet::emit_room_changed(app, &message.project_root, "actor-message", changed_paths);
@@ -329,6 +337,59 @@ impl AgentBusManager {
             skipped_reason: None,
             duplicate: false,
         })
+    }
+
+    pub(crate) fn record_actor_notice(
+        &self,
+        app: &AppHandle,
+        project_root: &Path,
+        record: ActorMessageRecord,
+        dedupe_key: Option<&str>,
+    ) -> Result<ActorNoticeResult> {
+        let (result, changed_paths) =
+            self.persist_actor_notice(project_root, record, dedupe_key)?;
+        if result.recorded {
+            violet::emit_room_changed(app, project_root, "actor-message", changed_paths);
+        }
+        Ok(result)
+    }
+
+    fn persist_actor_notice(
+        &self,
+        project_root: &Path,
+        record: ActorMessageRecord,
+        dedupe_key: Option<&str>,
+    ) -> Result<(ActorNoticeResult, Vec<PathBuf>)> {
+        let guard = self
+            .actor_message_log
+            .lock()
+            .map_err(|_| anyhow!("agent bus actor message log lock poisoned"))?;
+        if self.is_duplicate(project_root, dedupe_key)? {
+            return Ok((
+                ActorNoticeResult {
+                    recorded: false,
+                    duplicate: true,
+                },
+                Vec::new(),
+            ));
+        }
+
+        let changed_paths =
+            violet::record_actor_message(project_root, &record).map_err(|err| anyhow!(err))?;
+        if let Some(key) = dedupe_key.filter(|key| !key.trim().is_empty()) {
+            self.delivered_keys
+                .lock()
+                .map_err(|_| anyhow!("agent bus dedupe lock poisoned"))?
+                .insert(key.to_string());
+        }
+        drop(guard);
+        Ok((
+            ActorNoticeResult {
+                recorded: true,
+                duplicate: false,
+            },
+            changed_paths,
+        ))
     }
 
     fn record_actor_message(
@@ -1027,6 +1088,52 @@ mod tests {
         assert!(text.contains("from=\"bartender\""));
         assert!(text.contains("to=\"alice\""));
         assert!(text.contains("Resolve this conflict."));
+    }
+
+    #[test]
+    fn actor_notice_is_persisted_once_for_the_same_event() {
+        let root = std::env::temp_dir().join(format!(
+            "kota-actor-notice-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let manager = AgentBusManager::default();
+        let event_id = "ember-reminder-human-one";
+        let record = ActorMessageRecord {
+            actor_id: "ember".into(),
+            actor_name: "Ember".into(),
+            text: "Ember scheduled prompt\n\nTake a break.".into(),
+            target_agent_ids: vec!["__kota_human_telegram__".into()],
+            event_id: event_id.into(),
+            actor_intent: Some("reminder".into()),
+        };
+
+        let (first, first_paths) = manager
+            .persist_actor_notice(&root, record.clone(), Some(event_id))
+            .unwrap();
+        let (second, second_paths) = manager
+            .persist_actor_notice(&root, record, Some(event_id))
+            .unwrap();
+
+        assert!(first.recorded);
+        assert!(!first.duplicate);
+        assert!(!first_paths.is_empty());
+        assert!(!second.recorded);
+        assert!(second.duplicate);
+        assert!(second_paths.is_empty());
+        assert!(violet::actor_event_exists(&root, event_id).unwrap());
+        let raw = fs::read_to_string(
+            root.join("project-memory")
+                .join("raw_logs")
+                .join("actor-ember.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            raw.matches(&format!("- native_event_id: {event_id}"))
+                .count(),
+            1
+        );
+        assert!(raw.contains("- actor_intent: reminder"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -51,7 +51,7 @@ const BODY_HPAD = 6; // small breathing room on each side of the grid
 
 const Z_BASE = 100;
 
-const RATATUI_AGENT_CLIS = new Set(['codex', 'antigravity', 'opencode', 'pi']);
+const RATATUI_AGENT_CLIS = new Set(['codex', 'antigravity', 'opencode', 'pi', 'kimi']);
 const TERMINAL_BODY_SELECTOR = '[data-agent-terminal-body="true"]';
 
 export interface AgentWindowsLayerProps {
@@ -654,7 +654,7 @@ function SingleAgentWindow({
     // etc. This keeps keyboard layout / Option-symbol / dead-key output
     // on the browser's text-input path instead of guessing from e.key.
     if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) return;
-    const bytes = keyToPtyBytes(e);
+    const bytes = keyToPtyBytes(e, statusEvent?.cli);
     if (bytes != null) {
       e.preventDefault();
       e.stopPropagation();
@@ -897,13 +897,13 @@ function formatCompactRecordValue(value: number): string {
   return String(value);
 }
 
-function keyToPtyBytes(e: KeyboardEvent): string | null {
+function keyToPtyBytes(e: KeyboardEvent, cli?: AgentStatusEvent['cli']): string | null {
   if (['Shift', 'Meta', 'Control', 'Alt', 'CapsLock'].includes(e.key)) return null;
   if (e.key === 'ArrowUp') return '\x1b[A';
   if (e.key === 'ArrowDown') return '\x1b[B';
   if (e.key === 'ArrowRight') return '\x1b[C';
   if (e.key === 'ArrowLeft') return '\x1b[D';
-  if (e.key === 'Enter') return '\r';
+  if (e.key === 'Enter') return cli === 'kimi' ? '\x1b[13;1u' : '\r';
   if (e.key === 'Tab') return '\t';
   if (e.key === 'Backspace') return '\x7f';
   if (e.key === 'Delete') return '\x1b[3~';

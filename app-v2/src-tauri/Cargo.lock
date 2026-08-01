@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "kota-v2"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1895,6 +1895,7 @@ dependencies = [
  "dirs",
  "dispatch2",
  "flate2",
+ "libc",
  "notify",
  "objc2",
  "objc2-app-kit",

@@ -14,6 +14,8 @@ export interface Agent {
   avatarId?: string | null;
   avatarClass?: string;
   lifecycleStatus?: 'archived' | 'left' | string;
+  /** Raw provider name when this Kota build cannot launch the agent. */
+  unsupportedProvider?: string;
 }
 
 export type SeatState = 'speaking' | 'thinking' | 'idle' | 'empty';

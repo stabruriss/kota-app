@@ -321,6 +321,7 @@ fn now_unix() -> u64 {
 }
 
 static STATE_LOCK: Mutex<()> = Mutex::new(());
+static EMBER_REMINDER_LOCK: Mutex<()> = Mutex::new(());
 static WORKING_AGENT_IDS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
 
 fn working_agent_ids() -> &'static Mutex<BTreeSet<String>> {
@@ -3457,6 +3458,9 @@ fn push_reply(token: &str, chat_id: i64, selected: &LmSelected, speaker_name: &s
 }
 
 pub fn send_ember_reminder(request: LmEmberReminderRequest) -> Result<()> {
+    let _guard = EMBER_REMINDER_LOCK
+        .lock()
+        .map_err(|_| anyhow!("Laughing Man Ember reminder lock poisoned"))?;
     let event_id = request.event_id.trim();
     if event_id.is_empty() {
         bail!("Laughing Man reminder requires an event id");
@@ -3513,6 +3517,11 @@ pub fn send_ember_reminder(request: LmEmberReminderRequest) -> Result<()> {
         offline_recorded_at: None,
     });
     Ok(())
+}
+
+pub(crate) fn ember_reminder_route_configured() -> bool {
+    let state = load_state();
+    load_token().is_some() && state.owner_user_id.is_some()
 }
 
 fn message_from_update(update: &JsonValue) -> Result<&JsonValue> {

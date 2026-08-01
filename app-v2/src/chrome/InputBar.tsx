@@ -19,6 +19,13 @@ import type { Agent, AgentId } from '../types/scene';
 import { ProjectAgentName, splitProjectAgentName } from './ProjectAgentName';
 import { avatarClassForAgentFallback, avatarImageStyleForId } from '../lib/hero-avatars';
 import { AGENT_SLOT_KEY_RANGE_LABEL, MAX_AGENT_SLOTS } from '../lib/agent-slots';
+import {
+  ROOM_QUOTE_MAX,
+  serializeRoomQuotePrompt,
+  type RoomQuoteInsertResult,
+  type RoomQuoteReference,
+} from '../lib/room-quote';
+import { RoomQuoteMark } from '../lib/room-quote-mark';
 
 // ──────────────────────────────────────────── Component ────
 export interface InputBarProps {
@@ -40,6 +47,7 @@ export interface InputBarProps {
   };
   privacyMode?: boolean;
   privacyControlsEnabled?: boolean;
+  quoteProjectRoot?: string | null;
   /** Submit handler. Composer routing is explicit: selected target or
    *  confirmed broadcast recipients. The rich composer serializes file
    *  chips to escaped absolute paths right before submit. */
@@ -61,6 +69,7 @@ export interface InputBarHandle {
   focusEnd: () => void;
   insertPaths: (paths: readonly string[]) => void;
   insertAttachment: (attachment: ComposerAttachment) => void;
+  insertQuote: (quote: RoomQuoteReference) => RoomQuoteInsertResult;
   serialize: () => { payload: string; mentions: ComposerMention[] };
   clear: () => void;
 }
@@ -259,9 +268,13 @@ function normalizeSerializedText(text: string): string {
     .replace(/\n{3,}/g, '\n\n');
 }
 
-function serializeEditor(editor: HTMLElement | null): string {
+function serializeEditor(
+  editor: HTMLElement | null,
+  quotes: readonly RoomQuoteReference[],
+): string {
   if (!editor) return '';
-  return normalizeSerializedText(serializeNode(editor, { includeAttachments: true }));
+  const body = normalizeSerializedText(serializeNode(editor, { includeAttachments: true }));
+  return serializeRoomQuotePrompt(quotes, body);
 }
 
 function collectMentions(editor: HTMLElement | null): ComposerMention[] {
@@ -493,6 +506,16 @@ function createMentionChip(agentId: AgentId, aka: string): HTMLElement {
   return chip;
 }
 
+function shortQuoteTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function normalizedProjectRoot(value?: string | null): string {
+  return value?.trim().replace(/\/+$/, '') ?? '';
+}
+
 export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function InputBar({
   value,
   onChange,
@@ -509,6 +532,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   broadcastPrivacyInfo,
   privacyMode = false,
   privacyControlsEnabled = false,
+  quoteProjectRoot,
   onSend,
   onPasteImage,
   onMaterializeAttachments,
@@ -520,10 +544,12 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const previewUrlsRef = useRef<Set<string>>(new Set());
   const sendPendingRef = useRef(false);
+  const quotesRef = useRef<RoomQuoteReference[]>([]);
   const [hasDraftContent, setHasDraftContent] = useState(() => value.trim().length > 0);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [sendPending, setSendPending] = useState(false);
+  const [quotes, setQuotes] = useState<RoomQuoteReference[]>([]);
   const selectedTarget = targetAgent ?? captainId ?? null;
   const hasSendTarget = broadcastMode ? broadcastRecipientCount > 0 : !!selectedTarget;
   const embedded = variant === 'embedded';
@@ -561,10 +587,16 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
       ))
       .slice(0, MAX_AGENT_SLOTS);
 
+  const updateQuotes = useCallback((next: readonly RoomQuoteReference[]) => {
+    const copied = [...next];
+    quotesRef.current = copied;
+    setQuotes(copied);
+  }, []);
+
   const syncEditorState = useCallback(() => {
     const editor = fieldRef.current;
     if (!editor) return;
-    const serialized = serializeEditor(editor);
+    const serialized = serializeEditor(editor, quotesRef.current);
     setHasDraftContent(serialized.trim().length > 0);
     editor.dataset.empty = serialized.trim().length > 0 ? 'false' : 'true';
     onChange(editorPlainText(editor));
@@ -594,26 +626,29 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
 
   const clearDraft = useCallback(() => {
     const editor = fieldRef.current;
-    if (!editor) return;
-    editor.querySelectorAll(ATTACHMENT_SELECTOR).forEach(revokeChipPreview);
-    clearEditor(editor);
+    if (editor) {
+      editor.querySelectorAll(ATTACHMENT_SELECTOR).forEach(revokeChipPreview);
+      clearEditor(editor);
+      editor.dataset.empty = 'true';
+    }
+    updateQuotes([]);
     setHasDraftContent(false);
-    editor.dataset.empty = 'true';
     onChange('');
-  }, [onChange, revokeChipPreview]);
+  }, [onChange, revokeChipPreview, updateQuotes]);
 
   useLayoutEffect(() => {
     const editor = fieldRef.current;
     if (!editor) return;
     const plainText = editorPlainText(editor);
-    const hasAttachments = !!editor.querySelector(ATTACHMENT_SELECTOR);
-    if (value === plainText || (hasAttachments && value === plainText)) {
-      editor.dataset.empty = serializeEditor(editor).trim().length > 0 ? 'false' : 'true';
+    if (value === plainText) {
+      editor.dataset.empty = serializeEditor(editor, quotesRef.current).trim().length > 0
+        ? 'false'
+        : 'true';
       return;
     }
     editor.querySelectorAll(ATTACHMENT_SELECTOR).forEach(revokeChipPreview);
     setEditorPlainText(editor, value);
-    const serialized = serializeEditor(editor);
+    const serialized = serializeEditor(editor, quotesRef.current);
     setHasDraftContent(serialized.trim().length > 0);
     editor.dataset.empty = serialized.trim().length > 0 ? 'false' : 'true';
   }, [value, revokeChipPreview]);
@@ -728,6 +763,43 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     [insertAttachments],
   );
 
+  const insertQuote = useCallback((quote: RoomQuoteReference): RoomQuoteInsertResult => {
+    const editor = fieldRef.current;
+    if (!editor || disabled) return 'blocked';
+    const currentRoot = normalizedProjectRoot(quoteProjectRoot);
+    const originRoot = normalizedProjectRoot(quote.projectRoot);
+    if (!currentRoot || !originRoot || currentRoot !== originRoot) return 'blocked';
+    const existing = quotesRef.current;
+    if (existing.some((item) => item.ref === quote.ref)) return 'duplicate';
+    if (existing.length >= ROOM_QUOTE_MAX) return 'limit';
+
+    updateQuotes([...existing, quote]);
+    setHasDraftContent(true);
+    editor.dataset.empty = 'false';
+    focusEditorAtEnd(editor);
+    return 'inserted';
+  }, [disabled, quoteProjectRoot, updateQuotes]);
+
+  useEffect(() => {
+    const currentRoot = normalizedProjectRoot(quoteProjectRoot);
+    const existing = quotesRef.current;
+    const next = existing.filter(
+      (quote) => normalizedProjectRoot(quote.projectRoot) === currentRoot,
+    );
+    if (next.length === existing.length) return;
+    updateQuotes(next);
+    syncEditorState();
+  }, [quoteProjectRoot, syncEditorState, updateQuotes]);
+
+  const removeQuote = useCallback((ref: string) => {
+    const existing = quotesRef.current;
+    const next = existing.filter((quote) => quote.ref !== ref);
+    if (next.length === existing.length) return;
+    updateQuotes(next);
+    syncEditorState();
+    if (fieldRef.current) focusEditorAtEnd(fieldRef.current);
+  }, [syncEditorState, updateQuotes]);
+
   useImperativeHandle(ref, () => ({
     focus: () => fieldRef.current?.focus({ preventScroll: true }),
     focusEnd: () => {
@@ -735,12 +807,13 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     },
     insertPaths,
     insertAttachment,
+    insertQuote,
     serialize: () => ({
-      payload: serializeEditor(fieldRef.current).trimEnd(),
+      payload: serializeEditor(fieldRef.current, quotesRef.current).trimEnd(),
       mentions: collectMentions(fieldRef.current),
     }),
     clear: clearDraft,
-  }), [clearDraft, insertAttachment, insertPaths]);
+  }), [clearDraft, insertAttachment, insertPaths, insertQuote]);
 
   useEffect(() => {
     if (disabled || !useTauriRuntime()) return;
@@ -771,7 +844,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   const handleSend = async () => {
     if (!onSend) return;
     if (sendPendingRef.current) return;
-    const payload = serializeEditor(fieldRef.current).trimEnd();
+    const payload = serializeEditor(fieldRef.current, quotesRef.current).trimEnd();
     const mentions = collectMentions(fieldRef.current);
     if (payload.length === 0) return;
     if (!canSend) return;
@@ -948,6 +1021,46 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             )}
           </div>
         )}
+        {quotes.length > 0 && (
+          <div
+            className="ib-quote-shelf"
+            aria-label="Quoted messages"
+            data-testid="ib-quote-shelf"
+          >
+            {quotes.map((quote) => {
+              const to = quote.to.map((party) => party.name).join(', ') || 'Room';
+              return (
+                <div
+                  key={quote.ref}
+                  className="ib-quote-chip"
+                  data-testid="ib-quote-chip"
+                  aria-label={`Quote from ${quote.from.name}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                >
+                  <span className="ib-quote-mark">
+                    <RoomQuoteMark />
+                  </span>
+                  <span className="ib-quote-copy">
+                    <span className="ib-quote-meta">
+                      {quote.from.name} → {to} · {shortQuoteTime(quote.at)}
+                    </span>
+                    <span className="ib-quote-excerpt">{quote.excerpt}</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="ib-quote-remove"
+                    aria-label={`Remove quote from ${quote.from.name}`}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => removeQuote(quote.ref)}
+                    disabled={disabled}
+                  >
+                    <span aria-hidden="true">×</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
         <div
           ref={fieldRef}
           className="ib-field ib-rich-field"
@@ -1033,6 +1146,9 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
               >
                 <PrivacyToolIcon />
               </button>
+            )}
+            {!embedded && quotes.length >= ROOM_QUOTE_MAX && (
+              <span className="ib-quote-cap" data-testid="ib-quote-cap">4 quotes max</span>
             )}
           </div>
           <div className="ib-toolbar-spacer" />

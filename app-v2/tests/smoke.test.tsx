@@ -3,6 +3,7 @@ import { createRef, useState, type ComponentProps } from 'react';
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from '../src/App';
+import { formatStorageMeasurementAge } from '../src/chrome/TavernModal';
 import { FileTree } from '../src/chrome/FileTree';
 import { AgentWindowsLayer, terminalDropTargetAtPosition, type AgentWindowsLayerHandle } from '../src/chrome/AgentWindowsLayer';
 import {
@@ -17,19 +18,38 @@ import {
   InputBar,
   escapePromptPath,
   type ComposerAttachment,
+  type InputBarHandle,
 } from '../src/chrome/InputBar';
-import { VioletRoomPanel } from '../src/chrome/VioletRoomPanel';
+import {
+  MarkdownText,
+  VioletRoomPanel,
+  mergeSyncedNativeMessages,
+} from '../src/chrome/VioletRoomPanel';
 import { Stage } from '../src/chrome/Stage';
 import { RightColumn } from '../src/chrome/RightColumn';
+import {
+  createEmberHistoryRecord,
+  createEmberSchedule,
+  EMBER_NOT_DELIVERED,
+  emberStorageKey,
+  HUMAN_TELEGRAM_TARGET_ID,
+} from '../src/ember-config';
 import { emitFileTreeAgentHover } from '../src/lib/file-tree-agent-hover';
 import {
   __clearVioletComposerSentHistoryForTests,
   emitVioletComposerDelivery,
   emitVioletComposerSent,
+  VIOLET_COMPOSER_AGENT_EXIT_REASON,
   violetComposerSentHistory,
 } from '../src/chrome/violet-room-events';
 import type { AgentId } from '../src/types/scene';
 import type { WorkspaceTreeListing, WorkspaceTreePathRequest } from '../src/types/tree';
+import violetMessageOrderCases from './fixtures/violet-message-order.json';
+import {
+  parseRoomQuotePrompt,
+  serializeRoomQuotePrompt,
+  type RoomQuoteReference,
+} from '../src/lib/room-quote';
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -51,6 +71,100 @@ const recruitedHeroAgents: Record<'hero-cc' | 'hero-dex', string[]> = {
   'hero-cc': [],
   'hero-dex': [],
 };
+
+function hydrationAgent(agentId: string, projectRoot: string): ptyClient.WorkspaceProject['agents'][number] {
+  return {
+    agentId,
+    cli: 'codex',
+    cwd: `${projectRoot}/.agent-workspaces/${agentId}`,
+    projectRoot,
+    worktreeRoot: `${projectRoot}/.agent-workspaces/${agentId}/project-files`,
+    sharedDir: `${projectRoot}/project-memory`,
+    rulesDir: `${projectRoot}/project-rules`,
+    adapterPath: `${projectRoot}/.agent-workspaces/${agentId}/AGENTS.md`,
+    args: ['--model', 'default'],
+    projectId: projectRoot.split('/').at(-1),
+    projectBaseRef: 'origin/main',
+  };
+}
+
+function hydrationWorkspace(
+  projectId: string,
+  agentIds: readonly string[],
+): ptyClient.WorkspaceProject {
+  const localRoot = `/tmp/kota-hydration/${projectId}`;
+  return {
+    projectId,
+    repoFullName: `mock/${projectId}`,
+    remoteUrl: `https://github.com/mock/${projectId}.git`,
+    githubHtmlUrl: `https://github.com/mock/${projectId}`,
+    defaultBranch: 'main',
+    baseRef: 'origin/main',
+    localRoot,
+    localRootBytes: 0,
+    sourceDir: `${localRoot}/source`,
+    sourceDirBytes: 0,
+    sharedDir: `${localRoot}/project-memory`,
+    rulesDir: `${localRoot}/project-rules`,
+    agents: agentIds.map((agentId) => hydrationAgent(agentId, localRoot)),
+  };
+}
+
+function hydrationIdentity(agentId: string, displayName = agentId): ptyClient.ProjectAgentIdentity {
+  return {
+    agentId,
+    displayName,
+    sourceHeroId: 'hero-dex',
+    status: 'active',
+    provider: 'codex',
+    avatarId: null,
+  };
+}
+
+function hydrationDetail(
+  agentId: string,
+  projectRoot: string,
+  displayName = agentId,
+): ptyClient.ProjectAgentDetail {
+  return {
+    agentId,
+    displayName,
+    sourceHeroId: 'hero-dex',
+    sourceHeroName: 'Dex',
+    projectId: projectRoot.split('/').at(-1) ?? 'hydration-project',
+    projectName: projectRoot.split('/').at(-1) ?? 'hydration-project',
+    cli: 'codex',
+    provider: 'codex',
+    model: 'default',
+    effort: 'xhigh',
+    avatarId: null,
+    skills: [],
+    args: ['--model', 'default'],
+    ghost: '',
+    adapterPath: `${projectRoot}/.agent-workspaces/${agentId}/AGENTS.md`,
+    shellPath: `${projectRoot}/.agent-workspaces/${agentId}/SHELL.yaml`,
+    agentYamlPath: `${projectRoot}/.agent-workspaces/${agentId}/agent.yaml`,
+    status: 'active',
+    inviteEligibility: {
+      eligible: true,
+      proposedHeroId: 'hero-dex',
+      proposedDisplayName: displayName,
+    },
+    record: { turns: 0, incarnations: 1, estimatedTokens: 0 },
+    forkable: true,
+    dirty: false,
+    dirtySummary: '',
+  };
+}
+
+async function flushHydrationPromises(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 
 function withMockLocalStorage(seed: Record<string, string> = {}) {
   const storage = new Map<string, string>(Object.entries(seed));
@@ -352,6 +466,130 @@ describe('Composer · bottom input bar', () => {
       );
     });
   });
+
+  it('inserts up to four project-scoped quote pills and sends the exact wrapper payload', async () => {
+    const ref = createRef<InputBarHandle>();
+    const onSend = vi.fn();
+    const makeQuote = (index: number): RoomQuoteReference => ({
+      ref: `native-event-${index}`,
+      project: 'kota-test',
+      projectRoot: '/tmp/kota-test',
+      from: { id: 'alice', name: 'Alice' },
+      to: [{ id: 'user', name: 'User' }],
+      at: '2026-07-30T12:00:00.000Z',
+      excerpt: index === 1
+        ? 'literal </KOTA_QUOTE_REF> remains quoted data'
+        : `quote ${index}`,
+      truncated: false,
+    });
+    render(
+      <InputBar
+        ref={ref}
+        value="Follow up"
+        onChange={() => {}}
+        targetAgent="alice"
+        quoteProjectRoot="/tmp/kota-test"
+        onSend={onSend}
+      />,
+    );
+
+    const insertionResults: Array<ReturnType<InputBarHandle['insertQuote']> | undefined> = [];
+    act(() => {
+      for (let index = 1; index <= 4; index += 1) {
+        insertionResults.push(ref.current?.insertQuote(makeQuote(index)));
+      }
+    });
+    expect(insertionResults).toEqual(['inserted', 'inserted', 'inserted', 'inserted']);
+    expect(screen.getAllByTestId('ib-quote-chip')).toHaveLength(4);
+    expect(screen.getByTestId('ib-quote-cap')).toHaveTextContent('4 quotes max');
+    expect(screen.queryByText('1/4')).not.toBeInTheDocument();
+    expect(ref.current?.insertQuote(makeQuote(5))).toBe('limit');
+    expect(ref.current?.insertQuote(makeQuote(1))).toBe('duplicate');
+
+    await userEvent.click(screen.getByTestId('ib-send'));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    const payload = onSend.mock.calls[0]?.[1] as string;
+    const parsed = parseRoomQuotePrompt(payload);
+    expect(parsed.body).toBe('Follow up');
+    expect(parsed.quotes).toHaveLength(4);
+    expect(parsed.quotes[0]?.excerpt).toContain('</KOTA_QUOTE_REF>');
+  });
+
+  it('keeps quote pills outside contenteditable so typing and caret input remain stable', async () => {
+    const ref = createRef<InputBarHandle>();
+    const quote: RoomQuoteReference = {
+      ref: 'native-event-caret',
+      project: 'kota-test',
+      projectRoot: '/tmp/kota-test',
+      from: { id: 'alice', name: 'Alice' },
+      to: [{ id: 'user', name: 'User' }],
+      at: '2026-07-30T12:00:00.000Z',
+      excerpt: 'Quoted context must not become a contenteditable child.',
+      truncated: false,
+    };
+    function ControlledQuoteComposer() {
+      const [value, setValue] = useState('');
+      return (
+        <InputBar
+          ref={ref}
+          value={value}
+          onChange={setValue}
+          targetAgent="alice"
+          quoteProjectRoot="/tmp/kota-test"
+          onSend={vi.fn()}
+        />
+      );
+    }
+    render(<ControlledQuoteComposer />);
+
+    act(() => {
+      expect(ref.current?.insertQuote(quote)).toBe('inserted');
+    });
+    const field = screen.getByTestId('input-field');
+    const pill = screen.getByTestId('ib-quote-chip');
+    expect(field.contains(pill)).toBe(false);
+    expect(pill.querySelector('svg')).not.toBeNull();
+
+    await userEvent.click(field);
+    await userEvent.type(field, 'typing after quote');
+    expect(field).toHaveTextContent('typing after quote');
+    const parsed = parseRoomQuotePrompt(ref.current?.serialize().payload ?? '');
+    expect(parsed.body).toBe('typing after quote');
+    expect(parsed.quotes).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove quote from Alice' }));
+    expect(screen.queryByTestId('ib-quote-chip')).not.toBeInTheDocument();
+    expect(field).toHaveTextContent('typing after quote');
+    expect(parseRoomQuotePrompt(ref.current?.serialize().payload ?? '')).toEqual({
+      quotes: [],
+      body: 'typing after quote',
+    });
+  });
+
+  it('rejects quote pills from another project', () => {
+    const ref = createRef<InputBarHandle>();
+    render(
+      <InputBar
+        ref={ref}
+        value=""
+        onChange={() => {}}
+        targetAgent="alice"
+        quoteProjectRoot="/tmp/current"
+        onSend={vi.fn()}
+      />,
+    );
+    expect(ref.current?.insertQuote({
+      ref: 'other-event',
+      project: 'other',
+      projectRoot: '/tmp/other',
+      from: { id: 'alice', name: 'Alice' },
+      to: [{ id: 'user', name: 'User' }],
+      at: '2026-07-30T12:00:00.000Z',
+      excerpt: 'cross-project content',
+      truncated: false,
+    })).toBe('blocked');
+    expect(screen.queryByTestId('ib-quote-chip')).not.toBeInTheDocument();
+  });
 });
 
 // ═════════════════════════════ shell landmarks ═════════════════════════════
@@ -396,6 +634,88 @@ describe('M1 · canvas shell landmarks', () => {
     expect(screen.getByLabelText('Open Violet summary history')).toBeInTheDocument();
     expect(screen.queryByText('Hot Memory')).not.toBeInTheDocument();
     expect(screen.queryByText(/15 records/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the human Ember target available without Laughing Man', async () => {
+    const workspace = hydrationWorkspace('ember-human-target', []);
+    vi.spyOn(ptyClient, 'lmStatus').mockResolvedValue(null);
+    vi.spyOn(ptyClient, 'loadAccountUserIdentity').mockResolvedValue({
+      name: 'Human Tester',
+      avatarId: 'user-default',
+    });
+
+    const { container } = render(
+      <RightColumn
+        sceneKey="conversation"
+        onOpenHotMem={vi.fn()}
+        workspace={workspace}
+        projectRoot={workspace.localRoot}
+      />,
+    );
+
+    await userEvent.click(screen.getByLabelText('Open Ember schedules and drafts'));
+    await userEvent.click(screen.getByRole('button', { name: 'New' }));
+    const humanTarget = await screen.findByRole('button', { name: 'Human Tester' });
+
+    expect(humanTarget).toHaveClass('human');
+    expect(screen.queryByText('No active agent')).not.toBeInTheDocument();
+    expect(container).not.toHaveTextContent(HUMAN_TELEGRAM_TARGET_ID);
+  });
+
+  it('shows an Ember delivery alert while a not-delivered schedule remains', async () => {
+    const workspace = hydrationWorkspace('ember-delivery-alert', []);
+    const schedule = {
+      ...createEmberSchedule({
+        text: 'Retry this reminder',
+        targetAgentId: HUMAN_TELEGRAM_TARGET_ID,
+        targetAgentName: 'Human Tester',
+        mode: 'delay',
+        delayAmount: 10,
+        delayUnit: 'minutes',
+      }),
+      error: 'app not running',
+    };
+    const storageKey = emberStorageKey(workspace.projectId);
+    expect(storageKey).not.toBeNull();
+    const mockStorage = withMockLocalStorage({
+      [storageKey!]: JSON.stringify({
+        drafts: [],
+        schedules: [schedule],
+        history: [
+          createEmberHistoryRecord(
+            schedule,
+            'failed',
+            new Date().toISOString(),
+            'app not running',
+          ),
+        ],
+      }),
+    });
+    const view = render(
+      <RightColumn
+        sceneKey="conversation"
+        onOpenHotMem={vi.fn()}
+        workspace={workspace}
+        projectRoot={workspace.localRoot}
+      />,
+    );
+
+    try {
+      const emberCard = screen.getByLabelText('Open Ember schedules and drafts, not delivered');
+      expect(emberCard.querySelector('.ember-delivery-alert')).toBeInTheDocument();
+
+      fireEvent.click(emberCard);
+      expect(screen.getAllByText(EMBER_NOT_DELIVERED).length).toBeGreaterThan(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Open Ember schedules and drafts')).toBeInTheDocument();
+        expect(view.container.querySelector('.ember-delivery-alert')).not.toBeInTheDocument();
+      });
+    } finally {
+      view.unmount();
+      mockStorage.restore();
+    }
   });
 
   it('surfaces automatic Violet summary failures', async () => {
@@ -444,7 +764,7 @@ describe('M1 · canvas shell landmarks', () => {
       .toBeInTheDocument();
   });
 
-  it('fans out Dream prompts across opened projects and consolidates each project root', async () => {
+  it('fans out Dream prompts and consolidates delivered projects in one account batch', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
     const workspace = {
@@ -537,10 +857,11 @@ describe('M1 · canvas shell landmarks', () => {
         await Promise.resolve();
       });
 
-      expect(consolidate.mock.calls.map(([request]) => request.projectRoot)).toEqual([
-        '/tmp/kota/proj',
-        '/tmp/kota/other',
-      ]);
+      expect(consolidate).toHaveBeenCalledTimes(1);
+      expect(consolidate).toHaveBeenCalledWith({
+        projectRoots: ['/tmp/kota/proj', '/tmp/kota/other'],
+        provider: 'codex',
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -629,7 +950,7 @@ describe('M1 · canvas shell landmarks', () => {
     }
   });
 
-  it('consolidates delivered Dream roots serially', async () => {
+  it('keeps one account-wide Dream consolidation in flight', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
     const workspace = {
@@ -661,10 +982,10 @@ describe('M1 · canvas shell landmarks', () => {
       projectDreamsPath: `${request.projectRoot}/project-memory/dreams.md`,
       projected: false,
     }));
-    const startedRoots: string[] = [];
+    const startedRootBatches: string[][] = [];
     const resolvers: Array<() => void> = [];
     const consolidate = vi.spyOn(ptyClient, 'emberConsolidateDreams').mockImplementation((request) => {
-      startedRoots.push(request.projectRoot ?? '');
+      startedRootBatches.push(request.projectRoots ?? []);
       return new Promise((resolve) => {
         resolvers.push(() => resolve({
           accountDreamsPath: '/tmp/Kota/dreams/dreams.md',
@@ -717,7 +1038,7 @@ describe('M1 · canvas shell landmarks', () => {
         vi.advanceTimersByTime(120_000);
         await Promise.resolve();
       });
-      expect(startedRoots).toEqual(['/tmp/kota/proj']);
+      expect(startedRootBatches).toEqual([['/tmp/kota/proj', '/tmp/kota/other']]);
       expect(consolidate).toHaveBeenCalledTimes(1);
 
       await act(async () => {
@@ -725,13 +1046,8 @@ describe('M1 · canvas shell landmarks', () => {
         await Promise.resolve();
         await Promise.resolve();
       });
-      expect(startedRoots).toEqual(['/tmp/kota/proj', '/tmp/kota/other']);
-      expect(consolidate).toHaveBeenCalledTimes(2);
-
-      await act(async () => {
-        resolvers[1]?.();
-        await Promise.resolve();
-      });
+      expect(startedRootBatches).toEqual([['/tmp/kota/proj', '/tmp/kota/other']]);
+      expect(consolidate).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1120,6 +1436,26 @@ describe('M1 · canvas shell landmarks', () => {
 //  Live PTYs still render as floating windows, while the bottom composer
 //  stays mounted for multi-line prompt editing and one-shot injection.
 describe('W3+W5 · composer target picker', () => {
+  it.each(violetMessageOrderCases)('$name', ({ messages, expectedIds }) => {
+    const merged = mergeSyncedNativeMessages(
+      [],
+      messages.map((message) => ({
+        ...message,
+        sessionId: 'shared-order-fixture',
+        agentId: 'alice',
+        shell: 'codex',
+        role: 'assistant',
+        kind: 'message',
+        text: `text for ${message.id}`,
+        sourcePath: null,
+        nativeEventId: message.id,
+      })),
+      { preserveLoadedHistory: true },
+    );
+
+    expect(merged.map((message) => message.id)).toEqual(expectedIds);
+  });
+
   it('default state: composer is mounted, broadcast is off, no windows', () => {
     render(<App />);
     expect(screen.getByTestId('ib-target-pill')).toBeInTheDocument();
@@ -1222,6 +1558,394 @@ describe('W3+W5 · composer target picker', () => {
     expect(document.querySelector('.violet-room-footer')).not.toBeInTheDocument();
   });
 
+  it.each([
+    {
+      label: 'a local image link',
+      markdown: '[local mock](/tmp/kota-image-preview.png)',
+      path: '/tmp/kota-image-preview.png',
+    },
+    {
+      label: 'an angle-wrapped Markdown image',
+      markdown: '![local mock](</tmp/kota image preview.png>)',
+      path: '/tmp/kota image preview.png',
+    },
+  ])('previews and opens $label', async ({ markdown, path }) => {
+    const resolveSpy = vi.spyOn(ptyClient, 'violetResolveFileRef').mockResolvedValue({
+      path,
+      isDir: false,
+    });
+    vi.spyOn(ptyClient, 'fileImageDataUrl').mockResolvedValue('data:image/png;base64,aW1hZ2U=');
+    const openSpy = vi.spyOn(ptyClient, 'violetOpenFileRef').mockResolvedValue();
+
+    const { container } = render(
+      <MarkdownText
+        text={markdown}
+        projectRoot="/tmp/kota-test"
+        enableLocalFileRefs
+      />,
+    );
+
+    const preview = await screen.findByRole('button', { name: 'local mock' });
+    expect(preview).toHaveAttribute('src', 'data:image/png;base64,aW1hZ2U=');
+    expect(container).not.toHaveTextContent(markdown);
+    expect(container).not.toHaveTextContent('!');
+    expect(resolveSpy).toHaveBeenCalledWith({
+      projectRoot: '/tmp/kota-test',
+      path,
+    });
+
+    await userEvent.click(preview);
+    expect(openSpy).toHaveBeenCalledWith({
+      projectRoot: '/tmp/kota-test',
+      path,
+    });
+  });
+
+  it('leaves standalone and escaped exclamation marks as text', () => {
+    const resolveSpy = vi.spyOn(ptyClient, 'violetResolveFileRef');
+    const { container } = render(
+      <MarkdownText
+        text={'Standalone! \\![literal](</tmp/not-an-image.png>)'}
+        projectRoot="/tmp/kota-test"
+        enableLocalFileRefs
+      />,
+    );
+
+    expect(container).toHaveTextContent('Standalone! ![literal](</tmp/not-an-image.png>)');
+    expect(container.querySelector('img')).not.toBeInTheDocument();
+    expect(resolveSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps remote Markdown images as links without fetching them', () => {
+    const resolveSpy = vi.spyOn(ptyClient, 'violetResolveFileRef');
+    const imageSpy = vi.spyOn(ptyClient, 'fileImageDataUrl');
+    render(
+      <MarkdownText
+        text="![remote mock](https://example.com/mock.png)"
+        projectRoot="/tmp/kota-test"
+        enableLocalFileRefs
+      />,
+    );
+
+    expect(screen.getByRole('link', { name: 'remote mock' })).toHaveAttribute(
+      'href',
+      'https://example.com/mock.png',
+    );
+    expect(resolveSpy).not.toHaveBeenCalled();
+    expect(imageSpy).not.toHaveBeenCalled();
+  });
+
+  it('shows Ember human reminders with the account name and no internal target id', async () => {
+    const projectRoot = '/tmp/kota-ember-human-room';
+    vi.spyOn(ptyClient, 'loadAccountUserIdentity').mockResolvedValue({
+      name: 'Human Tester',
+      avatarId: 'user-default',
+    });
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages: [{
+        id: 'ember-human-reminder',
+        sessionId: 'actor-ember',
+        agentId: 'ember',
+        shell: 'system',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-22T10:00:00.000Z',
+        text: 'Ember scheduled prompt\n\nTake a break.',
+        sourcePath: null,
+        nativeEventId: 'ember-reminder-human-one',
+        targetAgentIds: [HUMAN_TELEGRAM_TARGET_ID],
+        agentDisplayName: 'Ember',
+        agentAvatarId: 'ember',
+        agentProvider: 'system',
+        agentStatus: null,
+      }],
+      sources: [],
+      workEvents: [],
+      agentBusReceipts: [],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+      syncedAt: '2026-07-22T10:00:01.000Z',
+    });
+
+    const { container } = render(
+      <VioletRoomPanel projectRoot={projectRoot} agentIds={['agent-one']} />,
+    );
+
+    const bubble = (await screen.findByText('Take a break.')).closest('.violet-msg');
+    expect(bubble).not.toBeNull();
+    expect(within(bubble as HTMLElement).getByText('@Human Tester')).toHaveClass('human');
+    expect(bubble).not.toHaveClass('delivery-issue');
+    expect(container).not.toHaveTextContent(HUMAN_TELEGRAM_TARGET_ID);
+  });
+
+  it('shows Quote only on the room message allowlist and reports the fifth-quote limit', async () => {
+    const projectRoot = '/tmp/kota-room-quote-allowlist';
+    const messages: ptyClient.VioletChatMessage[] = [
+      {
+        id: 'agent-final',
+        sessionId: 'agent-alice',
+        agentId: 'alice',
+        shell: 'codex',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-30T10:00:00.000Z',
+        text: 'Allowed final answer',
+      },
+      {
+        id: 'agent-progress',
+        sessionId: 'agent-alice',
+        agentId: 'alice',
+        shell: 'codex',
+        role: 'assistant',
+        kind: 'commentary',
+        timestamp: '2026-07-30T10:00:01.000Z',
+        text: 'Hidden progress update',
+      },
+      {
+        id: 'agent-bus',
+        sessionId: 'actor-alice',
+        agentId: 'alice',
+        shell: 'system',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-30T10:00:02.000Z',
+        text: 'Allowed handoff',
+        nativeEventId: 'agentbus-quote-one',
+        actorIntent: 'handoff',
+        targetAgentIds: ['bob'],
+      },
+      {
+        id: 'laughing-man-message',
+        sessionId: 'actor-laughing-man',
+        agentId: 'laughing-man',
+        shell: 'system',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-30T10:00:03.000Z',
+        text: 'Allowed remote user message',
+        nativeEventId: 'lm-update-quote-one',
+        actorIntent: 'telegram',
+        targetAgentIds: ['alice'],
+      },
+      {
+        id: 'ember-dream',
+        sessionId: 'actor-ember',
+        agentId: 'ember',
+        shell: 'system',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-30T10:00:04.000Z',
+        text: "It's time to dream.\n\nInternal dream prompt",
+        nativeEventId: 'ember-dream-one',
+        actorIntent: 'dream',
+      },
+      {
+        id: 'ember-reminder',
+        sessionId: 'actor-ember',
+        agentId: 'ember',
+        shell: 'system',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-30T10:00:04.500Z',
+        text: 'Allowed scheduled reminder',
+        nativeEventId: 'ember-reminder-quote-one',
+        actorIntent: 'reminder',
+        targetAgentIds: ['alice'],
+      },
+      {
+        id: 'bartender-conflict',
+        sessionId: 'actor-bartender',
+        agentId: 'bartender',
+        shell: 'system',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-30T10:00:05.000Z',
+        text: 'Git said: resolve this conflict',
+        nativeEventId: 'bartender-conflict:alice:one:two',
+        actorIntent: 'conflict',
+        targetAgentIds: ['alice'],
+      },
+      {
+        id: 'bbs-prompt',
+        sessionId: 'actor-bbs',
+        agentId: 'bbs',
+        shell: 'system',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-30T10:00:05.250Z',
+        text: 'Check this BBS reminder',
+        nativeEventId: 'bbs-thread-quote-one',
+        actorIntent: 'bbs-thread',
+        targetAgentIds: ['alice'],
+      },
+      {
+        id: 'native-system-envelope',
+        sessionId: 'agent-alice',
+        agentId: 'alice',
+        shell: 'codex',
+        role: 'user',
+        kind: 'message',
+        timestamp: '2026-07-30T10:00:05.500Z',
+        text: '<KOTA_MESSAGE id="ember-dream-one" from="ember" to="alice" intent="dream">\ninternal dream echo\n</KOTA_MESSAGE>',
+      },
+      {
+        id: 'artifact-message',
+        sessionId: 'agent-alice',
+        agentId: 'alice',
+        shell: 'codex',
+        role: 'assistant',
+        kind: 'artifact',
+        timestamp: '2026-07-30T10:00:06.000Z',
+        text: 'Generated artifact project-memory/artifacts/example/output.png',
+      },
+    ];
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages,
+      sources: [],
+      workEvents: [],
+      agentBusReceipts: [],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+      syncedAt: '2026-07-30T10:00:07.000Z',
+    });
+    const onQuoteMessage = vi.fn(() => 'limit' as const);
+
+    render(
+      <VioletRoomPanel
+        projectRoot={projectRoot}
+        agentIds={['alice', 'bob']}
+        onQuoteMessage={onQuoteMessage}
+      />,
+    );
+
+    const finalBubble = (await screen.findByText('Allowed final answer')).closest('.violet-msg') as HTMLElement;
+    const handoffBubble = screen.getByText('Allowed handoff').closest('.violet-msg') as HTMLElement;
+    const remoteBubble = screen.getByText('Allowed remote user message').closest('.violet-msg') as HTMLElement;
+    const reminderBubble = screen.getByText('Allowed scheduled reminder').closest('.violet-msg') as HTMLElement;
+    const artifactBubble = screen.getByText(/Generated artifact/).closest('.violet-msg') as HTMLElement;
+    expect(within(finalBubble).getByTitle('Quote message')).toBeInTheDocument();
+    expect(within(handoffBubble).getByTitle('Quote message')).toBeInTheDocument();
+    expect(within(remoteBubble).getByTitle('Quote message')).toBeInTheDocument();
+    expect(within(reminderBubble).getByTitle('Quote message')).toBeInTheDocument();
+    expect(within(artifactBubble).getByTitle('Quote message')).toBeInTheDocument();
+
+    const progressBubble = screen.getAllByText('Hidden progress update')[0]!
+      .closest('.violet-msg') as HTMLElement;
+    const dreamBubble = screen.getByText("It's time to dream.").closest('.violet-msg') as HTMLElement;
+    const conflictBubble = screen.getByText(/resolving worktree conflict/).closest('.violet-msg') as HTMLElement;
+    const bbsBubble = screen.getByText('Check this BBS reminder').closest('.violet-msg') as HTMLElement;
+    const nativeEnvelopeBubble = screen.getByText(/internal dream echo/).closest('.violet-msg') as HTMLElement;
+    expect(within(progressBubble).queryByTitle('Quote message')).not.toBeInTheDocument();
+    expect(within(dreamBubble).queryByTitle('Quote message')).not.toBeInTheDocument();
+    expect(within(conflictBubble).queryByTitle('Quote message')).not.toBeInTheDocument();
+    expect(within(bbsBubble).queryByTitle('Quote message')).not.toBeInTheDocument();
+    expect(within(nativeEnvelopeBubble).queryByTitle('Quote message')).not.toBeInTheDocument();
+
+    await userEvent.click(within(finalBubble).getByTitle('Quote message'));
+    expect(onQuoteMessage).toHaveBeenCalledWith(expect.objectContaining({
+      ref: 'agent-final',
+      project: 'kota-room-quote-allowlist',
+      excerpt: 'Allowed final answer',
+    }));
+    expect(screen.getByRole('status')).toHaveTextContent('4 quotes max');
+  });
+
+  it('quotes a materialized local user bubble by its native event id, but not a pending bubble', async () => {
+    const projectRoot = '/tmp/kota-materialized-user-quote';
+    const timestamp = new Date().toISOString();
+    const materialized = emitVioletComposerSent({
+      projectRoot,
+      text: 'Materialized user prompt',
+      targetAgentIds: ['alice'],
+      privacy: false,
+    });
+    emitVioletComposerSent({
+      projectRoot,
+      text: 'Still pending user prompt',
+      targetAgentIds: ['alice'],
+      privacy: false,
+    });
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages: [{
+        id: 'native-user-event',
+        sessionId: 'agent-alice',
+        agentId: 'alice',
+        shell: 'codex',
+        role: 'user',
+        kind: 'message',
+        timestamp,
+        text: 'Materialized user prompt',
+      }],
+      sources: [],
+      workEvents: [],
+      agentBusReceipts: [],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+      syncedAt: timestamp,
+    });
+    const onQuoteMessage = vi.fn(() => 'inserted' as const);
+
+    render(
+      <VioletRoomPanel
+        projectRoot={projectRoot}
+        agentIds={['alice']}
+        onQuoteMessage={onQuoteMessage}
+      />,
+    );
+
+    expect(materialized).not.toBeNull();
+    const materializedBubble = (await screen.findByText('Materialized user prompt')).closest('.violet-msg') as HTMLElement;
+    const pendingBubble = screen.getByText('Still pending user prompt').closest('.violet-msg') as HTMLElement;
+    expect(screen.getAllByText('Materialized user prompt')).toHaveLength(1);
+    expect(within(materializedBubble).getByTitle('Quote message')).toBeInTheDocument();
+    expect(within(pendingBubble).queryByTitle('Quote message')).not.toBeInTheDocument();
+
+    await userEvent.click(within(materializedBubble).getByTitle('Quote message'));
+    expect(onQuoteMessage).toHaveBeenCalledWith(expect.objectContaining({
+      ref: 'native-user-event',
+      from: { id: 'user', name: 'You' },
+    }));
+  });
+
+  it('renders quote wrappers as compact cards while keeping the new message body separate', async () => {
+    const projectRoot = '/tmp/kota-room-quote-render';
+    const text = serializeRoomQuotePrompt([{
+      ref: 'quoted-native-event',
+      project: 'kota-room-quote-render',
+      from: { id: 'alice', name: 'Alice' },
+      to: [{ id: 'user', name: 'User' }],
+      at: '2026-07-30T10:00:00.000Z',
+      excerpt: 'This quoted excerpt is intentionally long enough to demonstrate the compact card.',
+      truncated: false,
+    }], 'This is the new message body.');
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages: [{
+        id: 'message-with-quote',
+        sessionId: 'agent-alice',
+        agentId: 'alice',
+        shell: 'codex',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: '2026-07-30T10:01:00.000Z',
+        text,
+      }],
+      sources: [],
+      workEvents: [],
+      agentBusReceipts: [],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+      syncedAt: '2026-07-30T10:01:01.000Z',
+    });
+
+    const { container } = render(
+      <VioletRoomPanel projectRoot={projectRoot} agentIds={['alice']} />,
+    );
+    expect(await screen.findByTestId('violet-room-quote-cards')).toHaveTextContent('Alice → User');
+    expect(screen.getByText('This is the new message body.')).toBeInTheDocument();
+    expect(container).not.toHaveTextContent('KOTA_QUOTE_META');
+    expect(container).not.toHaveTextContent('KOTA_QUOTE_REF');
+  });
+
   it('shows delivery retry only for user messages, not Agent Bus messages', async () => {
     const projectRoot = '/tmp/kota-retry-visibility-test';
     const queuedAgentBusMessage: ptyClient.VioletChatMessage & {
@@ -1265,7 +1989,7 @@ describe('W3+W5 · composer target picker', () => {
     expect(agentBusBubble).not.toBeNull();
     expect(agentBusBubble).not.toHaveClass('delivery-issue');
     expect(within(agentBusBubble as HTMLElement).queryByRole('button', {
-      name: 'Retry sending this message',
+      name: 'Queued message — try sending now',
     })).not.toBeInTheDocument();
 
     let sentMessage: ReturnType<typeof emitVioletComposerSent> = null;
@@ -1293,7 +2017,7 @@ describe('W3+W5 · composer target picker', () => {
     expect(userBubble).not.toBeNull();
     expect(userBubble).toHaveClass('delivery-issue');
     const retryButton = within(userBubble as HTMLElement).getByRole('button', {
-      name: 'Retry sending this message',
+      name: 'Queued message — try sending now',
     });
     await userEvent.click(retryButton);
     expect(onRetryComposerMessage).toHaveBeenCalledWith({
@@ -1302,6 +2026,349 @@ describe('W3+W5 · composer target picker', () => {
       privacy: false,
       mentions: undefined,
     });
+    await waitFor(() => expect(within(userBubble as HTMLElement).queryByRole('button', {
+      name: 'Queued message — try sending now',
+    })).not.toBeInTheDocument());
+    expect(violetComposerSentHistory(projectRoot).find((item) => item.id === sentMessage!.id)?.delivery?.status)
+      .toBe('clear');
+  });
+
+  it.each([
+    { outcome: 'clear' as const, reject: false },
+    { outcome: 'failed' as const, reject: true },
+  ])('settles a $outcome retry after switching away from its project', async ({ outcome, reject }) => {
+    const projectRoot = `/tmp/kota-retry-project-switch-${outcome}`;
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages: [],
+      sources: [],
+      workEvents: [],
+      agentBusReceipts: [],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+      syncedAt: '2026-07-18T12:00:00.000Z',
+    });
+    let resolveRetry!: (value: boolean) => void;
+    let rejectRetry!: (reason: Error) => void;
+    const retryResult = new Promise<boolean>((resolve, rejectPromise) => {
+      resolveRetry = resolve;
+      rejectRetry = rejectPromise;
+    });
+    const onRetryComposerMessage = vi.fn(() => retryResult);
+    const sentMessage = emitVioletComposerSent({
+      projectRoot,
+      text: `retry while switching projects (${outcome})`,
+      targetAgentIds: ['alice'],
+      privacy: false,
+    });
+    expect(sentMessage).not.toBeNull();
+    emitVioletComposerDelivery({
+      id: sentMessage!.id,
+      status: 'failed',
+      reason: 'Prompt was not delivered.',
+      retryTargetAgentIds: ['alice'],
+    });
+
+    const view = render(
+      <VioletRoomPanel
+        projectRoot={projectRoot}
+        agentIds={['alice']}
+        onRetryComposerMessage={onRetryComposerMessage}
+      />,
+    );
+    const bubble = (await screen.findByText(`retry while switching projects (${outcome})`))
+      .closest('.violet-msg');
+    await userEvent.click(within(bubble as HTMLElement).getByRole('button', {
+      name: 'Queued message — try sending now',
+    }));
+    await waitFor(() => expect(violetComposerSentHistory(projectRoot)[0]?.delivery?.status)
+      .toBe('retrying'));
+
+    view.rerender(
+      <VioletRoomPanel
+        projectRoot="/tmp/kota-other-project"
+        agentIds={['bob']}
+        onRetryComposerMessage={onRetryComposerMessage}
+      />,
+    );
+    await act(async () => {
+      if (reject) rejectRetry(new Error('retry rejected'));
+      else resolveRetry(true);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(violetComposerSentHistory(projectRoot)[0]?.delivery?.status)
+      .toBe(outcome));
+
+    view.rerender(
+      <VioletRoomPanel
+        projectRoot={projectRoot}
+        agentIds={['alice']}
+        onRetryComposerMessage={onRetryComposerMessage}
+      />,
+    );
+    const restoredBubble = (await screen.findByText(`retry while switching projects (${outcome})`))
+      .closest('.violet-msg');
+    const retryButton = within(restoredBubble as HTMLElement).queryByRole('button', {
+      name: 'Queued message — try sending now',
+    });
+    if (outcome === 'failed') expect(retryButton).toBeInTheDocument();
+    else expect(retryButton).not.toBeInTheDocument();
+  });
+
+  it('uses one deadline, not polling, before offering to send an unconfirmed Composer message now', async () => {
+    vi.useFakeTimers();
+    try {
+      const projectRoot = '/tmp/kota-queued-message-timeout-test';
+      vi.setSystemTime(new Date('2026-07-18T13:00:00.000Z'));
+      vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+        messages: [],
+        sources: [],
+        workEvents: [],
+        agentBusReceipts: [],
+        rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+        chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+        syncedAt: '2026-07-18T13:00:00.000Z',
+      });
+      emitVioletComposerSent({
+        projectRoot,
+        text: 'wait for the provider queue',
+        targetAgentIds: ['alice'],
+        privacy: false,
+      });
+
+      render(
+        <VioletRoomPanel
+          projectRoot={projectRoot}
+          agentIds={['alice']}
+          onRetryComposerMessage={vi.fn()}
+        />,
+      );
+      await act(async () => {});
+
+      const messageBubble = screen.getByText('wait for the provider queue').closest('.violet-msg');
+      expect(messageBubble).not.toBeNull();
+      expect(within(messageBubble as HTMLElement).queryByRole('button', {
+        name: 'Queued message — try sending now',
+      })).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(179_000);
+      });
+      expect(within(messageBubble as HTMLElement).queryByRole('button', {
+        name: 'Queued message — try sending now',
+      })).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(within(messageBubble as HTMLElement).getByRole('button', {
+        name: 'Queued message — try sending now',
+      })).toHaveAttribute('title', 'Queued — try sending now');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an explicitly queued Composer prompt until native user evidence arrives', async () => {
+    const projectRoot = '/tmp/kota-exit-queued-native-evidence-test';
+    const sentMessage = emitVioletComposerSent({
+      projectRoot,
+      text: 'agent exited before accepting this',
+      targetAgentIds: ['alice'],
+      privacy: false,
+    });
+    expect(sentMessage).not.toBeNull();
+    emitVioletComposerDelivery({
+      id: sentMessage!.id,
+      status: 'unconfirmed',
+      reason: VIOLET_COMPOSER_AGENT_EXIT_REASON,
+      retryTargetAgentIds: ['alice'],
+    });
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages: [{
+        id: 'assistant-activity-without-user-evidence',
+        sessionId: 'session-a',
+        agentId: 'alice',
+        shell: 'codex',
+        role: 'assistant',
+        kind: 'message',
+        timestamp: new Date(Date.parse(sentMessage!.timestamp) + 1_000).toISOString(),
+        text: 'Unrelated prior activity.',
+        sourcePath: null,
+        nativeEventId: null,
+      }],
+      sources: [],
+      workEvents: [],
+      agentBusReceipts: [],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+      syncedAt: new Date(Date.parse(sentMessage!.timestamp) + 2_000).toISOString(),
+    });
+
+    render(
+      <VioletRoomPanel
+        projectRoot={projectRoot}
+        agentIds={['alice']}
+        onRetryComposerMessage={vi.fn()}
+      />,
+    );
+
+    const messageBubble = (await screen.findByText('agent exited before accepting this'))
+      .closest('.violet-msg');
+    expect(within(messageBubble as HTMLElement).getByRole('button', {
+      name: 'Queued message — try sending now',
+    })).toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('violet://room/synced', {
+        detail: {
+          request: { projectRoot, agentIds: ['alice'] },
+          state: {
+            messages: [{
+              id: 'native-user-evidence-after-exit',
+              sessionId: 'session-a',
+              agentId: 'alice',
+              shell: 'codex',
+              role: 'user',
+              kind: 'message',
+              timestamp: new Date(Date.parse(sentMessage!.timestamp) + 3_000).toISOString(),
+              text: 'agent exited before accepting this',
+              sourcePath: null,
+              nativeEventId: null,
+            }],
+            sources: [],
+            workEvents: [],
+            agentBusReceipts: [],
+            rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+            chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+            syncedAt: new Date(Date.parse(sentMessage!.timestamp) + 4_000).toISOString(),
+          },
+        },
+      }));
+    });
+    await waitFor(() => expect(within(messageBubble as HTMLElement).queryByRole('button', {
+      name: 'Queued message — try sending now',
+    })).not.toBeInTheDocument());
+  });
+
+  it('retires a structurally confirmed Composer message across room remounts', async () => {
+    const projectRoot = '/tmp/kota-composer-delivery-remount-test';
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages: [],
+      sources: [],
+      workEvents: [],
+      agentBusReceipts: [],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+      syncedAt: '2026-07-18T14:00:00.000Z',
+    });
+    const sentMessage = emitVioletComposerSent({
+      projectRoot,
+      text: 'structurally confirmed prompt',
+      targetAgentIds: ['alice'],
+      privacy: false,
+    });
+    expect(sentMessage).not.toBeNull();
+    emitVioletComposerDelivery({ id: sentMessage!.id, status: 'clear' });
+
+    const first = render(
+      <VioletRoomPanel
+        projectRoot={projectRoot}
+        agentIds={['alice']}
+        onRetryComposerMessage={vi.fn()}
+      />,
+    );
+    expect(await screen.findByText('structurally confirmed prompt')).toBeInTheDocument();
+    first.unmount();
+
+    render(
+      <VioletRoomPanel
+        projectRoot={projectRoot}
+        agentIds={['alice']}
+        onRetryComposerMessage={vi.fn()}
+      />,
+    );
+    const remountedBubble = (await screen.findByText('structurally confirmed prompt'))
+      .closest('.violet-msg');
+    expect(remountedBubble).not.toBeNull();
+    expect(within(remountedBubble as HTMLElement).queryByRole('button', {
+      name: 'Queued message — try sending now',
+    })).not.toBeInTheDocument();
+  });
+
+  it('cancels the Composer deadline when native confirmation arrives at 179 seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const projectRoot = '/tmp/kota-composer-native-confirm-test';
+      vi.setSystemTime(new Date('2026-07-18T15:00:00.000Z'));
+      vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+        messages: [],
+        sources: [],
+        workEvents: [],
+        agentBusReceipts: [],
+        rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+        chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+        syncedAt: '2026-07-18T15:00:00.000Z',
+      });
+      const sentMessage = emitVioletComposerSent({
+        projectRoot,
+        text: 'confirm just before the deadline',
+        targetAgentIds: ['alice'],
+        privacy: false,
+      });
+      expect(sentMessage).not.toBeNull();
+
+      render(
+        <VioletRoomPanel
+          projectRoot={projectRoot}
+          agentIds={['alice']}
+          onRetryComposerMessage={vi.fn()}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(179_000);
+      });
+      act(() => {
+        window.dispatchEvent(new CustomEvent('violet://room/synced', {
+          detail: {
+            request: { projectRoot, agentIds: ['alice'] },
+            state: {
+              messages: [{
+                id: 'native-confirm-at-179',
+                sessionId: 'session-a',
+                agentId: 'alice',
+                shell: 'claude',
+                role: 'user',
+                kind: 'message',
+                timestamp: '2026-07-18T15:02:59.000Z',
+                text: 'confirm just before the deadline',
+                sourcePath: null,
+                nativeEventId: null,
+              }],
+              sources: [],
+              workEvents: [],
+              agentBusReceipts: [],
+              rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+              chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+              syncedAt: '2026-07-18T15:02:59.000Z',
+            },
+          },
+        }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      const bubble = document.querySelector(
+        `[data-violet-message-id="${sentMessage!.id}"]`,
+      ) as HTMLElement | null;
+      expect(bubble).not.toBeNull();
+      expect(within(bubble!).queryByRole('button', {
+        name: 'Queued message — try sending now',
+      })).not.toBeInTheDocument();
+      expect(violetComposerSentHistory(projectRoot)[0]?.delivery?.status).toBe('clear');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the Violet room pinned to the bottom when synced messages append', async () => {
@@ -2596,6 +3663,71 @@ describe('AWL · agent terminal input', () => {
   });
 });
 
+describe('Tavern · storage measurement', () => {
+  it('formats storage measurement age with one largest unit and no seconds', () => {
+    const now = 200 * 24 * 60 * 60 * 1000;
+    expect(formatStorageMeasurementAge(now / 1000 - 59, now)).toBe('just now');
+    expect(formatStorageMeasurementAge(now / 1000 - 133, now)).toBe('2m ago');
+    expect(formatStorageMeasurementAge(now / 1000 - (20 * 60 * 60 + 48 * 60), now)).toBe('20h ago');
+    expect(formatStorageMeasurementAge(now / 1000 - (100 * 24 * 60 * 60 + 20 * 60 * 60), now)).toBe('100 days ago');
+  });
+
+  it('shows an account-only inline empty state without Available or project size', async () => {
+    vi.spyOn(ptyClient, 'storageMeasureStatus').mockResolvedValue({
+      updating: false,
+      onDiskBytes: null,
+      availableBytes: null,
+      measuredAt: null,
+      error: null,
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByTestId('tavern-btn'));
+    await screen.findByTestId('tavern-page');
+    await userEvent.click(screen.getByRole('button', { name: 'Link' }));
+    const storage = await screen.findByTestId('tavern-local-storage');
+
+    await waitFor(() => expect(storage).toHaveTextContent('Size not measured'));
+    expect(storage).not.toHaveTextContent('available');
+    expect(storage).not.toHaveTextContent('Project files');
+    expect(within(storage).getByRole('button', { name: 'Refresh storage usage' })).toBeEnabled();
+  });
+
+  it('keeps the previous storage result visible while a manual refresh runs', async () => {
+    const measuredAt = Math.floor(Date.now() / 1000) - 7 * 60;
+    const ready = {
+      updating: false,
+      onDiskBytes: 46 * 1024 ** 3,
+      availableBytes: 161 * 1024 ** 3,
+      measuredAt,
+      error: null,
+    };
+    vi.spyOn(ptyClient, 'storageMeasureStatus').mockResolvedValue(ready);
+    const start = vi.spyOn(ptyClient, 'storageMeasureStart').mockResolvedValue({
+      ...ready,
+      updating: true,
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByTestId('tavern-btn'));
+    await screen.findByTestId('tavern-page');
+    await userEvent.click(screen.getByRole('button', { name: 'Link' }));
+    const storage = await screen.findByTestId('tavern-local-storage');
+
+    await waitFor(() => expect(storage).toHaveTextContent('Size ≈ 46.0 GB'));
+    expect(storage).toHaveTextContent('161.0 GB available');
+    expect(storage).toHaveTextContent('Updated 7m ago');
+
+    const refresh = within(storage).getByRole('button', { name: 'Refresh storage usage' });
+    await userEvent.click(refresh);
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    expect(storage).toHaveTextContent('Size ≈ 46.0 GB');
+    expect(storage).toHaveTextContent('Updating…');
+    expect(storage).toHaveTextContent('will take 2–5 min');
+    expect(refresh).toBeDisabled();
+  });
+});
+
 describe('M6.A · quick incarnate picker', () => {
   it('uses the topbar Tavern control as a project back button while Tavern is open', async () => {
     render(<App />);
@@ -2666,7 +3798,7 @@ describe('M6.A · quick incarnate picker', () => {
     expect(chip(secondAlice)).toHaveTextContent('CC II');
   });
 
-  it('keeps Tavern accessible from the top bar with five default provider heroes', async () => {
+  it('keeps Tavern accessible from the top bar with six default provider heroes', async () => {
     const storage = new Map<string, string>([
       ['kota-v2.dev.project-root', '/tmp/kota-test'],
       ['kota-v2.tavern.hero-profiles', JSON.stringify({
@@ -2692,16 +3824,25 @@ describe('M6.A · quick incarnate picker', () => {
       const { container } = render(<App />);
       await userEvent.click(screen.getByTestId('tavern-btn'));
       await screen.findByTestId('tavern-page');
-      expect(container.querySelectorAll('.tavern-hero-card:not(.add)')).toHaveLength(5);
+      expect(container.querySelectorAll('.tavern-hero-card:not(.add)')).toHaveLength(6);
       expect(screen.getByTestId('tavern-hero-hero-cc')).toHaveTextContent('CC');
       expect(screen.getByTestId('tavern-hero-hero-dex')).toHaveTextContent('Dex');
       expect(screen.getByTestId('tavern-hero-hero-gem')).toHaveTextContent('Gem');
       expect(screen.getByTestId('tavern-hero-hero-op')).toHaveTextContent('Op');
       expect(screen.getByTestId('tavern-hero-hero-pi')).toHaveTextContent('Pi');
+      expect(screen.getByTestId('tavern-hero-hero-kimi')).toHaveTextContent('Kimi');
       expect(screen.queryByTestId('tavern-hero-david')).not.toBeInTheDocument();
       expect(screen.queryByTestId('tavern-hero-charlie')).not.toBeInTheDocument();
       expect(screen.getByText('New Hero')).toBeInTheDocument();
       expect(screen.queryByText('Glass Scribe')).not.toBeInTheDocument();
+      const providerStatus = screen.getByRole('region', { name: "Providers' Status" });
+      expect(container.querySelector('.tavern-hero-stage')).toContainElement(providerStatus);
+      expect(container.querySelector('.tavern-page-head')).not.toContainElement(providerStatus);
+      expect(within(providerStatus).getAllByRole('link')).toHaveLength(6);
+      expect(within(providerStatus).queryByText('GitHub CLI')).not.toBeInTheDocument();
+      expect(providerStatus.querySelectorAll('.tavern-provider-icon img')).toHaveLength(6);
+      expect(container.querySelector('.tavern-loading-chip')).not.toBeInTheDocument();
+      expect(container.querySelector('.tavern-bottom-loading-log')).not.toBeInTheDocument();
     } finally {
       if (originalStorage) Object.defineProperty(window, 'localStorage', originalStorage);
     }
@@ -2732,7 +3873,7 @@ describe('M6.A · quick incarnate picker', () => {
     expect(dialog).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Edit Shell' }));
     await userEvent.click(within(dialog).getByRole('button', { name: /Provider/ }));
-    expect(within(dialog).getAllByText('BETA')).toHaveLength(3);
+    expect(within(dialog).getAllByText('BETA')).toHaveLength(4);
     await userEvent.click(within(dialog).getByRole('button', { name: 'Change avatar' }));
     await userEvent.click(within(dialog).getByRole('radio', { name: 'Glass' }));
     await userEvent.click(within(dialog).getByRole('button', { name: 'Change avatar' }));
@@ -3304,6 +4445,36 @@ describe('P3 · workspace file tree', () => {
     }
   });
 
+  it('turns a failed room restore into a non-modal retry bar', async () => {
+    const onRetryAgentHydration = vi.fn();
+    const { container } = render(
+      <Stage
+        sceneKey="conversation"
+        liveAgents={new Set<AgentId>()}
+        targetAgent={null}
+        onOpenAgent={vi.fn()}
+        centerpiece="fire"
+        roomColor="#2b2c2f"
+        deskColor="#6d5241"
+        roomTheme="classic"
+        deskTheme="warm"
+        onChangeCenter={vi.fn()}
+        onChangeRoom={vi.fn()}
+        onChangeDesk={vi.fn()}
+        onChangeRoomTheme={vi.fn()}
+        onChangeDeskTheme={vi.fn()}
+        agentHydrationFailed
+        onRetryAgentHydration={onRetryAgentHydration}
+      />,
+    );
+
+    expect(screen.queryByTestId('room-restore-overlay')).not.toBeInTheDocument();
+    expect(screen.getByTestId('room-restore-degraded')).toHaveTextContent('Agent roster unavailable');
+    expect(container.querySelector('.stage')).not.toHaveAttribute('aria-busy');
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetryAgentHydration).toHaveBeenCalledTimes(1);
+  });
+
   it('opens the group chat filter from an external agent request', async () => {
     const tableSlots = [null, null, null, null, null, null, null, 'alice' as AgentId];
     render(
@@ -3406,6 +4577,71 @@ describe('P3 · workspace file tree', () => {
     expect(onOpenAgent).toHaveBeenCalledWith('alice');
     expect(onDblClickAgent).toHaveBeenCalledTimes(1);
     expect(onDblClickAgent).toHaveBeenCalledWith('alice');
+  });
+
+  it('shows an unsupported provider as disabled table and ribbon cards', () => {
+    const tableSlots = [null, null, null, null, null, null, null, 'alice' as AgentId];
+    const unsupportedAgentProviders = new Map<AgentId, string>([['alice', 'future-cli']]);
+    const onOpenAgent = vi.fn();
+    const onDblClickAgent = vi.fn();
+    const onAgentContextMenu = vi.fn();
+    const onCommendAgent = vi.fn();
+    const { container } = render(
+      <Stage
+        sceneKey="conversation"
+        liveAgents={new Set<AgentId>()}
+        tableSlots={tableSlots}
+        shortcutAgentsOrdered={tableSlots}
+        targetAgent={null}
+        agentMeta={{
+          alice: {
+            name: 'Alice',
+            emoji: '◇',
+            role: 'Unsupported provider: future-cli',
+            hue: 'var(--brass-bright)',
+            unsupportedProvider: 'future-cli',
+          },
+        }}
+        unsupportedAgentProviders={unsupportedAgentProviders}
+        onOpenAgent={onOpenAgent}
+        onDblClickAgent={onDblClickAgent}
+        onAgentContextMenu={onAgentContextMenu}
+        onCommendAgent={onCommendAgent}
+        centerpiece="fire"
+        roomColor="#2b2c2f"
+        deskColor="#6d5241"
+        roomTheme="classic"
+        deskTheme="warm"
+        onChangeCenter={vi.fn()}
+        onChangeRoom={vi.fn()}
+        onChangeDesk={vi.fn()}
+        onChangeRoomTheme={vi.fn()}
+        onChangeDeskTheme={vi.fn()}
+      />,
+    );
+
+    const chip = screen.getByTestId('chip-alice');
+    const seat = screen.getByTestId('seat-alice');
+    expect(chip).toBeDisabled();
+    expect(chip).toHaveClass('unsupported');
+    expect(chip).toHaveAttribute('data-unsupported-provider', 'future-cli');
+    expect(chip).toHaveTextContent('Unsupported');
+    expect(seat).toHaveClass('unsupported');
+    expect(seat).toHaveAttribute('aria-disabled', 'true');
+    expect(seat).toHaveTextContent('Unsupported · future-cli');
+
+    fireEvent.click(chip);
+    fireEvent.doubleClick(chip);
+    fireEvent.contextMenu(chip);
+    fireEvent.click(seat);
+    fireEvent.doubleClick(seat);
+    fireEvent.contextMenu(seat);
+
+    expect(onOpenAgent).not.toHaveBeenCalled();
+    expect(onDblClickAgent).not.toHaveBeenCalled();
+    expect(onAgentContextMenu).not.toHaveBeenCalled();
+    expect(onCommendAgent).not.toHaveBeenCalled();
+    expect(container.querySelector('.agent-commend-button')).not.toBeInTheDocument();
   });
 
   it('drags a tree path into the composer as an attachment chip', async () => {
@@ -3697,5 +4933,514 @@ describe('MT · Smart Terminal multi-tab', () => {
     fireEvent.input(input, { target: { value: '@' }, data: '@', inputType: 'insertText' });
     fireEvent.keyDown(input, { key: 'Enter' });
     await screen.findByText(/› @/);
+  });
+});
+
+describe('Project agent hydration recovery', () => {
+  function mockWorkspaceBootstrap(
+    active: ptyClient.WorkspaceProject,
+    projects: readonly ptyClient.WorkspaceProject[] = [active],
+  ) {
+    const storage = withMockLocalStorage({
+      'kota-v2.dev.project-root': '/tmp/kota-test',
+    });
+    vi.spyOn(ptyClient, 'hasTauriRuntime').mockReturnValue(true);
+    vi.spyOn(ptyClient, 'workspaceStatus').mockResolvedValue({ active });
+    vi.spyOn(ptyClient, 'listWorkspaceProjects').mockResolvedValue([...projects]);
+    vi.spyOn(ptyClient, 'loadProjectAgentLayoutFile').mockResolvedValue(null);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    return {
+      saveLayout: vi.spyOn(ptyClient, 'saveProjectAgentLayoutFile').mockResolvedValue(),
+      restoreStorage: storage.restore,
+    };
+  }
+
+  it('keeps provisional seats, retries suspicious empty results, and never persists them', async () => {
+    vi.useFakeTimers();
+    const workspace = hydrationWorkspace('suspect-empty', ['agent-alpha']);
+    const { saveLayout, restoreStorage } = mockWorkspaceBootstrap(workspace);
+    const inspectIdentities = vi.spyOn(ptyClient, 'inspectProjectAgentIdentities')
+      .mockResolvedValue({ identities: [], workspaceEntryCount: 0 });
+    const loadDetail = vi.spyOn(ptyClient, 'loadProjectAgentDetail')
+      .mockRejectedValue(new Error('identity files temporarily unavailable'));
+    const view = render(<App />);
+
+    try {
+      await flushHydrationPromises();
+      await flushHydrationPromises();
+      expect(screen.getByTestId('chip-agent-alpha')).toBeInTheDocument();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(screen.getByTestId('room-restore-overlay')).toBeInTheDocument();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+      await flushHydrationPromises();
+
+      expect(inspectIdentities).toHaveBeenCalledTimes(4);
+      expect(loadDetail).toHaveBeenCalledTimes(4);
+      expect(screen.getByTestId('chip-agent-alpha')).toBeInTheDocument();
+      expect(screen.queryByTestId('room-restore-overlay')).not.toBeInTheDocument();
+      expect(screen.getByTestId('room-restore-degraded')).toHaveTextContent('Agent roster unavailable');
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      expect(saveLayout).not.toHaveBeenCalled();
+
+      fireEvent.click(within(screen.getByTestId('room-restore-degraded')).getByRole('button', {
+        name: 'Retry',
+      }));
+      await flushHydrationPromises();
+      expect(inspectIdentities).toHaveBeenCalledTimes(5);
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(screen.getByTestId('room-restore-overlay')).toBeInTheDocument();
+    } finally {
+      view.unmount();
+      restoreStorage();
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles a genuinely empty project after one immediate confirmation read', async () => {
+    const workspace = hydrationWorkspace('true-empty', []);
+    const { restoreStorage } = mockWorkspaceBootstrap(workspace);
+    const inspectIdentities = vi.spyOn(ptyClient, 'inspectProjectAgentIdentities')
+      .mockResolvedValue({ identities: [], workspaceEntryCount: 0 });
+    const loadDetail = vi.spyOn(ptyClient, 'loadProjectAgentDetail');
+    const view = render(<App />);
+
+    try {
+      await waitFor(() => expect(inspectIdentities).toHaveBeenCalledTimes(2));
+      await waitFor(() => {
+        expect(view.container.querySelector('.stage')).not.toHaveAttribute('aria-busy');
+      });
+      expect(loadDetail).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('room-restore-degraded')).not.toBeInTheDocument();
+    } finally {
+      view.unmount();
+      restoreStorage();
+    }
+  });
+
+  it('settles an unknown provider as a visible unsupported card without loading or launching it', async () => {
+    const workspace = hydrationWorkspace('future-provider', ['agent-alpha']);
+    workspace.agents[0]!.cli = 'future-cli';
+    const { restoreStorage } = mockWorkspaceBootstrap(workspace);
+    vi.spyOn(ptyClient, 'inspectProjectAgentIdentities').mockResolvedValue({
+      identities: [{
+        ...hydrationIdentity('agent-alpha', 'Alpha'),
+        provider: 'future-cli',
+      }],
+      workspaceEntryCount: 1,
+    });
+    const loadDetail = vi.spyOn(ptyClient, 'loadProjectAgentDetail')
+      .mockRejectedValue(new Error('unsupported provider should not be loaded'));
+    const resolveLaunch = vi.spyOn(ptyClient, 'resolveProjectAgentLaunch')
+      .mockRejectedValue(new Error('unsupported provider should not be launched'));
+    const view = render(<App />);
+
+    try {
+      const chip = await screen.findByTestId('chip-agent-alpha');
+      await waitFor(() => {
+        expect(view.container.querySelector('.stage')).not.toHaveAttribute('aria-busy');
+      });
+      expect(chip).toBeDisabled();
+      expect(chip).toHaveTextContent('Unsupported');
+      expect(chip).toHaveAttribute('data-unsupported-provider', 'future-cli');
+      expect(screen.queryByTestId('room-restore-degraded')).not.toBeInTheDocument();
+      expect(loadDetail).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(window, { key: '1', metaKey: true });
+      expect(resolveLaunch).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      restoreStorage();
+    }
+  });
+
+  it('offers the existing fresh-session path when a saved session is unavailable', async () => {
+    const workspace = hydrationWorkspace('expired-session', ['agent-alpha']);
+    workspace.agents[0]!.cli = 'claude';
+    const { restoreStorage } = mockWorkspaceBootstrap(workspace);
+    vi.spyOn(ptyClient, 'inspectProjectAgentIdentities').mockResolvedValue({
+      identities: [{
+        ...hydrationIdentity('agent-alpha', 'Alpha'),
+        provider: 'claude',
+      }],
+      workspaceEntryCount: 1,
+    });
+    const detail = {
+      ...hydrationDetail('agent-alpha', workspace.localRoot, 'Alpha'),
+      cli: 'claude' as const,
+      provider: 'claude',
+      sessionId: null,
+    };
+    vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockResolvedValue(detail);
+    const resolveLaunch = vi.spyOn(ptyClient, 'resolveProjectAgentLaunch')
+      .mockResolvedValue({ status: 'sessionUnavailable' });
+    const startFresh = vi.spyOn(ptyClient, 'startFreshProjectAgentSession')
+      .mockResolvedValue({
+        detail,
+        request: {
+          ...workspace.agents[0]!,
+          cli: 'claude',
+          sessionId: null,
+        },
+      });
+    const clearSession = vi.spyOn(ptyClient, 'clearProjectAgentSessionMetadata')
+      .mockResolvedValue(detail);
+    const spawnAgent = vi.spyOn(ptyClient, 'spawnAgentPty');
+    const view = render(<App />);
+
+    try {
+      await screen.findByTestId('chip-agent-alpha');
+      await waitFor(() => {
+        expect(view.container.querySelector('.stage')).not.toHaveAttribute('aria-busy');
+      });
+
+      fireEvent.keyDown(window, { key: '1', metaKey: true });
+      let dialog = await screen.findByRole('dialog', { name: "Session can't resume" });
+      expect(within(dialog).getByText(
+        'The saved session has expired. Start a new session?',
+      )).toBeInTheDocument();
+      await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      expect(startFresh).not.toHaveBeenCalled();
+      expect(clearSession).not.toHaveBeenCalled();
+      expect(spawnAgent).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(window, { key: '1', metaKey: true });
+      dialog = await screen.findByRole('dialog', { name: "Session can't resume" });
+      await userEvent.click(within(dialog).getByRole('button', { name: 'OK' }));
+
+      await waitFor(() => {
+        expect(startFresh).toHaveBeenCalledWith({
+          agentId: 'agent-alpha',
+          projectRoot: null,
+        });
+        expect(spawnAgent).toHaveBeenCalledOnce();
+      });
+      expect(clearSession).toHaveBeenCalledWith({
+        agentId: 'agent-alpha',
+        projectRoot: null,
+      });
+      expect(resolveLaunch).toHaveBeenCalledTimes(2);
+    } finally {
+      view.unmount();
+      restoreStorage();
+    }
+  });
+
+  it('persists seats only after a non-empty roster and every detail are confirmed', async () => {
+    vi.useFakeTimers();
+    const workspace = hydrationWorkspace('confirmed-roster', ['agent-alpha']);
+    const { saveLayout, restoreStorage } = mockWorkspaceBootstrap(workspace);
+    vi.spyOn(ptyClient, 'inspectProjectAgentIdentities').mockResolvedValue({
+      identities: [hydrationIdentity('agent-alpha', 'Alpha')],
+      workspaceEntryCount: 1,
+    });
+    vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockResolvedValue(
+      hydrationDetail('agent-alpha', workspace.localRoot, 'Alpha'),
+    );
+    const view = render(<App />);
+
+    try {
+      await flushHydrationPromises();
+      await flushHydrationPromises();
+      expect(screen.getByTestId('chip-agent-alpha')).toBeInTheDocument();
+      expect(saveLayout).not.toHaveBeenCalled();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      expect(saveLayout).toHaveBeenCalledWith(
+        workspace.localRoot,
+        expect.arrayContaining(['agent-alpha']),
+      );
+    } finally {
+      view.unmount();
+      restoreStorage();
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats unaccounted workspace directories as an incomplete roster', async () => {
+    vi.useFakeTimers();
+    const workspace = hydrationWorkspace('partial-directory', ['agent-alpha']);
+    const { saveLayout, restoreStorage } = mockWorkspaceBootstrap(workspace);
+    const inspectIdentities = vi.spyOn(ptyClient, 'inspectProjectAgentIdentities')
+      .mockResolvedValue({
+        identities: [hydrationIdentity('agent-alpha', 'Alpha')],
+        workspaceEntryCount: 2,
+      });
+    vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockResolvedValue(
+      hydrationDetail('agent-alpha', workspace.localRoot, 'Alpha'),
+    );
+    const view = render(<App />);
+
+    try {
+      await flushHydrationPromises();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+      await flushHydrationPromises();
+
+      expect(inspectIdentities).toHaveBeenCalledTimes(4);
+      expect(screen.getByTestId('chip-agent-alpha')).toBeInTheDocument();
+      expect(screen.getByTestId('room-restore-degraded')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      expect(saveLayout).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      restoreStorage();
+      vi.useRealTimers();
+    }
+  });
+
+  it('degrades instead of spinning forever when identity and detail IPCs hang', async () => {
+    vi.useFakeTimers();
+    const workspace = hydrationWorkspace('hung-hydration', ['agent-alpha']);
+    const { saveLayout, restoreStorage } = mockWorkspaceBootstrap(workspace);
+    const inspectIdentities = vi.spyOn(ptyClient, 'inspectProjectAgentIdentities')
+      .mockImplementation(() => new Promise<ptyClient.ProjectAgentIdentityListing>(() => {}));
+    const loadDetail = vi.spyOn(ptyClient, 'loadProjectAgentDetail')
+      .mockImplementation(() => new Promise<ptyClient.ProjectAgentDetail>(() => {}));
+    const view = render(<App />);
+
+    try {
+      await flushHydrationPromises();
+      for (const retryDelay of [0, 1000, 2000, 4000]) {
+        if (retryDelay > 0) {
+          await act(async () => { await vi.advanceTimersByTimeAsync(retryDelay); });
+        }
+        await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+        await flushHydrationPromises();
+        await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+        await flushHydrationPromises();
+      }
+
+      expect(inspectIdentities).toHaveBeenCalledTimes(4);
+      expect(loadDetail).toHaveBeenCalledTimes(4);
+      expect(screen.getByTestId('room-restore-degraded')).toBeInTheDocument();
+      expect(saveLayout).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      restoreStorage();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not settle archived identities as empty when a partial directory remains', async () => {
+    vi.useFakeTimers();
+    const workspace = hydrationWorkspace('archived-plus-partial', []);
+    const { saveLayout, restoreStorage } = mockWorkspaceBootstrap(workspace);
+    const archivedIdentity = {
+      ...hydrationIdentity('agent-archived', 'Archived'),
+      status: 'archived',
+    };
+    const inspectIdentities = vi.spyOn(ptyClient, 'inspectProjectAgentIdentities')
+      .mockResolvedValue({ identities: [archivedIdentity], workspaceEntryCount: 2 });
+    const loadDetail = vi.spyOn(ptyClient, 'loadProjectAgentDetail');
+    const view = render(<App />);
+
+    try {
+      await flushHydrationPromises();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+      await flushHydrationPromises();
+
+      expect(inspectIdentities).toHaveBeenCalledTimes(4);
+      expect(loadDetail).not.toHaveBeenCalled();
+      expect(screen.getByTestId('room-restore-degraded')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      expect(saveLayout).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      restoreStorage();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains identity cards and blocks persistence when one detail never loads', async () => {
+    vi.useFakeTimers();
+    const workspace = hydrationWorkspace('partial-detail', ['agent-alpha', 'agent-beta']);
+    const { saveLayout, restoreStorage } = mockWorkspaceBootstrap(workspace);
+    vi.spyOn(ptyClient, 'inspectProjectAgentIdentities').mockResolvedValue({
+      identities: [
+        hydrationIdentity('agent-alpha', 'Alpha'),
+        hydrationIdentity('agent-beta', 'Beta'),
+      ],
+      workspaceEntryCount: 2,
+    });
+    vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockImplementation((request) => (
+      request.agentId === 'agent-beta'
+        ? Promise.reject(new Error('beta detail unavailable'))
+        : Promise.resolve(hydrationDetail(
+          request.agentId,
+          request.projectRoot ?? workspace.localRoot,
+          'Alpha',
+        ))
+    ));
+    const view = render(<App />);
+
+    try {
+      await flushHydrationPromises();
+      await flushHydrationPromises();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+      await flushHydrationPromises();
+
+      expect(screen.getByTestId('chip-agent-alpha')).toBeInTheDocument();
+      expect(screen.getByTestId('chip-agent-beta')).toHaveTextContent('Beta');
+      expect(screen.getByTestId('seat-bob')).toHaveTextContent('Beta');
+      expect(screen.getByTestId('room-restore-degraded')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      expect(saveLayout).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      restoreStorage();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the active workspace reference when a cached refresh has identical agent data', async () => {
+    const workspaceA = hydrationWorkspace('project-a', ['agent-alpha']);
+    const workspaceB = hydrationWorkspace('project-b', ['agent-beta']);
+    const { restoreStorage } = mockWorkspaceBootstrap(workspaceA, [workspaceA, workspaceB]);
+    const byRoot = new Map([
+      [workspaceA.localRoot, [hydrationIdentity('agent-alpha', 'Alpha')]],
+      [workspaceB.localRoot, [hydrationIdentity('agent-beta', 'Beta')]],
+    ]);
+    const inspectIdentities = vi.spyOn(ptyClient, 'inspectProjectAgentIdentities')
+      .mockImplementation(async (projectRoot) => ({
+        identities: byRoot.get(projectRoot ?? '') ?? [],
+        workspaceEntryCount: byRoot.get(projectRoot ?? '')?.length ?? 0,
+      }));
+    const freshWorkspaceB: ptyClient.WorkspaceProject = {
+      ...workspaceB,
+      agents: workspaceB.agents.map((agent) => ({
+        ...agent,
+        args: [...(agent.args ?? [])],
+      })),
+    };
+    vi.spyOn(ptyClient, 'openWorkspaceProject').mockResolvedValue(freshWorkspaceB);
+    const view = render(<App />);
+
+    try {
+      await screen.findByTestId('chip-agent-alpha');
+      await userEvent.click(await screen.findByTestId('tab-project-b'));
+      await screen.findByTestId('chip-agent-beta');
+      await flushHydrationPromises();
+
+      const projectBIdentityReads = inspectIdentities.mock.calls.filter(
+        ([projectRoot]) => projectRoot === workspaceB.localRoot,
+      );
+      expect(projectBIdentityReads).toHaveLength(1);
+    } finally {
+      view.unmount();
+      restoreStorage();
+    }
+  });
+
+  it('cancels a stale generation before its late detail can restore or persist the old room', async () => {
+    const workspaceA = hydrationWorkspace('cancel-project-a', ['agent-alpha']);
+    const workspaceB = hydrationWorkspace('cancel-project-b', ['agent-beta']);
+    const { saveLayout, restoreStorage } = mockWorkspaceBootstrap(workspaceA, [workspaceA, workspaceB]);
+    vi.spyOn(ptyClient, 'inspectProjectAgentIdentities').mockImplementation(async (projectRoot) => ({
+      identities: projectRoot === workspaceA.localRoot
+        ? [hydrationIdentity('agent-alpha', 'Alpha')]
+        : [hydrationIdentity('agent-beta', 'Beta')],
+      workspaceEntryCount: 1,
+    }));
+    let resolveAlphaDetail!: (detail: ptyClient.ProjectAgentDetail) => void;
+    const alphaDetail = new Promise<ptyClient.ProjectAgentDetail>((resolve) => {
+      resolveAlphaDetail = resolve;
+    });
+    vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockImplementation((request) => (
+      request.agentId === 'agent-alpha'
+        ? alphaDetail
+        : Promise.resolve(hydrationDetail('agent-beta', workspaceB.localRoot, 'Beta'))
+    ));
+    vi.spyOn(ptyClient, 'openWorkspaceProject').mockResolvedValue(workspaceB);
+    const view = render(<App />);
+
+    try {
+      await waitFor(() => {
+        expect(ptyClient.loadProjectAgentDetail).toHaveBeenCalledWith({
+          agentId: 'agent-alpha',
+          projectRoot: workspaceA.localRoot,
+        });
+      });
+      await userEvent.click(await screen.findByTestId('tab-cancel-project-b'));
+      await screen.findByTestId('chip-agent-beta');
+
+      await act(async () => {
+        resolveAlphaDetail(hydrationDetail('agent-alpha', workspaceA.localRoot, 'Alpha'));
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(saveLayout.mock.calls.some(([root]) => root === workspaceB.localRoot)).toBe(true);
+      });
+      expect(screen.queryByTestId('chip-agent-alpha')).not.toBeInTheDocument();
+      expect(saveLayout.mock.calls.some(([root]) => root === workspaceA.localRoot)).toBe(false);
+    } finally {
+      view.unmount();
+      restoreStorage();
+    }
+  });
+
+  it('waits for a late cached refresh before an empty roster can be persisted', async () => {
+    vi.useFakeTimers();
+    const workspaceA = hydrationWorkspace('fresh-project-a', ['agent-alpha']);
+    const cachedWorkspaceB = hydrationWorkspace('fresh-project-b', []);
+    const freshWorkspaceB = hydrationWorkspace('fresh-project-b', ['agent-beta']);
+    const { saveLayout, restoreStorage } = mockWorkspaceBootstrap(
+      workspaceA,
+      [workspaceA, cachedWorkspaceB],
+    );
+    vi.spyOn(ptyClient, 'inspectProjectAgentIdentities').mockImplementation(async (projectRoot) => {
+      if (projectRoot === workspaceA.localRoot) {
+        return { identities: [hydrationIdentity('agent-alpha', 'Alpha')], workspaceEntryCount: 1 };
+      }
+      return { identities: [hydrationIdentity('agent-beta', 'Beta')], workspaceEntryCount: 1 };
+    });
+    vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockImplementation(async (request) => (
+      hydrationDetail(
+        request.agentId,
+        request.projectRoot ?? workspaceA.localRoot,
+        request.agentId === 'agent-beta' ? 'Beta' : 'Alpha',
+      )
+    ));
+    let resolveFreshWorkspace!: (workspace: ptyClient.WorkspaceProject) => void;
+    const freshWorkspace = new Promise<ptyClient.WorkspaceProject>((resolve) => {
+      resolveFreshWorkspace = resolve;
+    });
+    vi.spyOn(ptyClient, 'openWorkspaceProject').mockReturnValue(freshWorkspace);
+    const view = render(<App />);
+
+    try {
+      await flushHydrationPromises();
+      fireEvent.click(screen.getByTestId('tab-fresh-project-b'));
+      await flushHydrationPromises();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      expect(saveLayout.mock.calls.some(([root]) => root === cachedWorkspaceB.localRoot)).toBe(false);
+
+      await act(async () => {
+        resolveFreshWorkspace(freshWorkspaceB);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await flushHydrationPromises();
+      expect(screen.getByTestId('chip-agent-beta')).toBeInTheDocument();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      expect(saveLayout).toHaveBeenCalledWith(
+        freshWorkspaceB.localRoot,
+        expect.arrayContaining(['agent-beta']),
+      );
+    } finally {
+      view.unmount();
+      restoreStorage();
+      vi.useRealTimers();
+    }
   });
 });

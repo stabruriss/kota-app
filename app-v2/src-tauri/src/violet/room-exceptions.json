@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "exceptions": [
+    {
+      "id": "codex-image-generation-v1",
+      "provider": "codex",
+      "recordType": "event_msg",
+      "payloadType": "image_generation_end",
+      "source": {
+        "shape": "scalar_base64",
+        "field": "result"
+      },
+      "action": "reshape",
+      "reshape": "base64_image_to_artifact"
+    }
+  ]
+}

@@ -5,6 +5,8 @@
 //! raw logs are replayed as a repair source because those messages originate in
 //! Kota rather than in provider-native transcripts.
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use notify::{RecursiveMode, Watcher};
 use rusqlite::{params, Connection, OpenFlags};
@@ -41,6 +43,8 @@ const PARSED_EVENT_CACHE_LIMIT: usize = 2_000;
 // forward-only fixes that must not rematerialize frozen room history.
 const PARSED_EVENT_CACHE_VERSION: &str = "8";
 const ACTOR_RAW_REPLAY_CURSOR_VERSION: &str = "1";
+const FIRST_VIOLET_SEQ: u64 = 1;
+const MAX_SAFE_VIOLET_SEQ: u64 = (1u64 << 53) - 1;
 const MAX_EVENT_TEXT_CHARS: usize = 10_000;
 const CHATHISTORY_LATEST_LIMIT: usize = 500;
 const PRIVATE_START_BUFFER_SECS: i64 = 2;
@@ -51,6 +55,15 @@ const OPENCODE_SQLITE_MONITOR_POLL_SECS: u64 = 2;
 const OPENCODE_SQLITE_MONITOR_STOP_SLICE_MS: u64 = 250;
 const CLAUDE_HOOK_SOURCE_KIND: &str = "claude-hook-jsonl";
 const PI_SOURCE_KIND: &str = "pi-jsonl";
+const KIMI_SOURCE_KIND: &str = "kimi-jsonl";
+const ROOM_EXCEPTION_CONFIG: &str = include_str!("room-exceptions.json");
+const ROOM_EXCEPTION_MAX_BASE64_CHARS: usize = 32 * 1024 * 1024;
+const ROOM_EXCEPTION_MAX_IMAGE_BYTES: usize = 24 * 1024 * 1024;
+const ROOM_EXCEPTION_MAX_IMAGE_DIMENSION: u32 = 8_192;
+const ROOM_EXCEPTION_MAX_IMAGE_PIXELS: u64 = 32 * 1024 * 1024;
+const ROOM_EXCEPTION_ARTIFACT_STORE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const CODEX_ROOM_EXCEPTION_JSONL_TAIL_BYTES: u64 =
+    ROOM_EXCEPTION_MAX_BASE64_CHARS as u64 + 2 * 1024 * 1024;
 const VIOLET_SUMMARY_PROMPT_FILE: &str = "violet-summary.md";
 const VIOLET_SUMMARY_PROMPT_TEMPLATE: &str = include_str!("../../prompts/violet-summary.md");
 const VIOLET_SUMMARY_LOG_PATH: &str = "project-memory/chathistory/summaries/recent.json";
@@ -60,14 +73,18 @@ const EMBER_DREAM_CONSOLIDATE_PROMPT_TEMPLATE: &str =
     include_str!("../../prompts/ember-dream-consolidate.md");
 const EMBER_DREAM_ENTRY_START: &str = "<KOTA_DREAM_ENTRY>";
 const EMBER_DREAM_ENTRY_END: &str = "</KOTA_DREAM_ENTRY>";
+const EMBER_DREAM_EMPTY_MARKER: &str = "__KOTA_DREAM_NONE__";
 const TURN_ABORTED_ROOM_TEXT: &str = "interrupted the previous turn per human request";
 const CODEX_INTERNAL_PROGRESS_FORMAT_WARNING: &str =
     "Codex emitted an unrecognized internal progress format. Raw event retained in native logs.";
+const KIMI_UNKNOWN_EVENT_WARNING: &str =
+    "Kimi Code emitted an unrecognized native event. Raw event retained in native logs.";
 const EMBER_DREAM_MAX_ACTIVE_ENTRIES: usize = 15;
 #[cfg(not(test))]
 const VIOLET_SUMMARY_CLI_TIMEOUT_SECS: u64 = 225;
 const VIOLET_SUMMARY_FAILURE_COOLDOWN_SECS: i64 = 15 * 60;
 static WRITE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static ROOM_EXCEPTION_SKIPS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(all(not(test), unix))]
 const SIGKILL: i32 = 9;
@@ -79,6 +96,7 @@ unsafe extern "C" {
 }
 
 static CODEX_SOURCE_CACHE: OnceLock<Mutex<HashMap<String, NativeSource>>> = OnceLock::new();
+static ROOM_EXCEPTION_REGISTRY: OnceLock<Option<RoomExceptionRegistry>> = OnceLock::new();
 static VIOLET_SUMMARY_RUNS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static EMBER_DREAM_RUNS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 // Chathistory files are read-modify-written from Violet sync and actor bus paths.
@@ -135,6 +153,8 @@ pub struct VioletSummaryRequest {
 pub struct EmberDreamConsolidateRequest {
     #[serde(default)]
     pub project_root: Option<String>,
+    #[serde(default)]
+    pub project_roots: Vec<String>,
     #[serde(default)]
     pub provider: Option<String>,
 }
@@ -221,7 +241,48 @@ struct VioletSummaryModelOutput {
 
 #[derive(Clone, Debug, Deserialize)]
 struct EmberDreamConsolidationModelOutput {
-    dreams: Vec<String>,
+    decisions: Vec<EmberDreamDecision>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct EmberDreamDecision {
+    id: String,
+    op: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct EmberDreamPromptItem {
+    id: String,
+    kind: String,
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+struct EmberDreamCandidateItem {
+    id: String,
+    project_index: usize,
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+struct EmberDreamCandidateProposal {
+    project_index: usize,
+    text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EmberDreamDecisionAction {
+    Keep,
+    Drop,
+    Rewrite(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EmberDreamApplyResult {
+    active: Vec<String>,
+    archived: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -261,6 +322,10 @@ pub struct VioletChatMessage {
     pub text: String,
     pub source_path: Option<String>,
     pub native_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violet_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_intent: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_agent_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,6 +399,50 @@ struct NativeSource {
     aux_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomExceptionRegistry {
+    schema_version: u32,
+    exceptions: Vec<RoomExceptionRule>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomExceptionRule {
+    id: String,
+    provider: String,
+    record_type: String,
+    payload_type: String,
+    source: RoomExceptionSource,
+    action: RoomExceptionAction,
+    reshape: RoomExceptionReshape,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomExceptionSource {
+    shape: RoomExceptionSourceShape,
+    field: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RoomExceptionSourceShape {
+    ScalarBase64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RoomExceptionAction {
+    Reshape,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RoomExceptionReshape {
+    Base64ImageToArtifact,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct NativeEvent {
     session_id: String,
@@ -365,6 +474,8 @@ struct AgentIdentitySnapshot {
 struct ChathistoryEvent {
     id: String,
     ts: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    violet_seq: Option<u64>,
     role: String,
     agent_id: String,
     shell: String,
@@ -375,6 +486,8 @@ struct ChathistoryEvent {
     source: ChathistorySource,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     target_agent_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor_intent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -418,6 +531,7 @@ pub struct ActorMessageRecord {
     pub text: String,
     pub target_agent_ids: Vec<String>,
     pub event_id: String,
+    pub actor_intent: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -568,7 +682,7 @@ pub fn sync_project(
             status.session_id = Some(source.session_id.clone());
             status.source_kind = source.kind.clone();
             status.source_path = Some(path_string(&source.path));
-            match parse_source(project_root, &agent, source) {
+            match parse_source(project_root, &agent, source, &privacy_spans) {
                 Ok(mut events) => parsed.append(&mut events),
                 Err(err) => parse_error = Some(err),
             }
@@ -771,28 +885,35 @@ pub fn summarize_auto(
 }
 
 pub fn consolidate_ember_dreams(
-    project_root: &Path,
+    project_roots: &[PathBuf],
     request: EmberDreamConsolidateRequest,
 ) -> Result<EmberDreamConsolidateState, String> {
-    ensure_chathistory_dirs(project_root)?;
-    let Some(_guard) = try_acquire_ember_dream_run(project_root)? else {
+    if project_roots.is_empty() {
+        return Err("Ember dream consolidation requires at least one project root.".into());
+    }
+    for project_root in project_roots {
+        ensure_chathistory_dirs(project_root)?;
+    }
+    let Some(_guard) = try_acquire_ember_dream_run()? else {
         return build_ember_dream_state(
             0,
             0,
             Some("Ember dream consolidation is already running.".into()),
         );
     };
-    let _ = sync_project(
-        project_root,
-        VioletRoomRequest {
-            project_root: None,
-            limit: Some(1),
-            before: None,
-            agent_ids: None,
-            watch_agent_ids: None,
-        },
-    );
-    match run_ember_dream_consolidation(project_root, &request) {
+    for project_root in project_roots {
+        let _ = sync_project(
+            project_root,
+            VioletRoomRequest {
+                project_root: None,
+                limit: Some(1),
+                before: None,
+                agent_ids: None,
+                watch_agent_ids: None,
+            },
+        );
+    }
+    match run_ember_dream_consolidation(project_roots, &request) {
         Ok((processed, archived)) => build_ember_dream_state(processed, archived, None),
         Err(err) => build_ember_dream_state(0, 0, Some(err)),
     }
@@ -810,7 +931,7 @@ fn apply_room_request_window(
     request: &VioletRoomRequest,
 ) -> Vec<VioletChatMessage> {
     let mut messages = dedupe_room_messages(messages);
-    messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.id.cmp(&b.id)));
+    messages.sort_by(compare_room_message_order);
     if let Some(before) = request
         .before
         .as_deref()
@@ -893,14 +1014,20 @@ pub fn record_actor_message(
             record.target_agent_ids.join(",")
         )
     };
+    let actor_intent_line = record
+        .actor_intent
+        .as_deref()
+        .map(|intent| format!("- actor_intent: {intent}\n"))
+        .unwrap_or_default();
     let raw_block = format!(
-        "## {timestamp} · {} · system · session {session_id}\n\nAssistant:\n{}\n\nMetadata:\n- agent_id: {}\n- actor_name: {}\n- shell: system\n- native_log: {}\n- kind: message\n- native_event_id: {}\n{}",
+        "## {timestamp} · {} · system · session {session_id}\n\nAssistant:\n{}\n\nMetadata:\n- agent_id: {}\n- actor_name: {}\n- shell: system\n- native_log: {}\n- kind: message\n- native_event_id: {}\n{}{}",
         record.actor_id,
         record.text.trim(),
         record.actor_id,
         record.actor_name,
         source_path.display(),
         record.event_id,
+        actor_intent_line,
         target_line,
     );
     let raw_block = format!("{raw_block}\n");
@@ -917,6 +1044,8 @@ pub fn record_actor_message(
         text: record.text.trim().to_string(),
         source_path: Some(path_string(&source_path)),
         native_event_id: Some(record.event_id.clone()),
+        violet_seq: None,
+        actor_intent: record.actor_intent.clone(),
         target_agent_ids: record.target_agent_ids.clone(),
         agent_display_name: Some(record.actor_name.clone()),
         agent_avatar_id: Some(record.actor_id.clone()),
@@ -1248,12 +1377,13 @@ fn collect_violet_source_watch_paths(
             }
         }
         "pi" => collect_pi_watch_paths(&agent.cwd, &source.path, &mut plan.watched_paths),
+        "kimi" => collect_kimi_watch_paths(&source.path, &mut plan.watched_paths),
         _ => {}
     }
 }
 
 fn native_source_should_refresh_for_watch(shell: &str) -> bool {
-    matches!(shell, "claude" | "codex")
+    matches!(shell, "claude" | "codex" | "kimi")
 }
 
 fn collect_claude_hook_watch_paths(project_root: &Path, paths: &mut HashSet<PathBuf>) {
@@ -1279,6 +1409,7 @@ fn collect_violet_fallback_watch_paths(
             collect_opencode_sqlite_monitor(&db_path, &mut plan.opencode_monitor_specs);
         }
         "pi" => collect_pi_fallback_watch_paths(&home, &agent.cwd, &mut plan.watched_paths),
+        "kimi" => collect_kimi_fallback_watch_paths(&home, &mut plan.watched_paths),
         _ => {}
     }
     Ok(())
@@ -1338,6 +1469,33 @@ fn collect_pi_fallback_watch_paths(home: &Path, cwd: &Path, paths: &mut HashSet<
     let sessions_dir = pi_sessions_dir(home);
     insert_existing_watch_path(paths, &sessions_dir);
     insert_existing_watch_path(paths, pi_project_session_dir(&sessions_dir, cwd));
+}
+
+fn collect_kimi_watch_paths(source_path: &Path, paths: &mut HashSet<PathBuf>) {
+    insert_existing_watch_path(paths, source_path);
+    let kimi_home = dirs::home_dir().map(|home| kimi_code_home_from(&home));
+    if let Some(kimi_home) = kimi_home.as_ref() {
+        insert_existing_watch_path(paths, kimi_home.join("workspaces.json"));
+        insert_existing_watch_path(paths, kimi_home.join("sessions"));
+    }
+    let mut current = source_path.parent();
+    while let Some(dir) = current {
+        insert_existing_watch_path(paths, dir);
+        if kimi_home
+            .as_ref()
+            .is_some_and(|kimi_home| dir == kimi_home || !dir.starts_with(kimi_home))
+        {
+            break;
+        }
+        current = dir.parent();
+    }
+}
+
+fn collect_kimi_fallback_watch_paths(home: &Path, paths: &mut HashSet<PathBuf>) {
+    let kimi_home = kimi_code_home_from(home);
+    insert_existing_watch_path(paths, &kimi_home);
+    insert_existing_watch_path(paths, kimi_home.join("workspaces.json"));
+    insert_existing_watch_path(paths, kimi_home.join("sessions"));
 }
 
 fn collect_opencode_sqlite_monitor(
@@ -1486,7 +1644,7 @@ fn insert_existing_watch_path(paths: &mut HashSet<PathBuf>, path: impl AsRef<Pat
 fn is_supported_violet_shell(shell: &str) -> bool {
     matches!(
         shell,
-        "claude" | "codex" | "antigravity" | "opencode" | "pi"
+        "claude" | "codex" | "antigravity" | "opencode" | "pi" | "kimi"
     )
 }
 
@@ -1559,6 +1717,7 @@ fn locate_native_source(agent: &ProjectAgent) -> Result<Option<NativeSource>, St
         "antigravity" => locate_antigravity_source(agent),
         "opencode" => locate_opencode_source(agent),
         "pi" => locate_pi_source(agent),
+        "kimi" => locate_kimi_source(agent),
         other => Err(format!("unsupported Violet shell source: {other}")),
     }
 }
@@ -1958,6 +2117,7 @@ fn native_source_kind_for_shell(shell: &str) -> String {
         "antigravity" => "antigravity-jsonl",
         "opencode" => "opencode-sqlite",
         "pi" => PI_SOURCE_KIND,
+        "kimi" => KIMI_SOURCE_KIND,
         other => other,
     }
     .to_string()
@@ -2390,6 +2550,136 @@ fn locate_pi_source(agent: &ProjectAgent) -> Result<Option<NativeSource>, String
     Ok(None)
 }
 
+fn locate_kimi_source(agent: &ProjectAgent) -> Result<Option<NativeSource>, String> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(None);
+    };
+    locate_kimi_source_in(&kimi_code_home_from(&home), agent)
+}
+
+fn kimi_code_home_from(home: &Path) -> PathBuf {
+    std::env::var_os("KIMI_CODE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".kimi-code"))
+}
+
+fn locate_kimi_source_in(
+    kimi_home: &Path,
+    agent: &ProjectAgent,
+) -> Result<Option<NativeSource>, String> {
+    let workspace_dirs = kimi_workspace_session_dirs(kimi_home, &agent.cwd)?;
+    if let Some(session_id) = agent
+        .session_id
+        .as_deref()
+        .filter(|session_id| !session_id.trim().is_empty())
+    {
+        for workspace_dir in &workspace_dirs {
+            let session_dir = workspace_dir.join(session_id);
+            let wire = session_dir.join("agents").join("main").join("wire.jsonl");
+            if wire.is_file() && kimi_state_matches_cwd(&session_dir, &agent.cwd)? {
+                return Ok(Some(NativeSource {
+                    kind: KIMI_SOURCE_KIND.into(),
+                    session_id: session_id.to_string(),
+                    path: wire,
+                    aux_path: None,
+                }));
+            }
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for workspace_dir in workspace_dirs {
+        let entries = fs::read_dir(&workspace_dir)
+            .map_err(|err| format!("read {}: {err}", workspace_dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("read {} entry: {err}", workspace_dir.display()))?;
+            let session_dir = entry.path();
+            if !session_dir.is_dir() || !kimi_state_matches_cwd(&session_dir, &agent.cwd)? {
+                continue;
+            }
+            let Some(session_id) = session_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| name.starts_with("session_"))
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let wire = session_dir.join("agents").join("main").join("wire.jsonl");
+            if wire.is_file() {
+                candidates.push((file_modified_time(&wire), session_id, wire));
+            }
+        }
+    }
+    candidates.sort_by_key(|(modified, _, _)| std::cmp::Reverse(*modified));
+    Ok(candidates
+        .into_iter()
+        .next()
+        .map(|(_, session_id, path)| NativeSource {
+            kind: KIMI_SOURCE_KIND.into(),
+            session_id,
+            path,
+            aux_path: None,
+        }))
+}
+
+fn kimi_workspace_session_dirs(kimi_home: &Path, cwd: &Path) -> Result<Vec<PathBuf>, String> {
+    let sessions_dir = kimi_home.join("sessions");
+    if !sessions_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let index_path = kimi_home.join("workspaces.json");
+    if index_path.is_file() {
+        let text = fs::read_to_string(&index_path)
+            .map_err(|err| format!("read {}: {err}", index_path.display()))?;
+        let index: JsonValue = serde_json::from_str(&text)
+            .map_err(|err| format!("parse {}: {err}", index_path.display()))?;
+        if let Some(workspaces) = index.get("workspaces").and_then(JsonValue::as_object) {
+            for (workspace_id, workspace) in workspaces {
+                let matches_cwd = workspace
+                    .get("root")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|root| paths_same(Path::new(root), cwd));
+                let dir = sessions_dir.join(workspace_id);
+                if matches_cwd && dir.is_dir() {
+                    out.push(dir);
+                }
+            }
+        }
+    }
+    if !out.is_empty() {
+        return Ok(out);
+    }
+
+    let entries = fs::read_dir(&sessions_dir)
+        .map_err(|err| format!("read {}: {err}", sessions_dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("read {} entry: {err}", sessions_dir.display()))?;
+        if entry.path().is_dir() {
+            out.push(entry.path());
+        }
+    }
+    Ok(out)
+}
+
+fn kimi_state_matches_cwd(session_dir: &Path, cwd: &Path) -> Result<bool, String> {
+    let state_path = session_dir.join("state.json");
+    if !state_path.is_file() {
+        return Ok(false);
+    }
+    let text = fs::read_to_string(&state_path)
+        .map_err(|err| format!("read {}: {err}", state_path.display()))?;
+    let state: JsonValue = serde_json::from_str(&text)
+        .map_err(|err| format!("parse {}: {err}", state_path.display()))?;
+    Ok(state
+        .get("workDir")
+        .and_then(JsonValue::as_str)
+        .is_some_and(|work_dir| paths_same(Path::new(work_dir), cwd)))
+}
+
 fn pi_sessions_dir(home: &Path) -> PathBuf {
     home.join(".pi").join("agent").join("sessions")
 }
@@ -2508,13 +2798,36 @@ fn parse_source(
     project_root: &Path,
     agent: &ProjectAgent,
     source: &NativeSource,
+    privacy_spans: &[PrivacySpan],
 ) -> Result<Vec<NativeEvent>, String> {
     match agent.shell.as_str() {
         "claude" => parse_jsonl_source_incremental(project_root, agent, source, parse_claude_line),
-        "codex" => parse_jsonl_source_incremental(project_root, agent, source, parse_codex_line),
+        "codex" => parse_jsonl_source_incremental_with_tail_bytes(
+            project_root,
+            agent,
+            source,
+            CODEX_ROOM_EXCEPTION_JSONL_TAIL_BYTES,
+            |agent, source, index, json| {
+                parse_codex_line_with_room_exceptions(
+                    project_root,
+                    privacy_spans,
+                    agent,
+                    source,
+                    index,
+                    json,
+                )
+            },
+        ),
         "antigravity" => parse_antigravity_source(project_root, agent, source),
         "opencode" => parse_opencode_source(agent, source),
         "pi" => parse_pi_source(agent, source),
+        "kimi" => parse_jsonl_source_incremental_with_malformed(
+            project_root,
+            agent,
+            source,
+            parse_kimi_line,
+            parse_kimi_malformed_line,
+        ),
         other => Err(format!("unsupported parser shell: {other}")),
     }
 }
@@ -2525,6 +2838,390 @@ fn parse_claude_hook_source(
     source: &NativeSource,
 ) -> Result<Vec<NativeEvent>, String> {
     parse_jsonl_source_incremental(project_root, agent, source, parse_claude_hook_line)
+}
+
+fn parse_kimi_line(
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    index: usize,
+    json: JsonValue,
+) -> Vec<NativeEvent> {
+    let timestamp = kimi_timestamp(&json).unwrap_or_else(now_iso);
+    let record_type = json_string(&json, &["type"]).unwrap_or_else(|| "missing".into());
+    match record_type.as_str() {
+        "metadata"
+        | "config.update"
+        | "tools.set_active_tools"
+        | "permission.set_mode"
+        | "context.append_message"
+        | "llm.tools_snapshot"
+        | "llm.request"
+        // Compaction bookkeeping is session-internal context maintenance
+        // (the applied summary stays agent context, not room content).
+        | "full_compaction.begin"
+        | "context.apply_compaction"
+        | "full_compaction.complete"
+        | "usage.record" => Vec::new(),
+        "tools.update_store" => parse_kimi_store_update(agent, source, index, &timestamp, &json),
+        "turn.steer" => parse_kimi_turn_steer(agent, source, index, &timestamp, &json),
+        "turn.prompt" => {
+            let text = json_string(&json, &["input"])
+                .or_else(|| json.get("input").and_then(text_from_json))
+                .unwrap_or_default();
+            if text.trim().is_empty() {
+                return Vec::new();
+            }
+            let mut prompt = event(
+                agent,
+                source,
+                "user",
+                "message",
+                &timestamp,
+                &format!("kimi:{index}:prompt"),
+                text,
+            );
+            prompt.turn_id = json_string(&json, &["turnId"]);
+            vec![prompt]
+        }
+        "turn.cancel" => vec![control_event(
+            agent,
+            source,
+            &timestamp,
+            &format!("kimi:{index}:turn-cancel"),
+            "interrupted",
+            Some("turn.cancel".into()),
+            json_string(&json, &["turnId"]),
+        )],
+        "context.append_loop_event" => {
+            parse_kimi_loop_event(agent, source, index, &timestamp, json.get("event"))
+        }
+        _ => vec![kimi_unknown_event(
+            agent,
+            source,
+            &timestamp,
+            "record",
+            &record_type,
+        )],
+    }
+}
+
+fn parse_kimi_loop_event(
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    index: usize,
+    timestamp: &str,
+    loop_event: Option<&JsonValue>,
+) -> Vec<NativeEvent> {
+    let Some(loop_event) = loop_event else {
+        return vec![kimi_unknown_event(
+            agent, source, timestamp, "loop", "missing",
+        )];
+    };
+    let event_type = json_string(loop_event, &["type"]).unwrap_or_else(|| "missing".into());
+    let turn_id = json_string(loop_event, &["turnId"]);
+    match event_type.as_str() {
+        "step.begin" => vec![control_event(
+            agent,
+            source,
+            timestamp,
+            &format!(
+                "kimi:{}:step-begin",
+                json_string(loop_event, &["uuid"]).unwrap_or_else(|| index.to_string())
+            ),
+            "activity",
+            Some("step.begin".into()),
+            turn_id,
+        )],
+        "content.part" => {
+            let Some(part) = loop_event.get("part") else {
+                return vec![kimi_unknown_event(
+                    agent, source, timestamp, "part", "missing",
+                )];
+            };
+            let part_type = json_string(part, &["type"]).unwrap_or_else(|| "missing".into());
+            let (kind, text) = match part_type.as_str() {
+                "think" => ("thinking", json_string(part, &["think"])),
+                "text" => ("message", json_string(part, &["text"])),
+                _ => {
+                    return vec![kimi_unknown_event(
+                        agent, source, timestamp, "part", &part_type,
+                    )];
+                }
+            };
+            let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+                return Vec::new();
+            };
+            let mut content = event(
+                agent,
+                source,
+                "assistant",
+                kind,
+                timestamp,
+                &format!("kimi:{index}:content"),
+                text,
+            );
+            content.turn_id = turn_id;
+            vec![content]
+        }
+        "tool.call" => {
+            let name = json_string(loop_event, &["name"]).unwrap_or_else(|| "Tool".into());
+            let detail = json_string(loop_event, &["description"])
+                .or_else(|| json_string(loop_event, &["display", "command"]))
+                .filter(|detail| !detail.trim().is_empty());
+            let text = detail
+                .map(|detail| format!("{name}: {detail}"))
+                .unwrap_or(name);
+            let event_id = json_string(loop_event, &["toolCallId"])
+                .or_else(|| json_string(loop_event, &["uuid"]))
+                .unwrap_or_else(|| index.to_string());
+            let mut tool = event(
+                agent,
+                source,
+                "assistant",
+                "tool",
+                timestamp,
+                &format!("kimi:{event_id}:call"),
+                text,
+            );
+            tool.turn_id = turn_id;
+            vec![tool]
+        }
+        "tool.result" => {
+            let text = loop_event
+                .get("result")
+                .and_then(|result| {
+                    json_string(result, &["output"]).or_else(|| text_from_json(result))
+                })
+                .unwrap_or_else(|| "Tool completed.".into());
+            let event_id = json_string(loop_event, &["toolCallId"])
+                .or_else(|| json_string(loop_event, &["parentUuid"]))
+                .unwrap_or_else(|| index.to_string());
+            let mut tool = event(
+                agent,
+                source,
+                "assistant",
+                "tool",
+                timestamp,
+                &format!("kimi:{event_id}:result"),
+                text,
+            );
+            tool.turn_id = turn_id;
+            vec![tool]
+        }
+        "step.end" => {
+            let reason =
+                json_string(loop_event, &["finishReason"]).unwrap_or_else(|| "step.end".into());
+            let signal = work_signal_for_stop_reason(&reason);
+            vec![control_event(
+                agent,
+                source,
+                timestamp,
+                &format!(
+                    "kimi:{}:step-end",
+                    json_string(loop_event, &["uuid"]).unwrap_or_else(|| index.to_string())
+                ),
+                signal,
+                Some(reason),
+                turn_id,
+            )]
+        }
+        _ => vec![kimi_unknown_event(
+            agent,
+            source,
+            timestamp,
+            "loop",
+            &event_type,
+        )],
+    }
+}
+
+/// `tools.update_store` mirrors the agent's internal tool state onto the wire. The
+/// `todo` store is the only key reshaped into the room: each full snapshot becomes
+/// one compact commentary entry, so a slow turn stays visibly alive in the folded
+/// progress bubble. Snapshots stay complete on purpose — diffing would need
+/// cross-record state, and the fold only surfaces the latest entry anyway. Other
+/// store keys and malformed snapshots fall back to the same sanitized canary the
+/// record would have produced before this arm existed.
+fn parse_kimi_store_update(
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    index: usize,
+    timestamp: &str,
+    json: &JsonValue,
+) -> Vec<NativeEvent> {
+    let canary = || kimi_unknown_event(agent, source, timestamp, "record", "tools.update_store");
+    if json_string(json, &["key"]).as_deref() != Some("todo") {
+        return vec![canary()];
+    }
+    let Some(text) = kimi_todo_store_progress_text(json.get("value")) else {
+        return vec![canary()];
+    };
+    let mut progress = event(
+        agent,
+        source,
+        "assistant",
+        "commentary",
+        timestamp,
+        &format!("kimi:{index}:todo-store"),
+        text,
+    );
+    // A todo snapshot is ambient progress, never an authoritative lifecycle signal.
+    progress.work_signal = None;
+    vec![progress]
+}
+
+/// `turn.steer` injects input into a running turn. The only shape observed in
+/// real wires so far is the CLI's own background-task notification
+/// (`origin.kind == "background_task"`); that content is folded into the room's
+/// progress stream. Every other origin — including whatever shape user steering
+/// turns out to have — deliberately stays on the record canary until it has
+/// been observed, so nothing gets misclassified on a guess.
+fn parse_kimi_turn_steer(
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    index: usize,
+    timestamp: &str,
+    json: &JsonValue,
+) -> Vec<NativeEvent> {
+    let canary = || kimi_unknown_event(agent, source, timestamp, "record", "turn.steer");
+    if json_string(json, &["origin", "kind"]).as_deref() != Some("background_task") {
+        return vec![canary()];
+    }
+    let text = json
+        .get("input")
+        .and_then(JsonValue::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| json_string(part, &["text"]))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        return vec![canary()];
+    }
+    let mut notice = event(
+        agent,
+        source,
+        "assistant",
+        "commentary",
+        timestamp,
+        &format!("kimi:{index}:steer-notice"),
+        text,
+    );
+    // An injected notification is ambient context, never a lifecycle signal.
+    notice.work_signal = None;
+    vec![notice]
+}
+
+const KIMI_TODO_TITLE_MAX_CHARS: usize = 80;
+const KIMI_TODO_LIST_MAX_ITEMS: usize = 20;
+
+/// Renders one full todo-store snapshot as compact Markdown: a summary first line
+/// (which the room fold surfaces as the latest state) followed by the checklist.
+/// Returns `None` for anything outside the `{title, status}` schema so the caller
+/// fails closed into the sanitized canary.
+fn kimi_todo_store_progress_text(value: Option<&JsonValue>) -> Option<String> {
+    let items = value?.as_array()?;
+    if items.is_empty() {
+        return Some("进度 0/0 · 待办清单已清空".into());
+    }
+    let mut done = 0usize;
+    let mut current = None;
+    let mut lines = Vec::with_capacity(items.len().min(KIMI_TODO_LIST_MAX_ITEMS) + 1);
+    for item in items {
+        let title = json_string(item, &["title"])?;
+        // Todo titles are free-form model text: collapse embedded newlines and
+        // whitespace runs so a title can never break the single-line summary
+        // contract or forge checklist lines of its own.
+        let title = one_line(&title);
+        if title.is_empty() {
+            return None;
+        }
+        let status = json_string(item, &["status"])?;
+        let marker = match status.trim() {
+            "done" => {
+                done += 1;
+                "- [x]"
+            }
+            "in_progress" => {
+                current.get_or_insert_with(|| truncate_chars(&title, KIMI_TODO_TITLE_MAX_CHARS));
+                "▸"
+            }
+            "pending" => "- [ ]",
+            _ => return None,
+        };
+        if lines.len() < KIMI_TODO_LIST_MAX_ITEMS {
+            lines.push(format!(
+                "{marker} {}",
+                truncate_chars(&title, KIMI_TODO_TITLE_MAX_CHARS)
+            ));
+        }
+    }
+    let total = items.len();
+    let mut summary = format!("进度 {done}/{total}");
+    if let Some(current) = current {
+        summary.push_str(&format!(" · 当前：{current}"));
+    } else if done == total {
+        summary.push_str(" · 全部完成");
+    } else {
+        summary.push_str(" · 无进行中项");
+    }
+    if total > KIMI_TODO_LIST_MAX_ITEMS {
+        lines.push(format!("… 其余 {} 项", total - KIMI_TODO_LIST_MAX_ITEMS));
+    }
+    Some(format!("{summary}\n{}", lines.join("\n")))
+}
+
+fn kimi_unknown_event(
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    timestamp: &str,
+    scope: &str,
+    event_type: &str,
+) -> NativeEvent {
+    let mut hasher = Sha256::new();
+    hasher.update(scope.as_bytes());
+    hasher.update([0]);
+    hasher.update(event_type.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    let mut warning = event(
+        agent,
+        source,
+        "assistant",
+        "commentary",
+        timestamp,
+        &format!("kimi:unknown:{scope}:{}", &digest[..12]),
+        KIMI_UNKNOWN_EVENT_WARNING.into(),
+    );
+    // Unknown native records are diagnostic only. They must remain visible,
+    // but cannot authoritatively wake or complete an agent.
+    warning.work_signal = None;
+    warning
+}
+
+fn parse_kimi_malformed_line(
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    _index: usize,
+) -> Vec<NativeEvent> {
+    vec![kimi_unknown_event(
+        agent,
+        source,
+        &now_iso(),
+        "json",
+        "malformed",
+    )]
+}
+
+fn kimi_timestamp(json: &JsonValue) -> Option<String> {
+    let millis = json.get("time").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+    })?;
+    millis_to_iso(millis)
 }
 
 #[derive(Clone)]
@@ -2574,11 +3271,7 @@ fn parse_pi_source(
         .flat_map(|entry| parse_pi_entry(agent, source, entry))
         .collect::<Vec<_>>();
     events = dedupe_native_events(events);
-    events.sort_by(|a, b| {
-        a.timestamp
-            .cmp(&b.timestamp)
-            .then(a.native_event_id.cmp(&b.native_event_id))
-    });
+    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     Ok(tail_events(events, SOURCE_EVENT_LIMIT * 4))
 }
 
@@ -2803,10 +3496,68 @@ fn parse_jsonl_source_incremental<F>(
     project_root: &Path,
     agent: &ProjectAgent,
     source: &NativeSource,
-    mut parser: F,
+    parser: F,
 ) -> Result<Vec<NativeEvent>, String>
 where
     F: FnMut(&ProjectAgent, &NativeSource, usize, JsonValue) -> Vec<NativeEvent>,
+{
+    parse_jsonl_source_incremental_with_malformed(project_root, agent, source, parser, |_, _, _| {
+        Vec::new()
+    })
+}
+
+fn parse_jsonl_source_incremental_with_tail_bytes<F>(
+    project_root: &Path,
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    tail_bytes: u64,
+    parser: F,
+) -> Result<Vec<NativeEvent>, String>
+where
+    F: FnMut(&ProjectAgent, &NativeSource, usize, JsonValue) -> Vec<NativeEvent>,
+{
+    parse_jsonl_source_incremental_with_malformed_and_tail_bytes(
+        project_root,
+        agent,
+        source,
+        tail_bytes,
+        parser,
+        |_, _, _| Vec::new(),
+    )
+}
+
+fn parse_jsonl_source_incremental_with_malformed<F, M>(
+    project_root: &Path,
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    parser: F,
+    malformed: M,
+) -> Result<Vec<NativeEvent>, String>
+where
+    F: FnMut(&ProjectAgent, &NativeSource, usize, JsonValue) -> Vec<NativeEvent>,
+    M: FnMut(&ProjectAgent, &NativeSource, usize) -> Vec<NativeEvent>,
+{
+    parse_jsonl_source_incremental_with_malformed_and_tail_bytes(
+        project_root,
+        agent,
+        source,
+        JSONL_TAIL_BYTES,
+        parser,
+        malformed,
+    )
+}
+
+fn parse_jsonl_source_incremental_with_malformed_and_tail_bytes<F, M>(
+    project_root: &Path,
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    tail_bytes: u64,
+    mut parser: F,
+    mut malformed: M,
+) -> Result<Vec<NativeEvent>, String>
+where
+    F: FnMut(&ProjectAgent, &NativeSource, usize, JsonValue) -> Vec<NativeEvent>,
+    M: FnMut(&ProjectAgent, &NativeSource, usize) -> Vec<NativeEvent>,
 {
     let cache_key = source_cache_key(source);
     let parsed_path = parsed_event_cache_path(project_root, &cache_key)?;
@@ -2828,7 +3579,7 @@ where
         .filter(|_| cursor_matches)
         .map_or(0, |cursor| cursor.line_index);
     let read = if reset_cache {
-        read_jsonl_tail(&source.path, file_len)?
+        read_jsonl_tail(&source.path, file_len, tail_bytes)?
     } else {
         read_jsonl_from_offset(&source.path, start_offset, start_line_index)?
     };
@@ -2845,19 +3596,19 @@ where
     } = read;
     let mut parsed_new = Vec::new();
     for (index, line) in lines {
-        let Ok(json) = serde_json::from_str::<JsonValue>(&line) else {
-            continue;
+        let json = match serde_json::from_str::<JsonValue>(&line) {
+            Ok(json) => json,
+            Err(_) => {
+                parsed_new.extend(malformed(agent, source, index));
+                continue;
+            }
         };
         parsed_new.extend(parser(agent, source, index, json));
     }
     if !parsed_new.is_empty() {
         cached.extend(parsed_new);
         cached = dedupe_native_events(cached);
-        cached.sort_by(|a, b| {
-            a.timestamp
-                .cmp(&b.timestamp)
-                .then(a.native_event_id.cmp(&b.native_event_id))
-        });
+        cached.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         if cached.len() > PARSED_EVENT_CACHE_LIMIT {
             cached = cached.split_off(cached.len() - PARSED_EVENT_CACHE_LIMIT);
         }
@@ -2917,8 +3668,8 @@ fn write_source_cursor(path: &Path, cursor: &SourceCursor) -> Result<(), String>
     write_if_changed(path, &bytes)
 }
 
-fn read_jsonl_tail(path: &Path, file_len: u64) -> Result<JsonlReadResult, String> {
-    let start = file_len.saturating_sub(JSONL_TAIL_BYTES);
+fn read_jsonl_tail(path: &Path, file_len: u64, tail_bytes: u64) -> Result<JsonlReadResult, String> {
+    let start = file_len.saturating_sub(tail_bytes);
     read_jsonl_range(path, start, 0, true)
 }
 
@@ -3264,6 +4015,263 @@ fn assistant_content_has_activity_marker(content: &JsonValue) -> bool {
         }
         _ => false,
     }
+}
+
+fn parse_room_exception_registry(text: &str) -> Result<RoomExceptionRegistry, String> {
+    let registry = serde_json::from_str::<RoomExceptionRegistry>(text)
+        .map_err(|err| format!("parse room exception registry: {err}"))?;
+    if registry.schema_version != 1 {
+        return Err(format!(
+            "unsupported room exception schema version: {}",
+            registry.schema_version
+        ));
+    }
+
+    let mut ids = HashSet::new();
+    let mut selectors = HashSet::new();
+    for rule in &registry.exceptions {
+        if rule.id.trim().is_empty()
+            || rule.provider.trim().is_empty()
+            || rule.record_type.trim().is_empty()
+            || rule.payload_type.trim().is_empty()
+            || rule.source.field.trim().is_empty()
+        {
+            return Err("room exception fields must not be empty".into());
+        }
+        if !ids.insert(rule.id.clone()) {
+            return Err(format!("duplicate room exception id: {}", rule.id));
+        }
+        let selector = (
+            rule.provider.clone(),
+            rule.record_type.clone(),
+            rule.payload_type.clone(),
+        );
+        if !selectors.insert(selector) {
+            return Err(format!(
+                "duplicate room exception selector: {}/{}/{}",
+                rule.provider, rule.record_type, rule.payload_type
+            ));
+        }
+        if !rule
+            .source
+            .field
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(format!(
+                "room exception source field must be a direct field: {}",
+                rule.id
+            ));
+        }
+    }
+    Ok(registry)
+}
+
+fn room_exception_registry() -> Option<&'static RoomExceptionRegistry> {
+    ROOM_EXCEPTION_REGISTRY
+        .get_or_init(
+            || match parse_room_exception_registry(ROOM_EXCEPTION_CONFIG) {
+                Ok(registry) => Some(registry),
+                Err(err) => {
+                    eprintln!("Kota Violet room exceptions disabled: {err}");
+                    None
+                }
+            },
+        )
+        .as_ref()
+}
+
+fn matching_room_exception(
+    provider: &str,
+    record_type: &str,
+    payload_type: &str,
+) -> Option<&'static RoomExceptionRule> {
+    room_exception_registry()?.exceptions.iter().find(|rule| {
+        rule.provider == provider
+            && rule.record_type == record_type
+            && rule.payload_type == payload_type
+    })
+}
+
+fn parse_codex_line_with_room_exceptions(
+    project_root: &Path,
+    privacy_spans: &[PrivacySpan],
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    index: usize,
+    json: JsonValue,
+) -> Vec<NativeEvent> {
+    let record_type = json_string(&json, &["type"]).unwrap_or_default();
+    let timestamp = json_string(&json, &["timestamp"]).unwrap_or_else(now_iso);
+    let payload = json.get("payload").unwrap_or(&JsonValue::Null);
+    let payload_type = json_string(payload, &["type"]).unwrap_or_default();
+    let Some(rule) = matching_room_exception(&agent.shell, &record_type, &payload_type) else {
+        return parse_codex_line(agent, source, index, json);
+    };
+
+    let result = match (&rule.action, &rule.source.shape, &rule.reshape) {
+        (
+            RoomExceptionAction::Reshape,
+            RoomExceptionSourceShape::ScalarBase64,
+            RoomExceptionReshape::Base64ImageToArtifact,
+        ) => reshape_base64_image_to_artifact(
+            project_root,
+            privacy_spans,
+            agent,
+            source,
+            &timestamp,
+            payload,
+            rule,
+        ),
+    };
+    match result {
+        Ok(event) => vec![event],
+        Err(reason) => {
+            let skipped = ROOM_EXCEPTION_SKIPS.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!(
+                "Kota Violet room exception skipped: id={} reason={reason} count={skipped}",
+                rule.id
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn reshape_base64_image_to_artifact(
+    project_root: &Path,
+    privacy_spans: &[PrivacySpan],
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    timestamp: &str,
+    payload: &JsonValue,
+    rule: &RoomExceptionRule,
+) -> Result<NativeEvent, &'static str> {
+    let status = json_string(payload, &["status"]).ok_or("missing_status")?;
+    if !status.eq_ignore_ascii_case("completed") {
+        return Err("not_completed");
+    }
+    let call_id = json_string(payload, &["call_id"]).ok_or("missing_call_id")?;
+    if call_id.is_empty()
+        || call_id.len() > 256
+        || !call_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err("invalid_call_id");
+    }
+    let event_id = format!("{}:{call_id}", rule.id);
+
+    // Privacy is checked before the base64 field is read, decoded, or persisted.
+    // The ordinary partition still receives a safe marker so skip accounting stays intact.
+    let mut privacy_probe = event(
+        agent,
+        source,
+        "assistant",
+        "tool",
+        timestamp,
+        &event_id,
+        "Codex generated an image.".into(),
+    );
+    privacy_probe.work_signal = None;
+    if is_private_event(&privacy_probe, privacy_spans) {
+        return Ok(privacy_probe);
+    }
+
+    let encoded = payload
+        .get(&rule.source.field)
+        .and_then(JsonValue::as_str)
+        .ok_or("missing_image_data")?
+        .trim();
+    let bytes = decode_room_exception_png(encoded)?;
+    let relative_path = persist_room_exception_png(project_root, &bytes)?;
+    let mut artifact = event(
+        agent,
+        source,
+        "assistant",
+        "artifact",
+        timestamp,
+        &event_id,
+        format!("Generated image\n\n{relative_path}"),
+    );
+    artifact.work_signal = None;
+    Ok(artifact)
+}
+
+fn decode_room_exception_png(encoded: &str) -> Result<Vec<u8>, &'static str> {
+    if encoded.is_empty() {
+        return Err("empty_image_data");
+    }
+    if encoded.len() > ROOM_EXCEPTION_MAX_BASE64_CHARS {
+        return Err("encoded_image_too_large");
+    }
+    let bytes = BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|_| "invalid_base64")?;
+    if bytes.is_empty() || bytes.len() > ROOM_EXCEPTION_MAX_IMAGE_BYTES {
+        return Err("decoded_image_too_large");
+    }
+    validate_room_exception_png(&bytes)?;
+    Ok(bytes)
+}
+
+fn validate_room_exception_png(bytes: &[u8]) -> Result<(), &'static str> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 33 || bytes.get(..8) != Some(PNG_SIGNATURE.as_slice()) {
+        return Err("unsupported_image_format");
+    }
+    if bytes.get(8..12) != Some([0, 0, 0, 13].as_slice())
+        || bytes.get(12..16) != Some(b"IHDR".as_slice())
+    {
+        return Err("invalid_png_header");
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().map_err(|_| "invalid_png_header")?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().map_err(|_| "invalid_png_header")?);
+    if width == 0 || height == 0 {
+        return Err("invalid_image_dimensions");
+    }
+    if width > ROOM_EXCEPTION_MAX_IMAGE_DIMENSION
+        || height > ROOM_EXCEPTION_MAX_IMAGE_DIMENSION
+        || u64::from(width) * u64::from(height) > ROOM_EXCEPTION_MAX_IMAGE_PIXELS
+    {
+        return Err("image_dimensions_too_large");
+    }
+    if bytes[26] != 0 || bytes[27] != 0 || bytes[28] > 1 {
+        return Err("invalid_png_header");
+    }
+    Ok(())
+}
+
+fn persist_room_exception_png(project_root: &Path, bytes: &[u8]) -> Result<String, &'static str> {
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    let relative_path = format!("project-memory/attachments/violet/codex-generated/{digest}.png");
+    let path = project_root.join(&relative_path);
+    let parent = path.parent().ok_or("invalid_artifact_path")?;
+    fs::create_dir_all(parent).map_err(|_| "artifact_store_unavailable")?;
+
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("artifact_path_conflict");
+        }
+        let existing = fs::read(&path).map_err(|_| "artifact_read_failed")?;
+        if existing == bytes {
+            return Ok(relative_path);
+        }
+        return Err("artifact_hash_conflict");
+    }
+
+    let mut stored_bytes = 0u64;
+    for entry in fs::read_dir(parent).map_err(|_| "artifact_store_unavailable")? {
+        let entry = entry.map_err(|_| "artifact_store_unavailable")?;
+        let metadata = entry.metadata().map_err(|_| "artifact_store_unavailable")?;
+        if metadata.is_file() {
+            stored_bytes = stored_bytes.saturating_add(metadata.len());
+        }
+    }
+    if stored_bytes.saturating_add(bytes.len() as u64) > ROOM_EXCEPTION_ARTIFACT_STORE_MAX_BYTES {
+        return Err("artifact_store_full");
+    }
+    write_if_changed(&path, bytes).map_err(|_| "artifact_write_failed")?;
+    Ok(relative_path)
 }
 
 fn parse_codex_line(
@@ -3992,7 +5000,7 @@ fn parse_opencode_log_controls(
         let file_len = fs::metadata(&path)
             .map_err(|err| format!("stat {}: {err}", path.display()))?
             .len();
-        let tail = read_jsonl_tail(&path, file_len)?;
+        let tail = read_jsonl_tail(&path, file_len, JSONL_TAIL_BYTES)?;
         let mut current_session_id: Option<String> = None;
         for (line_index, line) in tail.lines {
             if let Some(session_id) = opencode_log_token_value(&line, "session.id") {
@@ -4822,16 +5830,40 @@ fn tail_events(mut events: Vec<NativeEvent>, limit: usize) -> Vec<NativeEvent> {
     if events.len() <= limit {
         return events;
     }
-    events.sort_by(|a, b| {
-        a.timestamp
-            .cmp(&b.timestamp)
-            .then(a.native_event_id.cmp(&b.native_event_id))
-    });
+    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     events.split_off(events.len() - limit)
 }
 
+fn compare_room_message_order(
+    left: &VioletChatMessage,
+    right: &VioletChatMessage,
+) -> std::cmp::Ordering {
+    left.timestamp
+        .cmp(&right.timestamp)
+        .then(
+            left.violet_seq
+                .unwrap_or(0)
+                .cmp(&right.violet_seq.unwrap_or(0)),
+        )
+        .then(left.id.cmp(&right.id))
+}
+
+fn compare_chathistory_event_order(
+    left: &ChathistoryEvent,
+    right: &ChathistoryEvent,
+) -> std::cmp::Ordering {
+    left.ts
+        .cmp(&right.ts)
+        .then(
+            left.violet_seq
+                .unwrap_or(0)
+                .cmp(&right.violet_seq.unwrap_or(0)),
+        )
+        .then(left.id.cmp(&right.id))
+}
+
 fn dedupe_room_messages(mut messages: Vec<VioletChatMessage>) -> Vec<VioletChatMessage> {
-    messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.id.cmp(&b.id)));
+    messages.sort_by(compare_room_message_order);
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(messages.len());
     for message in messages {
@@ -4851,11 +5883,9 @@ fn dedupe_room_messages(mut messages: Vec<VioletChatMessage>) -> Vec<VioletChatM
 }
 
 fn dedupe_native_events(mut events: Vec<NativeEvent>) -> Vec<NativeEvent> {
-    events.sort_by(|a, b| {
-        a.timestamp
-            .cmp(&b.timestamp)
-            .then(a.native_event_id.cmp(&b.native_event_id))
-    });
+    // Stable sorting keeps provider/source traversal order for exact timestamp
+    // ties. Chathistory persists that last trustworthy order as `violet_seq`.
+    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(events.len());
     for event in events {
@@ -5423,15 +6453,83 @@ fn write_chathistory_messages_locked(
         return Ok(vec![chathistory_manifest_path(project_root)]);
     }
 
-    let agent_snapshots = load_chathistory_agent_snapshots(project_root)?;
-    let mut by_day: HashMap<String, Vec<ChathistoryEvent>> = HashMap::new();
-    for message in messages {
-        if message.text.trim().is_empty()
-            || is_bootstrap_noise_text(&message.text)
-            || is_ignorable_codex_internal_context_message(message)
-        {
+    let mut incoming = messages
+        .iter()
+        .filter(|message| {
+            !message.text.trim().is_empty()
+                && !is_bootstrap_noise_text(&message.text)
+                && !is_ignorable_codex_internal_context_message(message)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if incoming.is_empty() {
+        write_chathistory_manifest_locked(project_root)?;
+        return Ok(vec![chathistory_manifest_path(project_root)]);
+    }
+
+    let events_dir = chathistory_events_dir(project_root);
+    let days = incoming
+        .iter()
+        .map(|message| chathistory_day_key(&message.timestamp))
+        .collect::<HashSet<_>>();
+    let mut existing_by_day = BTreeMap::new();
+    let mut existing_seq_by_id = HashMap::new();
+    for day in days {
+        let path = events_dir.join(format!("{day}.jsonl"));
+        let events = read_chathistory_event_file(&path)?;
+        for event in &events {
+            existing_seq_by_id.insert(event.id.clone(), event.violet_seq);
+        }
+        existing_by_day.insert(day, events);
+    }
+
+    let mut assigned_seq_by_id = HashMap::new();
+    let mut allocation_ids = Vec::new();
+    let mut allocation_seen = HashSet::new();
+    let mut minimum_next_seq = FIRST_VIOLET_SEQ;
+    for message in &incoming {
+        if existing_seq_by_id.contains_key(&message.id) {
             continue;
         }
+        if let Some(seq) = message.violet_seq.filter(|seq| *seq > 0) {
+            assigned_seq_by_id.entry(message.id.clone()).or_insert(seq);
+            minimum_next_seq = minimum_next_seq.max(seq.saturating_add(1));
+        } else if allocation_seen.insert(message.id.clone()) {
+            allocation_ids.push(message.id.clone());
+        }
+    }
+    allocation_ids.retain(|id| !assigned_seq_by_id.contains_key(id));
+
+    let current_next_seq = read_or_recover_next_violet_seq_locked(project_root)?;
+    let mut next_seq = current_next_seq.max(minimum_next_seq);
+    for id in allocation_ids {
+        if next_seq > MAX_SAFE_VIOLET_SEQ {
+            return Err(
+                "Violet message sequence exhausted the JavaScript-safe integer range.".into(),
+            );
+        }
+        assigned_seq_by_id.insert(id, next_seq);
+        next_seq = next_seq
+            .checked_add(1)
+            .ok_or_else(|| "Violet message sequence overflowed.".to_string())?;
+    }
+    if next_seq != current_next_seq {
+        // Reserve before writing event files. A crash can leave harmless gaps,
+        // but can never cause a sequence to be reused.
+        write_chathistory_manifest_with_next_seq_locked(project_root, next_seq)?;
+    }
+
+    for message in &mut incoming {
+        if let Some(existing_seq) = existing_seq_by_id.get(&message.id) {
+            message.violet_seq = *existing_seq;
+        } else if let Some(seq) = assigned_seq_by_id.get(&message.id) {
+            message.violet_seq = Some(*seq);
+        }
+    }
+
+    let agent_snapshots = load_chathistory_agent_snapshots(project_root)?;
+    let mut by_day = existing_by_day;
+    for message in &incoming {
         by_day
             .entry(chathistory_day_key(&message.timestamp))
             .or_default()
@@ -5440,18 +6538,10 @@ fn write_chathistory_messages_locked(
                 agent_snapshots.get(&message.agent_id),
             ));
     }
-    if by_day.is_empty() {
-        write_chathistory_manifest_locked(project_root)?;
-        return Ok(vec![chathistory_manifest_path(project_root)]);
-    }
 
     let mut changed_paths = Vec::new();
-    let events_dir = chathistory_events_dir(project_root);
     for (day, mut events) in by_day {
         let path = events_dir.join(format!("{day}.jsonl"));
-        if path.is_file() {
-            events.extend(read_chathistory_event_file(&path)?);
-        }
         events = dedupe_chathistory_events(events);
         events.retain(|event| !is_ignorable_codex_internal_context_event(event));
         let bytes = render_chathistory_events(&events)?;
@@ -5644,10 +6734,19 @@ fn write_chathistory_latest_locked(project_root: &Path) -> Result<(), String> {
 }
 
 fn write_chathistory_manifest_locked(project_root: &Path) -> Result<(), String> {
+    let next_seq = read_or_recover_next_violet_seq_locked(project_root)?;
+    write_chathistory_manifest_with_next_seq_locked(project_root, next_seq)
+}
+
+fn write_chathistory_manifest_with_next_seq_locked(
+    project_root: &Path,
+    next_seq: u64,
+) -> Result<(), String> {
     ensure_chathistory_dirs(project_root)?;
     let manifest = serde_json::json!({
         "kind": "kota.violet.chathistory",
         "version": 1,
+        "next_seq": next_seq.max(FIRST_VIOLET_SEQ),
         "latest_limit": CHATHISTORY_LATEST_LIMIT,
         "events": "events/YYYY-MM-DD.jsonl",
         "latest": "latest.jsonl",
@@ -5657,6 +6756,31 @@ fn write_chathistory_manifest_locked(project_root: &Path) -> Result<(), String> 
     let bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|err| format!("serialize chathistory manifest: {err}"))?;
     write_if_changed(&chathistory_manifest_path(project_root), &bytes)
+}
+
+fn read_or_recover_next_violet_seq_locked(project_root: &Path) -> Result<u64, String> {
+    let manifest_path = chathistory_manifest_path(project_root);
+    if let Ok(bytes) = fs::read(&manifest_path) {
+        if let Ok(manifest) = serde_json::from_slice::<JsonValue>(&bytes) {
+            if let Some(next_seq) = manifest
+                .get("next_seq")
+                .and_then(JsonValue::as_u64)
+                .filter(|next_seq| *next_seq >= FIRST_VIOLET_SEQ)
+            {
+                return Ok(next_seq);
+            }
+        }
+    }
+
+    let max_persisted = read_chathistory_event_segments(project_root)?
+        .into_iter()
+        .filter_map(|event| event.violet_seq)
+        .max()
+        .unwrap_or(0);
+    Ok(max_persisted
+        .checked_add(1)
+        .unwrap_or(MAX_SAFE_VIOLET_SEQ)
+        .max(FIRST_VIOLET_SEQ))
 }
 
 fn build_summary_state(
@@ -5836,10 +6960,8 @@ impl Drop for EmberDreamRunGuard {
     }
 }
 
-fn try_acquire_ember_dream_run(project_root: &Path) -> Result<Option<EmberDreamRunGuard>, String> {
-    let key = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
+fn try_acquire_ember_dream_run() -> Result<Option<EmberDreamRunGuard>, String> {
+    let key = ember_dreams_root();
     let runs = EMBER_DREAM_RUNS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut runs = runs
         .lock()
@@ -6364,36 +7486,54 @@ fn clean_summary_bullets(items: Vec<String>) -> Vec<String> {
 }
 
 fn run_ember_dream_consolidation(
-    project_root: &Path,
+    project_roots: &[PathBuf],
     request: &EmberDreamConsolidateRequest,
 ) -> Result<(usize, usize), String> {
     ensure_ember_dream_dirs()?;
     let processed_ids = read_processed_dream_entry_ids()?;
-    let dream_entries = collect_unprocessed_dream_entries(project_root, &processed_ids)?;
-    if dream_entries.is_empty() {
+    let mut project_entries = Vec::with_capacity(project_roots.len());
+    for project_root in project_roots {
+        project_entries.push(collect_unprocessed_dream_entries(
+            project_root,
+            &processed_ids,
+        )?);
+    }
+    let collected_entries = project_entries
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    if collected_entries.is_empty() {
         return Ok((0, 0));
     }
     let current_dreams = read_active_dream_entries()?;
-    let prompt =
-        render_ember_dream_consolidation_prompt(project_root, &current_dreams, &dream_entries)?;
+    let (prompt_items, candidate_items) =
+        build_ember_dream_consolidation_items(&current_dreams, &project_entries);
+    if candidate_items.is_empty() {
+        append_dream_entry_records(&collected_entries)?;
+        return Ok((collected_entries.len(), 0));
+    }
+    let prompt = render_ember_dream_consolidation_prompt(&prompt_items)?;
     let provider = request
         .provider
         .as_deref()
         .map(normalize_summary_provider)
         .unwrap_or_else(|| "codex".into());
-    let new_dreams = run_summary_cli(&provider, project_root, &prompt)
+    let decisions = run_summary_cli(&provider, &project_roots[0], &prompt)
         .and_then(|output| parse_ember_dream_cli_output(&output))?;
-    append_dream_entry_records(&dream_entries)?;
-    let mut archived_count = 0;
-    if !new_dreams.is_empty() {
-        archived_count = merge_and_write_active_dreams(
-            current_dreams,
-            new_dreams,
-            &provider,
-            dream_entries.len(),
-        )?;
+    let decisions = validate_ember_dream_decisions(&prompt_items, decisions)?;
+    let result = apply_ember_dream_decisions(
+        &current_dreams,
+        &candidate_items,
+        &decisions,
+        EMBER_DREAM_MAX_ACTIVE_ENTRIES,
+    )?;
+    append_dream_entry_records(&collected_entries)?;
+    if !result.archived.is_empty() {
+        append_old_dreams(&result.archived)?;
     }
-    Ok((dream_entries.len(), archived_count))
+    write_active_dreams_markdown(&result.active, &provider, collected_entries.len())?;
+    Ok((collected_entries.len(), result.archived.len()))
 }
 
 fn build_ember_dream_state(
@@ -6416,61 +7556,63 @@ fn build_ember_dream_state(
     })
 }
 
-fn parse_ember_dream_cli_output(output: &str) -> Result<Vec<String>, String> {
+fn parse_ember_dream_cli_output(output: &str) -> Result<Vec<EmberDreamDecision>, String> {
     let trimmed = output.trim();
     for (start, _) in trimmed.match_indices('{') {
         let mut stream = serde_json::Deserializer::from_str(&trimmed[start..])
             .into_iter::<EmberDreamConsolidationModelOutput>();
         if let Some(Ok(parsed)) = stream.next() {
-            return Ok(clean_ember_dream_bullets(parsed.dreams));
+            return Ok(parsed.decisions);
         }
     }
     Err("Ember dream CLI output did not contain valid dream JSON".into())
 }
 
-fn clean_ember_dream_bullets(items: Vec<String>) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for item in items {
-        let item = clean_dream_bullet_text(&item);
-        if item.is_empty() || is_empty_dream_placeholder(&item) {
-            continue;
-        }
-        let item = truncate_chars(&item, 240);
-        let key = normalized_dream_key(&item);
-        if seen.insert(key) {
-            out.push(item);
-        }
-        if out.len() >= EMBER_DREAM_MAX_ACTIVE_ENTRIES {
-            break;
-        }
-    }
-    out
+fn render_ember_dream_consolidation_prompt(
+    items: &[EmberDreamPromptItem],
+) -> Result<String, String> {
+    let items_json = serde_json::to_string_pretty(items)
+        .map_err(|err| format!("serialize Dream consolidation items: {err}"))?;
+    let template = read_ember_dream_consolidate_prompt_template();
+    Ok(template.replace("{{items_json}}", &items_json))
 }
 
-fn render_ember_dream_consolidation_prompt(
-    project_root: &Path,
+fn build_ember_dream_consolidation_items(
     current_dreams: &[String],
-    dream_entries: &[EmberDreamEntryRecord],
-) -> Result<String, String> {
-    let current_dreams_json = serde_json::to_string_pretty(current_dreams)
-        .map_err(|err| format!("serialize current dreams: {err}"))?;
-    let dream_entries_json = serde_json::to_string_pretty(dream_entries)
-        .map_err(|err| format!("serialize dream entries: {err}"))?;
-    let template = read_ember_dream_consolidate_prompt_template();
-    Ok(template
-        .replace("{{project_root}}", &path_string(project_root))
-        .replace("{{dreams_path}}", &path_string(&ember_dreams_path()))
-        .replace(
-            "{{old_dreams_path}}",
-            &path_string(&ember_old_dreams_path()),
-        )
-        .replace(
-            "{{max_active_dreams}}",
-            &EMBER_DREAM_MAX_ACTIVE_ENTRIES.to_string(),
-        )
-        .replace("{{current_dreams_json}}", &current_dreams_json)
-        .replace("{{dream_entries_json}}", &dream_entries_json))
+    project_entries: &[Vec<EmberDreamEntryRecord>],
+) -> (Vec<EmberDreamPromptItem>, Vec<EmberDreamCandidateItem>) {
+    let mut prompt_items = current_dreams
+        .iter()
+        .enumerate()
+        .map(|(index, text)| EmberDreamPromptItem {
+            id: ember_active_dream_id(index),
+            kind: "active".into(),
+            text: text.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut candidate_items = Vec::new();
+    for (project_index, entries) in project_entries.iter().enumerate() {
+        for entry in entries {
+            for text in split_ember_dream_entry_items(&entry.text) {
+                let id = format!("candidate-{}", candidate_items.len() + 1);
+                prompt_items.push(EmberDreamPromptItem {
+                    id: id.clone(),
+                    kind: "candidate".into(),
+                    text: text.clone(),
+                });
+                candidate_items.push(EmberDreamCandidateItem {
+                    id,
+                    project_index,
+                    text,
+                });
+            }
+        }
+    }
+    (prompt_items, candidate_items)
+}
+
+fn ember_active_dream_id(index: usize) -> String {
+    format!("active-{}", index + 1)
 }
 
 fn read_ember_dream_consolidate_prompt_template() -> String {
@@ -6546,6 +7688,218 @@ fn extract_ember_dream_entry_text(text: &str) -> Option<String> {
         return Some(trimmed.to_string());
     }
     None
+}
+
+fn is_empty_ember_dream_entry_text(text: &str) -> bool {
+    clean_dream_bullet_text(text) == EMBER_DREAM_EMPTY_MARKER
+}
+
+fn split_ember_dream_entry_items(text: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let heading = line
+            .trim_matches(['#', '*'])
+            .trim()
+            .trim_end_matches(':')
+            .to_ascii_lowercase();
+        if heading == "dream entry" {
+            continue;
+        }
+        let bullet = line
+            .strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .or_else(|| line.strip_prefix("• "));
+        if let Some(bullet) = bullet {
+            if !current.is_empty() {
+                items.push(current);
+            }
+            current = bullet.trim().to_string();
+        } else if current.is_empty() {
+            current = line.to_string();
+        } else {
+            current.push(' ');
+            current.push_str(line);
+        }
+    }
+    if !current.is_empty() {
+        items.push(current);
+    }
+    items
+        .into_iter()
+        .map(|item| sanitize_ember_dream_text(&item))
+        .filter(|item| !item.is_empty() && !is_empty_dream_placeholder(item))
+        .collect()
+}
+
+fn sanitize_ember_dream_text(value: &str) -> String {
+    let cleaned = clean_dream_bullet_text(value)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_chars(&cleaned, 240)
+}
+
+fn validate_ember_dream_decisions(
+    items: &[EmberDreamPromptItem],
+    decisions: Vec<EmberDreamDecision>,
+) -> Result<HashMap<String, EmberDreamDecisionAction>, String> {
+    let items_by_id = items
+        .iter()
+        .map(|item| (item.id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let mut actions = HashMap::new();
+    for decision in decisions {
+        let id = decision.id.trim();
+        let Some(item) = items_by_id.get(id) else {
+            return Err(format!("Ember dream decision used unknown id: {id}"));
+        };
+        if actions.contains_key(id) {
+            return Err(format!("Ember dream decision repeated id: {id}"));
+        }
+        let action = match decision.op.trim().to_ascii_lowercase().as_str() {
+            "keep" => EmberDreamDecisionAction::Keep,
+            "drop" => EmberDreamDecisionAction::Drop,
+            "rewrite" => {
+                let text = sanitize_ember_dream_text(decision.text.as_deref().unwrap_or_default());
+                if text.is_empty() || is_empty_dream_placeholder(&text) {
+                    return Err(format!(
+                        "Ember dream rewrite requires non-empty text for id: {id}"
+                    ));
+                }
+                if normalized_dream_key(&text) == normalized_dream_key(&item.text) {
+                    EmberDreamDecisionAction::Keep
+                } else {
+                    EmberDreamDecisionAction::Rewrite(text)
+                }
+            }
+            op => {
+                return Err(format!(
+                    "Ember dream decision used unknown op '{op}' for id: {id}"
+                ))
+            }
+        };
+        actions.insert(id.to_string(), action);
+    }
+    let missing = items
+        .iter()
+        .filter(|item| !actions.contains_key(&item.id))
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Ember dream decisions omitted ids: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(actions)
+}
+
+fn apply_ember_dream_decisions(
+    current: &[String],
+    candidates: &[EmberDreamCandidateItem],
+    decisions: &HashMap<String, EmberDreamDecisionAction>,
+    max_active: usize,
+) -> Result<EmberDreamApplyResult, String> {
+    let mut kept = Vec::new();
+    let mut refreshed = Vec::new();
+    let mut archived = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (index, text) in current.iter().enumerate() {
+        let id = ember_active_dream_id(index);
+        let action = decisions
+            .get(&id)
+            .ok_or_else(|| format!("missing validated Ember dream decision for id: {id}"))?;
+        match action {
+            EmberDreamDecisionAction::Keep => {
+                if seen.insert(normalized_dream_key(text)) {
+                    kept.push(text.clone());
+                } else {
+                    archived.push(text.clone());
+                }
+            }
+            EmberDreamDecisionAction::Drop => archived.push(text.clone()),
+            EmberDreamDecisionAction::Rewrite(rewritten) => {
+                archived.push(text.clone());
+                if seen.insert(normalized_dream_key(rewritten)) {
+                    refreshed.push(rewritten.clone());
+                }
+            }
+        }
+    }
+
+    let mut proposals = Vec::new();
+    for candidate in candidates {
+        let action = decisions.get(&candidate.id).ok_or_else(|| {
+            format!(
+                "missing validated Ember dream decision for id: {}",
+                candidate.id
+            )
+        })?;
+        let text = match action {
+            EmberDreamDecisionAction::Keep => candidate.text.clone(),
+            EmberDreamDecisionAction::Drop => continue,
+            EmberDreamDecisionAction::Rewrite(rewritten) => rewritten.clone(),
+        };
+        if seen.insert(normalized_dream_key(&text)) {
+            proposals.push(EmberDreamCandidateProposal {
+                project_index: candidate.project_index,
+                text,
+            });
+        }
+    }
+
+    if refreshed.len() > max_active {
+        let overflow = refreshed.len() - max_active;
+        archived.extend(refreshed.drain(0..overflow));
+    }
+    let candidate_capacity = max_active.saturating_sub(refreshed.len());
+    let selected_candidates = fair_order_ember_dream_candidates(proposals)
+        .into_iter()
+        .take(candidate_capacity)
+        .map(|candidate| candidate.text)
+        .collect::<Vec<_>>();
+    let kept_capacity = max_active.saturating_sub(refreshed.len() + selected_candidates.len());
+    if kept.len() > kept_capacity {
+        let overflow = kept.len() - kept_capacity;
+        archived.extend(kept.drain(0..overflow));
+    }
+
+    let mut active = kept;
+    active.extend(refreshed);
+    active.extend(selected_candidates);
+    Ok(EmberDreamApplyResult { active, archived })
+}
+
+fn fair_order_ember_dream_candidates(
+    candidates: Vec<EmberDreamCandidateProposal>,
+) -> Vec<EmberDreamCandidateProposal> {
+    let mut queues = BTreeMap::<usize, VecDeque<EmberDreamCandidateProposal>>::new();
+    for candidate in candidates {
+        queues
+            .entry(candidate.project_index)
+            .or_default()
+            .push_back(candidate);
+    }
+    let mut ordered = Vec::new();
+    loop {
+        let mut added = false;
+        for queue in queues.values_mut() {
+            if let Some(candidate) = queue.pop_front() {
+                ordered.push(candidate);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    ordered
 }
 
 fn read_processed_dream_entry_ids() -> Result<HashSet<String>, String> {
@@ -6629,37 +7983,6 @@ fn read_active_dream_entries() -> Result<Vec<String>, String> {
         }
     }
     Ok(entries)
-}
-
-fn merge_and_write_active_dreams(
-    current: Vec<String>,
-    incoming: Vec<String>,
-    provider: &str,
-    processed_count: usize,
-) -> Result<usize, String> {
-    let mut active = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in current.into_iter().chain(incoming) {
-        let entry = clean_dream_bullet_text(&entry);
-        if entry.is_empty() || is_empty_dream_placeholder(&entry) {
-            continue;
-        }
-        let key = normalized_dream_key(&entry);
-        if seen.insert(key) {
-            active.push(entry);
-        }
-    }
-    let archived = if active.len() > EMBER_DREAM_MAX_ACTIVE_ENTRIES {
-        let overflow = active.len() - EMBER_DREAM_MAX_ACTIVE_ENTRIES;
-        active.drain(0..overflow).collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    if !archived.is_empty() {
-        append_old_dreams(&archived)?;
-    }
-    write_active_dreams_markdown(&active, provider, processed_count)?;
-    Ok(archived.len())
 }
 
 fn write_active_dreams_markdown(
@@ -6756,6 +8079,9 @@ fn clean_dream_bullet_text(value: &str) -> String {
 }
 
 fn is_empty_dream_placeholder(value: &str) -> bool {
+    if is_empty_ember_dream_entry_text(value) {
+        return true;
+    }
     let normalized = normalized_dream_key(value);
     normalized.is_empty()
         || normalized.contains("no durable user facts")
@@ -6960,7 +8286,7 @@ fn render_chathistory_events(events: &[ChathistoryEvent]) -> Result<String, Stri
 }
 
 fn dedupe_chathistory_events(mut events: Vec<ChathistoryEvent>) -> Vec<ChathistoryEvent> {
-    events.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.id.cmp(&b.id)));
+    events.sort_by(compare_chathistory_event_order);
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(events.len());
     for event in events {
@@ -6978,6 +8304,7 @@ fn chathistory_event_from_message(
     ChathistoryEvent {
         id: message.id.clone(),
         ts: message.timestamp.clone(),
+        violet_seq: message.violet_seq,
         role: message.role.clone(),
         agent_id: message.agent_id.clone(),
         shell: message.shell.clone(),
@@ -6995,6 +8322,7 @@ fn chathistory_event_from_message(
             byte_end: None,
         },
         target_agent_ids: message.target_agent_ids.clone(),
+        actor_intent: message.actor_intent.clone(),
         agent_display_name: message
             .agent_display_name
             .clone()
@@ -7026,6 +8354,8 @@ fn message_from_chathistory_event(event: ChathistoryEvent) -> VioletChatMessage 
         text: event.text,
         source_path: event.source.path,
         native_event_id: event.source.native_event_id,
+        violet_seq: event.violet_seq,
+        actor_intent: event.actor_intent,
         target_agent_ids: event.target_agent_ids,
         agent_display_name: event.agent_display_name,
         agent_avatar_id: event.agent_avatar_id,
@@ -7453,6 +8783,8 @@ fn parse_normalized_block(block: &str, session_id: &str, path: &Path) -> Option<
         text,
         source_path: Some(path_string(path)),
         native_event_id,
+        violet_seq: None,
+        actor_intent: metadata_value(metadata, "actor_intent"),
         target_agent_ids,
         agent_display_name: actor_name,
         agent_avatar_id,
@@ -7492,6 +8824,8 @@ fn event_to_message(event: NativeEvent) -> VioletChatMessage {
         text: event.text,
         source_path: Some(path_string(&event.source_path)),
         native_event_id: event.native_event_id,
+        violet_seq: None,
+        actor_intent: None,
         target_agent_ids: Vec::new(),
         agent_display_name: None,
         agent_avatar_id: None,
@@ -7857,6 +9191,7 @@ fn normalize_shell(raw: &str) -> String {
         "antigravity" | "agy" | "antigravity-cli" => "antigravity",
         "opencode" | "open-code" => "opencode",
         "codex" => "codex",
+        "kimi" | "kimi-code" => "kimi",
         other => other,
     }
     .to_string()
@@ -7943,6 +9278,433 @@ mod tests {
         }
     }
 
+    fn kimi_agent(cwd: &Path) -> ProjectAgent {
+        ProjectAgent {
+            agent_id: "alice".into(),
+            shell: "kimi".into(),
+            cwd: cwd.to_path_buf(),
+            session_id: None,
+        }
+    }
+
+    fn kimi_source(path: &Path) -> NativeSource {
+        NativeSource {
+            kind: KIMI_SOURCE_KIND.into(),
+            session_id: "session_kimi".into(),
+            path: path.to_path_buf(),
+            aux_path: None,
+        }
+    }
+
+    #[test]
+    fn parse_kimi_wire_maps_known_events_without_locking_protocol_version() {
+        let cwd = Path::new("/tmp/kota-kimi-agent");
+        let agent = kimi_agent(cwd);
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let records = [
+            serde_json::json!({"type":"metadata","time":1784393127000i64,"protocol_version":"99.0"}),
+            serde_json::json!({"type":"turn.prompt","time":1784393127001i64,"input":"你好 🌙"}),
+            serde_json::json!({"type":"context.append_loop_event","time":1784393127002i64,"event":{"type":"step.begin","uuid":"step-1","turnId":"0","step":1}}),
+            serde_json::json!({"type":"context.append_loop_event","time":1784393127003i64,"event":{"type":"content.part","part":{"type":"think","think":"checking"}}}),
+            serde_json::json!({"type":"context.append_loop_event","time":1784393127004i64,"event":{"type":"tool.call","uuid":"tool-1","toolCallId":"tool-1","name":"Bash","description":"Running: pwd","turnId":"0"}}),
+            serde_json::json!({"type":"context.append_loop_event","time":1784393127005i64,"event":{"type":"tool.result","parentUuid":"tool-1","toolCallId":"tool-1","result":{"output":"/tmp/kota-kimi-agent"}}}),
+            serde_json::json!({"type":"context.append_loop_event","time":1784393127006i64,"event":{"type":"step.end","uuid":"step-1","turnId":"0","finishReason":"tool_use"}}),
+            serde_json::json!({"type":"context.append_loop_event","time":1784393127007i64,"event":{"type":"content.part","part":{"type":"text","text":"完成"}}}),
+            serde_json::json!({"type":"context.append_loop_event","time":1784393127008i64,"event":{"type":"step.end","uuid":"step-2","turnId":"0","finishReason":"end_turn"}}),
+            serde_json::json!({"type":"turn.cancel","time":1784393127009i64}),
+        ];
+        let events = records
+            .into_iter()
+            .enumerate()
+            .flat_map(|(index, record)| parse_kimi_line(&agent, &source, index, record))
+            .collect::<Vec<_>>();
+
+        assert_eq!(events.len(), 9);
+        assert_eq!(events[0].role, "user");
+        assert_eq!(events[0].text, "你好 🌙");
+        assert_eq!(events[1].work_signal.as_deref(), Some("activity"));
+        assert_eq!(events[2].kind, "thinking");
+        assert_eq!(events[3].text, "Bash: Running: pwd");
+        assert_eq!(events[4].text, "/tmp/kota-kimi-agent");
+        assert_eq!(events[5].work_signal.as_deref(), Some("activity"));
+        assert_eq!(events[6].text, "完成");
+        assert_eq!(events[7].work_signal.as_deref(), Some("completed"));
+        assert_eq!(events[8].work_signal.as_deref(), Some("interrupted"));
+    }
+
+    #[test]
+    fn parse_kimi_unknown_events_are_visible_sanitized_and_deduplicable() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let first = parse_kimi_line(
+            &agent,
+            &source,
+            1,
+            serde_json::json!({"type":"future.secret.event","payload":"do not leak"}),
+        );
+        let second = parse_kimi_line(
+            &agent,
+            &source,
+            99,
+            serde_json::json!({"type":"future.secret.event","payload":"another secret"}),
+        );
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].text, KIMI_UNKNOWN_EVENT_WARNING);
+        assert!(!first[0].text.contains("secret"));
+        assert_eq!(first[0].work_signal, None);
+        assert_eq!(first[0].native_event_id, second[0].native_event_id);
+    }
+
+    #[test]
+    fn parse_kimi_malformed_lines_emit_one_sanitized_canary() {
+        let root = temp_violet_dir("kimi-malformed");
+        let wire = root.join("wire.jsonl");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &wire,
+            "first private malformed line\nsecond private malformed line\n",
+        )
+        .unwrap();
+        let agent = kimi_agent(&root);
+        let source = kimi_source(&wire);
+
+        let first = parse_jsonl_source_incremental_with_malformed(
+            &root,
+            &agent,
+            &source,
+            parse_kimi_line,
+            parse_kimi_malformed_line,
+        )
+        .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].text, KIMI_UNKNOWN_EVENT_WARNING);
+        assert!(!first[0].text.contains("private"));
+        assert_eq!(first[0].work_signal, None);
+
+        fs::write(
+            &wire,
+            "first private malformed line\nsecond private malformed line\nthird private malformed line\n",
+        )
+        .unwrap();
+        let second = parse_jsonl_source_incremental_with_malformed(
+            &root,
+            &agent,
+            &source,
+            parse_kimi_line,
+            parse_kimi_malformed_line,
+        )
+        .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].native_event_id, first[0].native_event_id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kimi_todo_store_snapshots_become_progress_commentary() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let record = serde_json::json!({
+            "type": "tools.update_store",
+            "key": "todo",
+            "time": 1784443967514i64,
+            "value": [
+                {"title": "查证过滤链路", "status": "done"},
+                {"title": "实现快照整形", "status": "in_progress"},
+                {"title": "补测试", "status": "pending"}
+            ]
+        });
+        let events = parse_kimi_line(&agent, &source, 7, record);
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.role, "assistant");
+        assert_eq!(event.kind, "commentary");
+        assert_eq!(event.work_signal, None);
+        assert_eq!(event.native_event_id.as_deref(), Some("kimi:7:todo-store"));
+        assert_eq!(
+            event.text,
+            "进度 1/3 · 当前：实现快照整形\n- [x] 查证过滤链路\n▸ 实现快照整形\n- [ ] 补测试"
+        );
+    }
+
+    #[test]
+    fn kimi_todo_store_terminal_states_have_no_current_item() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let all_done = parse_kimi_line(
+            &agent,
+            &source,
+            8,
+            serde_json::json!({
+                "type": "tools.update_store",
+                "key": "todo",
+                "value": [
+                    {"title": "甲", "status": "done"},
+                    {"title": "乙", "status": "done"}
+                ]
+            }),
+        );
+        assert_eq!(all_done[0].text, "进度 2/2 · 全部完成\n- [x] 甲\n- [x] 乙");
+
+        let cleared = parse_kimi_line(
+            &agent,
+            &source,
+            9,
+            serde_json::json!({"type": "tools.update_store", "key": "todo", "value": []}),
+        );
+        assert_eq!(cleared[0].text, "进度 0/0 · 待办清单已清空");
+    }
+
+    #[test]
+    fn kimi_todo_store_snapshots_keep_distinct_ids_for_history() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let record = || {
+            serde_json::json!({
+                "type": "tools.update_store",
+                "key": "todo",
+                "value": [{"title": "唯一事项", "status": "in_progress"}]
+            })
+        };
+        let first = parse_kimi_line(&agent, &source, 7, record());
+        let second = parse_kimi_line(&agent, &source, 8, record());
+        assert_ne!(first[0].native_event_id, second[0].native_event_id);
+    }
+
+    #[test]
+    fn kimi_todo_store_malformed_values_fall_back_to_record_canary() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let cases = [
+            serde_json::json!({"type":"tools.update_store","key":"todo","value":[{"title":"x","status":"blocked"}]}),
+            serde_json::json!({"type":"tools.update_store","key":"todo","value":[{"title":"  ","status":"done"}]}),
+            serde_json::json!({"type":"tools.update_store","key":"todo","value":[{"status":"done"}]}),
+            serde_json::json!({"type":"tools.update_store","key":"todo","value":{"title":"x"}}),
+            serde_json::json!({"type":"tools.update_store","key":"clipboard","value":[{"title":"x","status":"done"}]}),
+            serde_json::json!({"type":"tools.update_store"}),
+        ];
+        let mut ids = std::collections::HashSet::new();
+        for record in cases {
+            let events = parse_kimi_line(&agent, &source, 3, record);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].text, KIMI_UNKNOWN_EVENT_WARNING);
+            assert_eq!(events[0].work_signal, None);
+            ids.insert(events[0].native_event_id.clone());
+        }
+        // Every failure mode collapses into the same deduplicable canary the
+        // record produced before the reshape arm existed.
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn kimi_todo_store_caps_long_titles_and_overflow_items() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let long_title = "长".repeat(120);
+        let mut value = vec![serde_json::json!({"title": long_title, "status": "in_progress"})];
+        for index in 0..25 {
+            value.push(serde_json::json!({"title": format!("事项 {index}"), "status": "pending"}));
+        }
+        let events = parse_kimi_line(
+            &agent,
+            &source,
+            7,
+            serde_json::json!({"type": "tools.update_store", "key": "todo", "value": value}),
+        );
+        let text = &events[0].text;
+        assert!(text.starts_with(&format!(
+            "进度 0/26 · 当前：{}...",
+            "长".repeat(KIMI_TODO_TITLE_MAX_CHARS)
+        )));
+        assert!(text.contains("… 其余 6 项"));
+        assert!(!text.contains("事项 19"));
+    }
+
+    #[test]
+    fn kimi_todo_store_titles_collapse_to_single_lines() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let events = parse_kimi_line(
+            &agent,
+            &source,
+            7,
+            serde_json::json!({
+                "type": "tools.update_store",
+                "key": "todo",
+                "value": [
+                    {"title": "第一行\n▸ 伪造进度   连续  空白", "status": "in_progress"},
+                    {"title": "正常事项", "status": "pending"}
+                ]
+            }),
+        );
+        let text = &events[0].text;
+        assert_eq!(
+            text.as_str(),
+            "进度 0/2 · 当前：第一行 ▸ 伪造进度 连续 空白\n▸ 第一行 ▸ 伪造进度 连续 空白\n- [ ] 正常事项"
+        );
+        // One snapshot line per todo item plus the summary line: nothing a
+        // title carries can add lines of its own.
+        assert_eq!(text.lines().count(), 3);
+    }
+
+    #[test]
+    fn kimi_turn_steer_background_task_notifications_fold_into_progress() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        let events = parse_kimi_line(
+            &agent,
+            &source,
+            11,
+            serde_json::json!({
+                "type": "turn.steer",
+                "time": 1784493831736i64,
+                "input": [
+                    {"type": "text", "text": "<notification id=\"task:bash-1:completed\">\nTitle: Background process completed\n采样完成。\n</notification>"}
+                ],
+                "origin": {"kind": "background_task", "taskId": "bash-1", "status": "completed"}
+            }),
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].role, "assistant");
+        assert_eq!(events[0].kind, "commentary");
+        assert_eq!(events[0].work_signal, None);
+        assert_eq!(
+            events[0].native_event_id.as_deref(),
+            Some("kimi:11:steer-notice")
+        );
+        assert!(events[0].text.contains("Background process completed"));
+        assert!(events[0].text.contains("采样完成。"));
+    }
+
+    #[test]
+    fn kimi_turn_steer_other_origins_keep_the_exact_record_canary() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        // The exact canary this record type produced before the arm existed:
+        // same scope ("record") and same type string, so ids stay identical
+        // with history and keep deduplicating against frozen entries.
+        let unknown_type_canary = kimi_unknown_event(&agent, &source, "t", "record", "turn.steer");
+
+        let cases = [
+            // A hypothetical user steering shape must NOT be folded on a guess.
+            serde_json::json!({
+                "type": "turn.steer",
+                "input": [{"type": "text", "text": "user steering text"}],
+                "origin": {"kind": "user"}
+            }),
+            // Missing origin entirely.
+            serde_json::json!({
+                "type": "turn.steer",
+                "input": [{"type": "text", "text": "orphan input"}]
+            }),
+            // Confirmed origin but empty input still has nothing to fold.
+            serde_json::json!({
+                "type": "turn.steer",
+                "input": [],
+                "origin": {"kind": "background_task"}
+            }),
+        ];
+        for record in cases {
+            let events = parse_kimi_line(&agent, &source, 3, record);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].text, KIMI_UNKNOWN_EVENT_WARNING);
+            assert!(!events[0].text.contains("steering"));
+            assert_eq!(events[0].work_signal, None);
+            assert_eq!(
+                events[0].native_event_id,
+                unknown_type_canary.native_event_id
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_compaction_records_are_silently_ignored() {
+        let agent = kimi_agent(Path::new("/tmp/kota-kimi-agent"));
+        let source = kimi_source(Path::new("/tmp/kimi-wire.jsonl"));
+        // Shapes observed in a real session wire: compaction lifecycle is
+        // session-internal bookkeeping (the applied summary stays agent
+        // context), so all three record types surface zero room events.
+        let cases = [
+            serde_json::json!({"type": "full_compaction.begin", "source": "auto", "time": 1784493831736i64}),
+            serde_json::json!({
+                "type": "context.apply_compaction",
+                "summary": "agent-internal handoff notes",
+                "contextSummary": "…",
+                "compactedCount": 1280,
+                "tokensBefore": 2100000,
+                "tokensAfter": 120000,
+                "keptUserMessageCount": 4,
+                "droppedCount": 1280,
+                "time": 1784493831740i64
+            }),
+            serde_json::json!({"type": "full_compaction.complete", "time": 1784493831751i64}),
+        ];
+        for record in cases {
+            assert!(parse_kimi_line(&agent, &source, 7, record).is_empty());
+        }
+        // The fail-closed net is untouched: an unknown compaction-flavoured
+        // type still produces exactly the record-scope canary.
+        let events = parse_kimi_line(
+            &agent,
+            &source,
+            7,
+            serde_json::json!({"type": "context.apply_compaction_v2", "time": 1784493831799i64}),
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, KIMI_UNKNOWN_EVENT_WARNING);
+        assert_eq!(
+            events[0].native_event_id,
+            kimi_unknown_event(
+                &agent,
+                &source,
+                "t",
+                "record",
+                "context.apply_compaction_v2"
+            )
+            .native_event_id
+        );
+    }
+
+    #[test]
+    fn locate_kimi_source_uses_matching_workspace_main_wire_only() {
+        let root = temp_violet_dir("kimi-locator");
+        let kimi_home = root.join("kimi-home");
+        let cwd = root.join("agent-cwd");
+        let session_dir = kimi_home.join("sessions/wd_match/session_kimi");
+        let main_wire = session_dir.join("agents/main/wire.jsonl");
+        let child_wire = session_dir.join("agents/child-1/wire.jsonl");
+        fs::create_dir_all(main_wire.parent().unwrap()).unwrap();
+        fs::create_dir_all(child_wire.parent().unwrap()).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            kimi_home.join("workspaces.json"),
+            serde_json::json!({
+                "version": 1,
+                "workspaces": {"wd_match": {"root": path_string(&cwd)}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            session_dir.join("state.json"),
+            serde_json::json!({"workDir": path_string(&cwd)}).to_string(),
+        )
+        .unwrap();
+        fs::write(&main_wire, "{}\n").unwrap();
+        fs::write(&child_wire, "{}\n{}\n").unwrap();
+
+        let source = locate_kimi_source_in(&kimi_home, &kimi_agent(&cwd))
+            .unwrap()
+            .expect("Kimi main source");
+        assert_eq!(source.kind, KIMI_SOURCE_KIND);
+        assert_eq!(source.session_id, "session_kimi");
+        assert_eq!(source.path, main_wire);
+        assert_ne!(source.path, child_wire);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn parse_pi_source_projects_active_leaf_path_only() {
         let root = temp_violet_dir("pi-active-path");
@@ -8027,6 +9789,24 @@ mod tests {
             turn_id: None,
             stop_reason: None,
         }
+    }
+
+    #[test]
+    fn native_event_timestamp_ties_preserve_source_order() {
+        let mut user = native_event("user", "message", "prompt");
+        user.native_event_id = Some("z-user".into());
+        let mut assistant = native_event("assistant", "message", "reply");
+        assistant.native_event_id = Some("a-assistant".into());
+
+        let events = dedupe_native_events(vec![user, assistant]);
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prompt", "reply"]
+        );
     }
 
     #[test]
@@ -8529,12 +10309,183 @@ mod tests {
             text: text.into(),
             source_path: Some("/tmp/s.jsonl".into()),
             native_event_id: Some(id.into()),
+            violet_seq: None,
+            actor_intent: None,
             target_agent_ids: Vec::new(),
             agent_display_name: Some("Alice".into()),
             agent_avatar_id: None,
             agent_provider: None,
             agent_status: None,
         }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct VioletMessageOrderFixture {
+        name: String,
+        messages: Vec<VioletMessageOrderFixtureMessage>,
+        expected_ids: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct VioletMessageOrderFixtureMessage {
+        id: String,
+        timestamp: String,
+        violet_seq: Option<u64>,
+    }
+
+    #[test]
+    fn violet_message_order_matches_shared_frontend_fixture() {
+        let fixtures = serde_json::from_str::<Vec<VioletMessageOrderFixture>>(include_str!(
+            "../../../tests/fixtures/violet-message-order.json"
+        ))
+        .unwrap();
+
+        for fixture in fixtures {
+            let messages = fixture
+                .messages
+                .into_iter()
+                .map(|message| {
+                    let mut event = chat_message(
+                        &message.id,
+                        "assistant",
+                        "message",
+                        &message.timestamp,
+                        &format!("text for {}", message.id),
+                    );
+                    event.violet_seq = message.violet_seq;
+                    event
+                })
+                .collect::<Vec<_>>();
+            let ordered = apply_room_request_window(
+                messages,
+                &VioletRoomRequest {
+                    project_root: None,
+                    limit: Some(100),
+                    before: None,
+                    agent_ids: None,
+                    watch_agent_ids: None,
+                },
+            )
+            .into_iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>();
+
+            assert_eq!(ordered, fixture.expected_ids, "fixture: {}", fixture.name);
+        }
+    }
+
+    #[test]
+    fn chathistory_writer_assigns_and_reuses_violet_sequences() {
+        let root = temp_violet_dir("violet-sequence");
+        fs::create_dir_all(&root).unwrap();
+        let messages = vec![
+            chat_message(
+                "z-user-hash",
+                "user",
+                "message",
+                "2026-07-27T10:00:00Z",
+                "prompt",
+            ),
+            chat_message(
+                "a-assistant-hash",
+                "assistant",
+                "message",
+                "2026-07-27T10:00:00Z",
+                "reply",
+            ),
+        ];
+
+        write_chathistory_messages(&root, &messages).unwrap();
+        let first = read_cache(
+            &root,
+            VioletRoomRequest {
+                project_root: None,
+                limit: Some(10),
+                before: None,
+                agent_ids: None,
+                watch_agent_ids: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|message| (message.id.as_str(), message.violet_seq))
+                .collect::<Vec<_>>(),
+            vec![("z-user-hash", Some(1)), ("a-assistant-hash", Some(2))]
+        );
+
+        write_chathistory_messages(&root, &[messages[1].clone(), messages[0].clone()]).unwrap();
+        let second = read_cache(
+            &root,
+            VioletRoomRequest {
+                project_root: None,
+                limit: Some(10),
+                before: None,
+                agent_ids: None,
+                watch_agent_ids: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            second
+                .messages
+                .iter()
+                .map(|message| (message.id.as_str(), message.violet_seq))
+                .collect::<Vec<_>>(),
+            vec![("z-user-hash", Some(1)), ("a-assistant-hash", Some(2))]
+        );
+        let manifest = fs::read_to_string(chathistory_manifest_path(&root)).unwrap();
+        let manifest = serde_json::from_str::<JsonValue>(&manifest).unwrap();
+        assert_eq!(
+            manifest.get("next_seq").and_then(JsonValue::as_u64),
+            Some(3)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chathistory_sequence_recovers_when_manifest_is_missing() {
+        let root = temp_violet_dir("violet-sequence-recovery");
+        ensure_chathistory_dirs(&root).unwrap();
+        let mut existing = chathistory_event_from_message(
+            &chat_message(
+                "existing",
+                "assistant",
+                "message",
+                "2026-07-27T10:00:00Z",
+                "existing",
+            ),
+            None,
+        );
+        existing.violet_seq = Some(7);
+        let path = chathistory_events_dir(&root).join("2026-07-27.jsonl");
+        fs::write(&path, render_chathistory_events(&[existing]).unwrap()).unwrap();
+
+        write_chathistory_messages(
+            &root,
+            &[chat_message(
+                "next",
+                "assistant",
+                "message",
+                "2026-07-27T10:00:01Z",
+                "next",
+            )],
+        )
+        .unwrap();
+
+        let events = read_chathistory_event_file(&path).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.id.as_str(), event.violet_seq))
+                .collect::<Vec<_>>(),
+            vec![("existing", Some(7)), ("next", Some(8))]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -9625,13 +11576,17 @@ done"#;
     }
 
     #[test]
-    fn codex_image_generation_events_do_not_become_messages() {
+    fn codex_image_generation_end_becomes_one_content_addressed_artifact() {
+        const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z6KAAAAAASUVORK5CYII=";
+        let root = temp_violet_dir("codex-generated-image");
         let event_msg: JsonValue = serde_json::json!({
             "timestamp": "2026-05-14T10:00:00Z",
             "type": "event_msg",
             "payload": {
                 "type": "image_generation_end",
-                "result": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+                "call_id": "image-call-1",
+                "status": "completed",
+                "result": PNG_BASE64
             }
         });
         let response_item: JsonValue = serde_json::json!({
@@ -9644,8 +11599,201 @@ done"#;
             }
         });
 
-        assert!(parse_codex_line(&agent(), &source(), 0, event_msg).is_empty());
-        assert!(parse_codex_line(&agent(), &source(), 1, response_item).is_empty());
+        let first = parse_codex_line_with_room_exceptions(
+            &root,
+            &[],
+            &agent(),
+            &source(),
+            0,
+            event_msg.clone(),
+        );
+        let second =
+            parse_codex_line_with_room_exceptions(&root, &[], &agent(), &source(), 91, event_msg);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].role, "assistant");
+        assert_eq!(first[0].kind, "artifact");
+        assert_eq!(first[0].work_signal, None);
+        assert_eq!(first[0].native_event_id, second[0].native_event_id);
+        assert!(!first[0].text.contains(PNG_BASE64));
+        let relative_path = first[0].text.lines().last().unwrap();
+        assert!(relative_path.starts_with("project-memory/attachments/violet/codex-generated/"));
+        let expected = BASE64_STANDARD.decode(PNG_BASE64).unwrap();
+        assert_eq!(fs::read(root.join(relative_path)).unwrap(), expected);
+
+        let deduped = dedupe_native_events(vec![first[0].clone(), second[0].clone()]);
+        assert_eq!(deduped.len(), 1);
+        let (room, shared) = split_for_violet_outputs(first, &root);
+        assert_eq!(room.len(), 1);
+        assert!(shared.is_empty());
+        assert!(parse_codex_line_with_room_exceptions(
+            &root,
+            &[],
+            &agent(),
+            &source(),
+            1,
+            response_item,
+        )
+        .is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_image_generation_cold_read_keeps_large_jsonl_record() {
+        const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z6KAAAAAASUVORK5CYII=";
+        let root = temp_violet_dir("codex-generated-image-cold-read");
+        fs::create_dir_all(&root).unwrap();
+        let mut png = BASE64_STANDARD.decode(PNG_BASE64).unwrap();
+        png.resize((JSONL_TAIL_BYTES as usize * 3 / 4) + 64 * 1024, 0);
+        let line = serde_json::json!({
+            "timestamp": "2026-05-14T10:00:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "image_generation_end",
+                "call_id": "large-image-call",
+                "status": "completed",
+                "result": BASE64_STANDARD.encode(&png)
+            }
+        })
+        .to_string();
+        assert!(line.len() as u64 > JSONL_TAIL_BYTES);
+        assert!((line.len() as u64) < CODEX_ROOM_EXCEPTION_JSONL_TAIL_BYTES);
+        let rollout = root.join("rollout.jsonl");
+        fs::write(&rollout, format!("{line}\n")).unwrap();
+        let mut native_source = source();
+        native_source.path = rollout;
+        native_source.session_id = "large-image-session".into();
+
+        let first = parse_source(&root, &agent(), &native_source, &[]).unwrap();
+        let second = parse_source(&root, &agent(), &native_source, &[]).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].kind, "artifact");
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].text, second[0].text);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_image_generation_exception_is_fail_closed_and_privacy_first() {
+        let root = temp_violet_dir("codex-generated-image-private");
+        let private_line: JsonValue = serde_json::json!({
+            "timestamp": "2026-05-14T10:00:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "image_generation_end",
+                "call_id": "private-image-call",
+                "status": "completed",
+                "result": "this is deliberately not base64"
+            }
+        });
+        let spans = vec![PrivacySpan {
+            agent_id: "alice".into(),
+            started_at: "2026-05-14T09:59:59Z".into(),
+            ended_at: Some("2026-05-14T10:00:01Z".into()),
+        }];
+        let private = parse_codex_line_with_room_exceptions(
+            &root,
+            &spans,
+            &agent(),
+            &source(),
+            0,
+            private_line,
+        );
+        assert_eq!(private.len(), 1);
+        assert_eq!(private[0].kind, "tool");
+        assert_eq!(private[0].work_signal, None);
+        let (visible, skipped) = partition_private(private, &spans);
+        assert!(visible.is_empty());
+        assert_eq!(skipped, 1);
+        assert!(!root
+            .join("project-memory/attachments/violet/codex-generated")
+            .exists());
+
+        for (status, result) in [
+            ("failed", "ignored"),
+            ("completed", "not-base64"),
+            ("completed", "bm90IGEgcG5n"),
+        ] {
+            let line: JsonValue = serde_json::json!({
+                "timestamp": "2026-05-14T10:01:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "image_generation_end",
+                    "call_id": format!("bad-{status}-{}", result.len()),
+                    "status": status,
+                    "result": result
+                }
+            });
+            assert!(parse_codex_line_with_room_exceptions(
+                &root,
+                &[],
+                &agent(),
+                &source(),
+                0,
+                line,
+            )
+            .is_empty());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_custom_tool_images_remain_filtered_from_room() {
+        let line: JsonValue = serde_json::json!({
+            "timestamp": "2026-05-14T10:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "composer-image-replay",
+                "output": [
+                    { "type": "input_text", "text": "Viewed Image" },
+                    { "type": "input_image", "image_url": "data:image/png;base64,abc" }
+                ]
+            }
+        });
+        let events = parse_codex_line_with_room_exceptions(
+            Path::new("/tmp/kota"),
+            &[],
+            &agent(),
+            &source(),
+            0,
+            line,
+        );
+        assert!(events
+            .iter()
+            .all(|event| room_event_for(event, Path::new("/tmp/kota")).is_none()));
+    }
+
+    #[test]
+    fn room_exception_registry_is_typed_and_rejects_dsl_fields() {
+        let registry = parse_room_exception_registry(ROOM_EXCEPTION_CONFIG).unwrap();
+        assert_eq!(registry.schema_version, 1);
+        assert_eq!(registry.exceptions.len(), 1);
+        assert_eq!(registry.exceptions[0].id, "codex-image-generation-v1");
+
+        let with_unknown_field = ROOM_EXCEPTION_CONFIG.replacen(
+            "\"field\": \"result\"",
+            "\"field\": \"result\", \"requiredStatus\": \"completed\"",
+            1,
+        );
+        assert!(parse_room_exception_registry(&with_unknown_field).is_err());
+        let with_json_path = ROOM_EXCEPTION_CONFIG.replacen(
+            "\"field\": \"result\"",
+            "\"field\": \"payload.result\"",
+            1,
+        );
+        assert!(parse_room_exception_registry(&with_json_path).is_err());
+    }
+
+    #[test]
+    fn room_exception_png_validation_rejects_oversized_dimensions() {
+        const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z6KAAAAAASUVORK5CYII=";
+        let mut png = BASE64_STANDARD.decode(PNG_BASE64).unwrap();
+        png[16..20].copy_from_slice(&(ROOM_EXCEPTION_MAX_IMAGE_DIMENSION + 1).to_be_bytes());
+        let encoded = BASE64_STANDARD.encode(png);
+        assert_eq!(
+            decode_room_exception_png(&encoded),
+            Err("image_dimensions_too_large")
+        );
     }
 
     #[test]
@@ -9821,6 +11969,7 @@ done"#;
                 text: "Please resolve this conflict.".into(),
                 target_agent_ids: vec!["alice".into()],
                 event_id: "bartender-conflict:alice:abc123:def456".into(),
+                actor_intent: Some("conflict".into()),
             },
         )
         .unwrap();
@@ -9847,6 +11996,7 @@ done"#;
         assert_eq!(message.agent_display_name.as_deref(), Some("Bartender"));
         assert_eq!(message.agent_avatar_id.as_deref(), Some("bartender"));
         assert_eq!(message.agent_provider.as_deref(), Some("system"));
+        assert_eq!(message.actor_intent.as_deref(), Some("conflict"));
         assert_eq!(
             message.native_event_id.as_deref(),
             Some("bartender-conflict:alice:abc123:def456")
@@ -9862,7 +12012,7 @@ done"#;
         fs::create_dir_all(&raw_dir).unwrap();
         fs::write(
             raw_dir.join("actor-bartender.md"),
-            "## 2026-05-21T10:00:00Z · bartender · system · session actor-bartender\n\nAssistant:\nRecovered actor note.\n\nMetadata:\n- agent_id: bartender\n- actor_name: Bartender\n- shell: system\n- native_log: /tmp/actor-messages\n- kind: message\n- native_event_id: actor-note-one\n- target_agent_ids: alice\n\n",
+            "## 2026-05-21T10:00:00Z · bartender · system · session actor-bartender\n\nAssistant:\nRecovered actor note.\n\nMetadata:\n- agent_id: bartender\n- actor_name: Bartender\n- shell: system\n- native_log: /tmp/actor-messages\n- kind: message\n- native_event_id: actor-note-one\n- actor_intent: conflict\n- target_agent_ids: alice\n\n",
         )
         .unwrap();
 
@@ -9890,6 +12040,7 @@ done"#;
         assert_eq!(message.agent_avatar_id.as_deref(), Some("bartender"));
         assert_eq!(message.agent_provider.as_deref(), Some("system"));
         assert_eq!(message.native_event_id.as_deref(), Some("actor-note-one"));
+        assert_eq!(message.actor_intent.as_deref(), Some("conflict"));
 
         let events = read_chathistory_event_segments(&root).unwrap();
         assert_eq!(
@@ -9916,6 +12067,7 @@ done"#;
                 text: "Already projected actor note.".into(),
                 target_agent_ids: vec!["alice".into()],
                 event_id: "actor-note-immediate".into(),
+                actor_intent: None,
             },
         )
         .unwrap();
@@ -10064,6 +12216,8 @@ done"#;
                     text: "Bash".into(),
                     source_path: Some("/tmp/s.jsonl".into()),
                     native_event_id: Some("tool".into()),
+                    violet_seq: None,
+                    actor_intent: None,
                     target_agent_ids: Vec::new(),
                     agent_display_name: None,
                     agent_avatar_id: None,
@@ -10081,6 +12235,8 @@ done"#;
                     text: "done".into(),
                     source_path: Some("/tmp/s.jsonl".into()),
                     native_event_id: Some("message".into()),
+                    violet_seq: None,
+                    actor_intent: None,
                     target_agent_ids: Vec::new(),
                     agent_display_name: None,
                     agent_avatar_id: None,
@@ -10126,6 +12282,8 @@ done"#;
                     text: "<local-command-stdout>Login successful</local-command-stdout>".into(),
                     source_path: Some("/tmp/s.jsonl".into()),
                     native_event_id: Some("local-command".into()),
+                    violet_seq: None,
+                    actor_intent: None,
                     target_agent_ids: Vec::new(),
                     agent_display_name: None,
                     agent_avatar_id: None,
@@ -10143,6 +12301,8 @@ done"#;
                     text: "look at this project".into(),
                     source_path: Some("/tmp/s.jsonl".into()),
                     native_event_id: Some("real-user".into()),
+                    violet_seq: None,
+                    actor_intent: None,
                     target_agent_ids: Vec::new(),
                     agent_display_name: None,
                     agent_avatar_id: None,
@@ -10244,6 +12404,8 @@ done"#;
             text: text.into(),
             source_path: Some("/tmp/s.jsonl".into()),
             native_event_id: Some(text.into()),
+            violet_seq: None,
+            actor_intent: None,
             target_agent_ids: Vec::new(),
             agent_display_name: None,
             agent_avatar_id: None,
@@ -10317,6 +12479,8 @@ done"#;
             text: text.into(),
             source_path: Some("/tmp/s.jsonl".into()),
             native_event_id: Some(text.into()),
+            violet_seq: None,
+            actor_intent: None,
             target_agent_ids: Vec::new(),
             agent_display_name: None,
             agent_avatar_id: None,
@@ -10368,6 +12532,7 @@ done"#;
                 text: "Resolve worktree conflict.".into(),
                 target_agent_ids: vec!["alice".into()],
                 event_id: "bartender-conflict:alice:one:two".into(),
+                actor_intent: Some("conflict".into()),
             },
         )
         .unwrap();
@@ -10638,6 +12803,8 @@ done"#;
                 text: "old persisted message".into(),
                 source_path: Some(path_string(&native_path)),
                 native_event_id: Some("old-native".into()),
+                violet_seq: None,
+                actor_intent: None,
                 target_agent_ids: Vec::new(),
                 agent_display_name: None,
                 agent_avatar_id: None,
@@ -10740,6 +12907,8 @@ done"#;
                 text: "old visible message".into(),
                 source_path: Some(path_string(&native_path)),
                 native_event_id: Some("old-visible-native".into()),
+                violet_seq: None,
+                actor_intent: None,
                 target_agent_ids: Vec::new(),
                 agent_display_name: None,
                 agent_avatar_id: None,
@@ -11295,6 +13464,182 @@ done"#;
         );
         assert_eq!(events[0].work_signal.as_deref(), Some("failed"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ember_dream_none_marker_is_parsed_and_filtered() {
+        let wrapped = format!(
+            "{EMBER_DREAM_ENTRY_START}\n{EMBER_DREAM_EMPTY_MARKER}\n{EMBER_DREAM_ENTRY_END}"
+        );
+
+        assert_eq!(
+            extract_ember_dream_entry_text(&wrapped).as_deref(),
+            Some(EMBER_DREAM_EMPTY_MARKER)
+        );
+        assert!(is_empty_ember_dream_entry_text(EMBER_DREAM_EMPTY_MARKER));
+        assert!(is_empty_ember_dream_entry_text(&format!(
+            "- {EMBER_DREAM_EMPTY_MARKER}"
+        )));
+        assert!(is_empty_dream_placeholder(EMBER_DREAM_EMPTY_MARKER));
+        assert!(!is_empty_ember_dream_entry_text(
+            "- Prefers concise reviews."
+        ));
+    }
+
+    #[test]
+    fn ember_dream_entries_split_into_atomic_candidates() {
+        assert_eq!(
+            split_ember_dream_entry_items(
+                "- Prefers concise reviews.\n- Notices hidden coordination costs."
+            ),
+            vec![
+                "Prefers concise reviews.".to_string(),
+                "Notices hidden coordination costs.".to_string(),
+            ]
+        );
+        assert!(split_ember_dream_entry_items(&format!("- {EMBER_DREAM_EMPTY_MARKER}")).is_empty());
+    }
+
+    #[test]
+    fn ember_dream_prompt_items_hide_projects_and_keep_private_mapping() {
+        let current = vec!["Existing portrait.".to_string()];
+        let projects = vec![
+            vec![EmberDreamEntryRecord {
+                event_id: "event-1".into(),
+                ts: "2026-07-18T12:00:00Z".into(),
+                agent_id: "agent-1".into(),
+                agent_display_name: Some("Agent One".into()),
+                text: "- First observation.\n- Second observation.".into(),
+            }],
+            vec![EmberDreamEntryRecord {
+                event_id: "event-2".into(),
+                ts: "2026-07-18T12:01:00Z".into(),
+                agent_id: "agent-2".into(),
+                agent_display_name: Some("Agent Two".into()),
+                text: EMBER_DREAM_EMPTY_MARKER.into(),
+            }],
+        ];
+
+        let (prompt_items, candidates) = build_ember_dream_consolidation_items(&current, &projects);
+
+        assert_eq!(prompt_items.len(), 3);
+        assert_eq!(prompt_items[0].id, "active-1");
+        assert_eq!(prompt_items[1].id, "candidate-1");
+        assert_eq!(prompt_items[2].id, "candidate-2");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].project_index, 0);
+        assert_eq!(candidates[1].project_index, 0);
+        let serialized = serde_json::to_string(&prompt_items).unwrap();
+        assert!(!serialized.contains("project"));
+        assert!(!serialized.contains("event-1"));
+        assert!(!serialized.contains("agent-1"));
+    }
+
+    #[test]
+    fn ember_dream_rewrite_refreshes_and_archives_the_old_text() {
+        let current = vec![
+            "Oldest Dream.".to_string(),
+            "Dream needing detail.".to_string(),
+            "Recent Dream.".to_string(),
+        ];
+        let candidates = vec![EmberDreamCandidateItem {
+            id: "candidate-1".into(),
+            project_index: 0,
+            text: "Brand-new Dream.".into(),
+        }];
+        let decisions = HashMap::from([
+            ("active-1".into(), EmberDreamDecisionAction::Keep),
+            (
+                "active-2".into(),
+                EmberDreamDecisionAction::Rewrite("Rewritten Dream.".into()),
+            ),
+            ("active-3".into(), EmberDreamDecisionAction::Keep),
+            ("candidate-1".into(), EmberDreamDecisionAction::Keep),
+        ]);
+
+        let result = apply_ember_dream_decisions(&current, &candidates, &decisions, 3).unwrap();
+
+        assert_eq!(
+            result.active,
+            vec!["Recent Dream.", "Rewritten Dream.", "Brand-new Dream."]
+        );
+        assert_eq!(
+            result.archived,
+            vec!["Dream needing detail.", "Oldest Dream."]
+        );
+    }
+
+    #[test]
+    fn ember_dream_candidate_slots_round_robin_across_projects() {
+        let candidates = vec![
+            EmberDreamCandidateItem {
+                id: "candidate-1".into(),
+                project_index: 0,
+                text: "Project zero first.".into(),
+            },
+            EmberDreamCandidateItem {
+                id: "candidate-2".into(),
+                project_index: 0,
+                text: "Project zero second.".into(),
+            },
+            EmberDreamCandidateItem {
+                id: "candidate-3".into(),
+                project_index: 1,
+                text: "Project one first.".into(),
+            },
+        ];
+        let decisions = candidates
+            .iter()
+            .map(|candidate| (candidate.id.clone(), EmberDreamDecisionAction::Keep))
+            .collect::<HashMap<_, _>>();
+
+        let result = apply_ember_dream_decisions(&[], &candidates, &decisions, 2).unwrap();
+
+        assert_eq!(
+            result.active,
+            vec!["Project zero first.", "Project one first."]
+        );
+        assert!(result.archived.is_empty());
+    }
+
+    #[test]
+    fn ember_dream_decisions_require_full_valid_coverage() {
+        let items = vec![
+            EmberDreamPromptItem {
+                id: "active-1".into(),
+                kind: "active".into(),
+                text: "Existing Dream.".into(),
+            },
+            EmberDreamPromptItem {
+                id: "candidate-1".into(),
+                kind: "candidate".into(),
+                text: "Candidate Dream.".into(),
+            },
+        ];
+        let incomplete = vec![EmberDreamDecision {
+            id: "active-1".into(),
+            op: "keep".into(),
+            text: None,
+        }];
+        assert!(validate_ember_dream_decisions(&items, incomplete).is_err());
+
+        let complete = vec![
+            EmberDreamDecision {
+                id: "active-1".into(),
+                op: "rewrite".into(),
+                text: Some("Existing Dream.".into()),
+            },
+            EmberDreamDecision {
+                id: "candidate-1".into(),
+                op: "drop".into(),
+                text: None,
+            },
+        ];
+        let validated = validate_ember_dream_decisions(&items, complete).unwrap();
+        assert_eq!(
+            validated.get("active-1"),
+            Some(&EmberDreamDecisionAction::Keep)
+        );
     }
 
     #[test]

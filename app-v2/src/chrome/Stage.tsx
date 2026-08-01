@@ -29,6 +29,7 @@ import type { ProjectAgentCommendSource, ProjectAgentRecord } from '../pty-clien
 import { avatarClassForAgentFallback, avatarImageStyleForId } from '../lib/hero-avatars';
 import { useFileTreeAgentHover } from '../lib/file-tree-agent-hover';
 import { MAX_AGENT_SLOTS } from '../lib/agent-slots';
+import type { RoomQuoteInsertResult, RoomQuoteReference } from '../lib/room-quote';
 
 const SCENE_W = 1120;
 const SCENE_H = 660;
@@ -38,6 +39,7 @@ const ROOM_RESTORE_PROGRESS_DELAY_MS = 3000;
 // 40° — the parchment + inked border start looking crushed past 40).
 const SEAT_DRAG_THRESHOLD_PX = 5;
 const SEAT_DRAG_HIT_RADIUS_PX = 95;
+const EMPTY_UNSUPPORTED_AGENT_PROVIDERS: ReadonlyMap<AgentId, string> = new Map();
 
 // SEAT_POSITIONS stay as-is; seats read as hand-painted wooden cards
 // pinned flush to the desk with a brass tack instead of a stick + pin.
@@ -70,6 +72,7 @@ function SeatCard({
   fileTreeHover,
   working,
   dreaming,
+  unsupportedProvider,
   seatIndex,
   dragging,
 }: {
@@ -95,6 +98,7 @@ function SeatCard({
   fileTreeHover?: boolean;
   working?: boolean;
   dreaming?: boolean;
+  unsupportedProvider?: string;
   seatIndex?: number;
   dragging?: 'origin' | 'target-swap' | 'target-move' | null;
 }) {
@@ -146,6 +150,7 @@ function SeatCard({
   const pillLeft = pos.left + (SEAT_W - PILL_W) / 2;
   const left = pill ? pillLeft : pos.left;
   const effectiveState = working ? 'thinking' : state;
+  const unsupported = !!unsupportedProvider;
   return (
     <div
       className={[
@@ -154,6 +159,7 @@ function SeatCard({
         effectiveState,
         working ? 'working' : '',
         dreaming ? 'dreaming' : '',
+        unsupported ? 'unsupported' : '',
         agent.captain ? 'captain' : '',
         fileTreeHover ? 'file-tree-hover' : '',
         dragging === 'origin' ? 'drag-origin' : '',
@@ -162,17 +168,29 @@ function SeatCard({
       ].filter(Boolean).join(' ')}
       style={{ left, top: pos.top }}
       data-seat-index={seatIndex}
-      onClick={onClick}
-      onDoubleClick={onDoubleClick}
+      onClick={unsupported ? undefined : onClick}
+      onDoubleClick={unsupported ? undefined : onDoubleClick}
       onContextMenu={(event) => {
+        if (unsupported) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         if (!onContextMenu) return;
         event.preventDefault();
         event.stopPropagation();
         onContextMenu(id, { x: event.clientX, y: event.clientY });
       }}
       role="button"
-      aria-label={pill ? `Switch focus to ${agent.name}` : `Open ${agent.name}'s terminal`}
-      title={`${agent.name} · ${agent.role}`}
+      aria-disabled={unsupported || undefined}
+      aria-label={unsupported
+        ? `${agent.name} (Unsupported provider: ${unsupportedProvider})`
+        : pill
+          ? `Switch focus to ${agent.name}`
+          : `Open ${agent.name}'s terminal`}
+      title={unsupported
+        ? `${agent.name} · Unsupported provider: ${unsupportedProvider}`
+        : `${agent.name} · ${agent.role}`}
       data-pill={pill ? 'true' : 'false'}
       data-working={working ? 'true' : 'false'}
       data-dreaming={dreaming ? 'true' : 'false'}
@@ -192,17 +210,22 @@ function SeatCard({
         <div className="seat-name">
           <ProjectAgentName name={agent.name} projectName={projectName} compact />
           {agent.captain && <span className="seat-star">★</span>}
+          {unsupportedProvider && (
+            <span className="seat-unsupported">Unsupported · {unsupportedProvider}</span>
+          )}
         </div>
         {agent.captain && <div className="seat-lamp" aria-hidden>🕯</div>}
       </div>
       <div className="seat-tack" aria-hidden />
-      <AgentCommendButton
-        agentId={id}
-        agentName={agent.name}
-        source="table-card"
-        count={record?.commends}
-        onCommend={onCommend}
-      />
+      {!unsupported && (
+        <AgentCommendButton
+          agentId={id}
+          agentName={agent.name}
+          source="table-card"
+          count={record?.commends}
+          onCommend={onCommend}
+        />
+      )}
     </div>
   );
 }
@@ -247,6 +270,8 @@ export interface StageProps {
   dreamingStatusAgents?: ReadonlySet<AgentId>;
   agentsHydrating?: boolean;
   agentHydrationProgress?: { completed: number; total: number } | null;
+  agentHydrationFailed?: boolean;
+  onRetryAgentHydration?: () => void;
   /** W4 — minimized agents for the AgentRibbon taskbar. */
   minimizedAgents?: ReadonlySet<AgentId>;
   /** W4 — recruit-order list for ⌘N shortcuts. */
@@ -280,6 +305,7 @@ export interface StageProps {
   onChangeDeskTheme: (theme: DeskTheme) => void;
   workingHeroes?: readonly WorkingHero[];
   agentMeta?: Readonly<Record<AgentId, Agent>>;
+  unsupportedAgentProviders?: ReadonlyMap<AgentId, string>;
   agentRecords?: Readonly<Record<AgentId, ProjectAgentRecord>>;
   projectName?: string | null;
   onIncarnateHero?: (hero: WorkingHero, seatIndex?: number) => void;
@@ -294,6 +320,7 @@ export interface StageProps {
   onDblClickAgent?: (id: AgentId) => void;
   onOpenAgentTerminal?: (id: AgentId) => void;
   onRetryComposerMessage?: (request: VioletComposerRetryRequest) => boolean | void | Promise<boolean | void>;
+  onQuoteMessage?: (quote: RoomQuoteReference) => RoomQuoteInsertResult;
   /** Group chat overlay. */
   groupChatOpen?: boolean;
   chatFilterActive?: boolean;
@@ -316,6 +343,8 @@ export function Stage({
   dreamingStatusAgents,
   agentsHydrating = false,
   agentHydrationProgress,
+  agentHydrationFailed = false,
+  onRetryAgentHydration,
   minimizedAgents,
   shortcutAgentsOrdered,
   tableSlots: tableSlotsProp,
@@ -343,6 +372,7 @@ export function Stage({
   onChangeDeskTheme,
   workingHeroes = [],
   agentMeta,
+  unsupportedAgentProviders = EMPTY_UNSUPPORTED_AGENT_PROVIDERS,
   agentRecords,
   projectName,
   onIncarnateHero,
@@ -355,6 +385,7 @@ export function Stage({
   onDblClickAgent,
   onOpenAgentTerminal,
   onRetryComposerMessage,
+  onQuoteMessage,
   groupChatOpen = false,
   chatFilterActive: chatFilterActiveProp,
   groupChatUnreadCount = 0,
@@ -475,7 +506,8 @@ export function Stage({
     const target = event.target instanceof Element ? event.target.closest('[data-seat-index]') : null;
     if (!(target instanceof HTMLElement)) return;
     const index = Number(target.dataset.seatIndex);
-    if (!Number.isInteger(index) || !tableSlots[index]) return;
+    const agentId = tableSlots[index];
+    if (!Number.isInteger(index) || !agentId || unsupportedAgentProviders.has(agentId)) return;
     seatPressRef.current = { index, x: event.clientX, y: event.clientY };
   };
   const onSeatRingClickCapture = (event: { preventDefault: () => void; stopPropagation: () => void }) => {
@@ -500,7 +532,9 @@ export function Stage({
       captain: !!(agentMeta?.[id]?.captain ?? AGENTS[id]?.captain),
     }));
   const offTableIds: readonly AgentId[] = offTableAgentsProp ?? [];
-  const groupChatAgentIds = onTable.map((agent) => agent.id);
+  const groupChatAgentIds = onTable
+    .map((agent) => agent.id)
+    .filter((agentId) => !unsupportedAgentProviders.has(agentId));
   const groupChatAgentIdsKey = groupChatAgentIds.join('|');
   const offTable: OffTableAgent[] = offTableIds.map((id) => ({
     id,
@@ -763,6 +797,9 @@ export function Stage({
                       fileTreeHover={agentId ? fileTreeHoveredAgent === agentId : false}
                       working={agentId ? workingAgents?.has(agentId) : false}
                       dreaming={agentId ? dreamingStatusAgents?.has(agentId) : false}
+                      unsupportedProvider={agentId
+                        ? unsupportedAgentProviders.get(agentId)
+                        : undefined}
                       recruitPickerOpen={!agentId && recruitSeatIndex === index}
                       workingHeroes={workingHeroes}
                       agentMeta={agentMeta}
@@ -850,6 +887,7 @@ export function Stage({
               onCommendAgent={onCommendAgent}
               onOpenAgentTerminal={onOpenAgentTerminal}
               onRetryComposerMessage={onRetryComposerMessage}
+              onQuoteMessage={onQuoteMessage}
               onClose={onToggleGroupChat}
             />
           </div>
@@ -880,6 +918,17 @@ export function Stage({
             </div>
           </div>
         )}
+        {agentHydrationFailed && !agentsHydrating && (
+          <div
+            className="room-restore-degraded"
+            data-testid="room-restore-degraded"
+            role="alert"
+          >
+            <span className="room-restore-degraded-dot" aria-hidden />
+            <span className="room-restore-degraded-copy">Agent roster unavailable</span>
+            <button type="button" onClick={onRetryAgentHydration}>Retry</button>
+          </div>
+        )}
       </div>
 
       <div className="stage-bottom-dock">
@@ -901,6 +950,7 @@ export function Stage({
           shortcutOrder={shortcutAgentsOrdered}
           agentsHydrating={agentsHydrating}
           agentMeta={agentMeta}
+          unsupportedAgentProviders={unsupportedAgentProviders}
           workingHeroes={workingHeroes}
           unavailableHeroIds={unavailableHeroIds}
           onIncarnateHero={(hero) => onIncarnateHero?.(hero)}

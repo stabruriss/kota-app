@@ -63,6 +63,7 @@ pub enum AgentCli {
     Antigravity,
     Opencode,
     Pi,
+    Kimi,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +85,7 @@ impl AgentCli {
             AgentCli::Antigravity => "agy",
             AgentCli::Opencode => "opencode",
             AgentCli::Pi => "pi",
+            AgentCli::Kimi => "kimi",
         }
     }
 }
@@ -146,6 +148,11 @@ fn args_for_spawn_with_opencode_launch_mode(
             AgentCli::Pi => {
                 if !pi_args_request_session(&out) && !pi_args_request_subcommand(&out) {
                     out.splice(0..0, ["--session-id".to_string(), session_id.to_string()]);
+                }
+            }
+            AgentCli::Kimi => {
+                if !kimi_args_request_session(&out) && !kimi_args_request_subcommand(&out) {
+                    out.splice(0..0, ["--session".to_string(), session_id.to_string()]);
                 }
             }
         }
@@ -257,6 +264,11 @@ fn ensure_default_runtime_args(
         AgentCli::Pi => {
             if !has_any_arg(args, &["--approve", "-a", "--no-approve", "-na"], &[]) {
                 args.push("--approve".into());
+            }
+        }
+        AgentCli::Kimi => {
+            if !has_any_arg(args, &["--yolo", "-y", "--auto"], &[]) {
+                args.push("--yolo".into());
             }
         }
     }
@@ -417,7 +429,7 @@ fn prepare_provider_workspace(cli: AgentCli, cwd: &Path, home: &Path) -> Result<
         AgentCli::Claude => ensure_claude_kota_hooks(cwd),
         AgentCli::Codex => ensure_codex_trusted_project(home, cwd),
         AgentCli::Antigravity => ensure_antigravity_trusted_workspace(home, cwd),
-        AgentCli::Opencode | AgentCli::Pi => Ok(()),
+        AgentCli::Opencode | AgentCli::Pi | AgentCli::Kimi => Ok(()),
     }
 }
 
@@ -750,7 +762,7 @@ impl StartupTrustPromptAutoAccept {
             AgentCli::Antigravity => {
                 contains_all(&text, &["trust", "contents", "project", "yes", "folder"])
             }
-            AgentCli::Opencode | AgentCli::Pi => false,
+            AgentCli::Opencode | AgentCli::Pi | AgentCli::Kimi => false,
         }
     }
 }
@@ -777,7 +789,7 @@ fn startup_trust_auto_accept_enabled(cli: AgentCli, args: &[String], cwd: &Path)
         AgentCli::Antigravity => args
             .iter()
             .any(|arg| arg == "--dangerously-skip-permissions"),
-        AgentCli::Opencode | AgentCli::Pi => false,
+        AgentCli::Opencode | AgentCli::Pi | AgentCli::Kimi => false,
     }
 }
 
@@ -851,6 +863,86 @@ fn pi_session_marker_for_id(project_dir: &Path, session_id: &str) -> Option<Nati
         }
     }
     None
+}
+
+fn kimi_code_home(home: &Path) -> PathBuf {
+    std::env::var_os("KIMI_CODE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".kimi-code"))
+}
+
+fn kimi_session_marker(
+    home: &Path,
+    cwd: &Path,
+    session_id: Option<&str>,
+) -> Option<NativeSessionMarker> {
+    let kimi_home = kimi_code_home(home);
+    kimi_session_marker_in(&kimi_home, cwd, session_id)
+}
+
+fn kimi_session_marker_in(
+    kimi_home: &Path,
+    cwd: &Path,
+    session_id: Option<&str>,
+) -> Option<NativeSessionMarker> {
+    let index: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(kimi_home.join("workspaces.json")).ok()?).ok()?;
+    let workspaces = index.get("workspaces")?.as_object()?;
+    let workspace_id = workspaces.iter().find_map(|(id, workspace)| {
+        let root = workspace.get("root")?.as_str()?;
+        paths_refer_to_same_directory(Path::new(root), cwd).then(|| id.clone())
+    })?;
+    let sessions_dir = kimi_home.join("sessions").join(workspace_id);
+
+    if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
+        let wire = sessions_dir
+            .join(session_id)
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl");
+        if kimi_session_state_matches_cwd(&sessions_dir.join(session_id), cwd) {
+            return NativeSessionMarker::read(wire);
+        }
+        return None;
+    }
+
+    let mut candidates = fs::read_dir(&sessions_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|session_dir| {
+            session_dir.is_dir() && kimi_session_state_matches_cwd(session_dir, cwd)
+        })
+        .filter_map(|session_dir| {
+            let wire = session_dir.join("agents").join("main").join("wire.jsonl");
+            let modified = fs::metadata(&wire).ok()?.modified().ok()?;
+            Some((modified, wire))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    candidates
+        .into_iter()
+        .find_map(|(_, wire)| NativeSessionMarker::read(wire))
+}
+
+fn kimi_session_state_matches_cwd(session_dir: &Path, cwd: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(session_dir.join("state.json")) else {
+        return false;
+    };
+    let Ok(state) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    state
+        .get("workDir")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|work_dir| paths_refer_to_same_directory(Path::new(work_dir), cwd))
+}
+
+fn paths_refer_to_same_directory(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 fn claude_args_request_resume(args: &[String]) -> bool {
@@ -996,6 +1088,34 @@ fn pi_args_request_subcommand(args: &[String]) -> bool {
         "config", "update", "install", "remove", "auth", "login", "logout", "models", "help",
     ];
     args.iter().any(|arg| COMMANDS.contains(&arg.as_str()))
+}
+
+fn kimi_args_request_session(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--continue"
+            || arg == "-c"
+            || arg == "--session"
+            || arg == "-S"
+            || arg.starts_with("--session=")
+    })
+}
+
+fn kimi_args_request_subcommand(args: &[String]) -> bool {
+    const COMMANDS: &[&str] = &[
+        "export", "provider", "acp", "server", "web", "login", "doctor", "vis", "migrate",
+        "upgrade", "update", "help",
+    ];
+    args.iter().any(|arg| COMMANDS.contains(&arg.as_str()))
+}
+
+fn prompt_submit_sequence(cli: AgentCli) -> &'static str {
+    if cli == AgentCli::Kimi {
+        // Kimi enables the Kitty keyboard protocol in its TUI. A raw CR is
+        // inserted into the editor; CSI-u Enter is the actual submit key.
+        "\x1b[13;1u"
+    } else {
+        "\r"
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1679,7 +1799,7 @@ impl AgentTerminalPty {
 
         let mut enter_attempts = 1_u8;
         let first_enter_baseline = self.output_epoch();
-        self.write(app, "\r".to_string())?;
+        self.write(app, prompt_submit_sequence(self.inner.cli).to_string())?;
         let mut submit_confirm = if self.inner.cli == AgentCli::Pi {
             SubmitConfirmation::PtyWrite
         } else {
@@ -1699,7 +1819,7 @@ impl AgentTerminalPty {
                 "[agent:{}] submit prompt retrying enter after unconfirmed submit",
                 self.inner.agent_id
             ));
-            self.write(app, "\r".to_string())?;
+            self.write(app, prompt_submit_sequence(self.inner.cli).to_string())?;
             submit_confirm = self.wait_for_submit_confirmation(
                 native_before.as_ref(),
                 retry_baseline,
@@ -1782,6 +1902,11 @@ impl AgentTerminalPty {
                 }
                 NativeSessionMarker::read_dir(project_dir)
             }
+            AgentCli::Kimi => kimi_session_marker(
+                &self.inner.home,
+                &self.inner.cwd,
+                self.inner.session_id.as_deref(),
+            ),
             AgentCli::Codex | AgentCli::Antigravity | AgentCli::Opencode => None,
         }
     }
@@ -2789,6 +2914,9 @@ fn should_inherit_agent_spawn_env(key: &str) -> bool {
     if key == "PI_CODING_AGENT" {
         return false;
     }
+    if key == "KIMI_SESSION_ID" || key == "KIMI_WORK_DIR" {
+        return false;
+    }
     true
 }
 
@@ -2946,6 +3074,7 @@ mod tests {
         assert_eq!(AgentCli::Antigravity.bin(), "agy");
         assert_eq!(AgentCli::Opencode.bin(), "opencode");
         assert_eq!(AgentCli::Pi.bin(), "pi");
+        assert_eq!(AgentCli::Kimi.bin(), "kimi");
     }
 
     #[cfg(unix)]
@@ -3200,6 +3329,81 @@ mod tests {
                 "--no-approve".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn kimi_spawn_args_resume_exact_session_and_use_yolo() {
+        assert_eq!(
+            args_for_spawn(
+                AgentCli::Kimi,
+                &[],
+                Path::new("/tmp/agent-cwd"),
+                Some("session_kimi_1"),
+            ),
+            vec![
+                "--session".to_string(),
+                "session_kimi_1".to_string(),
+                "--yolo".to_string(),
+            ]
+        );
+        assert_eq!(prompt_submit_sequence(AgentCli::Kimi), "\x1b[13;1u");
+        assert_eq!(prompt_submit_sequence(AgentCli::Claude), "\r");
+    }
+
+    #[test]
+    fn kimi_spawn_args_preserve_explicit_session_and_permission_mode() {
+        assert_eq!(
+            args_for_spawn(
+                AgentCli::Kimi,
+                &["--session=session_manual".into(), "--auto".into()],
+                Path::new("/tmp/agent-cwd"),
+                Some("session_kimi_1"),
+            ),
+            vec!["--session=session_manual".to_string(), "--auto".to_string()]
+        );
+    }
+
+    #[test]
+    fn kimi_session_marker_uses_only_matching_main_agent_wire() {
+        let root = std::env::temp_dir().join(format!(
+            "kota-kimi-marker-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = root.join("agent-cwd");
+        let kimi_home = root.join("kimi-home");
+        let matching = kimi_home.join("sessions/wd_matching/session_kimi_1");
+        let child_wire = matching.join("agents/child-1/wire.jsonl");
+        let main_wire = matching.join("agents/main/wire.jsonl");
+        fs::create_dir_all(child_wire.parent().unwrap()).unwrap();
+        fs::create_dir_all(main_wire.parent().unwrap()).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            kimi_home.join("workspaces.json"),
+            format!(
+                r#"{{"version":1,"workspaces":{{"wd_matching":{{"root":{}}}}}}}"#,
+                serde_json::to_string(cwd.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            matching.join("state.json"),
+            format!(
+                r#"{{"workDir":{}}}"#,
+                serde_json::to_string(cwd.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+        fs::write(&child_wire, "child").unwrap();
+        fs::write(&main_wire, "main").unwrap();
+
+        let marker = kimi_session_marker_in(&kimi_home, &cwd, Some("session_kimi_1"))
+            .expect("matching Kimi main wire marker");
+        assert!(matches!(marker, NativeSessionMarker::File { path, .. } if path == main_wire));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3497,6 +3701,8 @@ mod tests {
             "ANTIGRAVITY_SESSION_ID",
             "AGY_SESSION_ID",
             "PI_CODING_AGENT",
+            "KIMI_SESSION_ID",
+            "KIMI_WORK_DIR",
             "KOTA_AGENT_ID",
             "AI_AGENT",
             "PWD",
@@ -3517,6 +3723,8 @@ mod tests {
             "GOOGLE_API_KEY",
             "PI_CODING_AGENT_DIR",
             "PI_CODING_AGENT_SESSION_DIR",
+            "KIMI_CODE_HOME",
+            "KIMI_MODEL_NAME",
         ] {
             assert!(
                 should_inherit_agent_spawn_env(key),

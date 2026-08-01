@@ -2384,7 +2384,7 @@ mod tests {
             rules_dir: path_string(&root.join("rules")),
             agents: vec![crate::integrations::AgentLaunchSpec {
                 agent_id: "alice".into(),
-                cli: crate::pty::agent::AgentCli::Codex,
+                cli: crate::pty::agent::AgentCli::Codex.into(),
                 cwd: path_string(&agent_cwd),
                 project_root: path_string(&root),
                 worktree_root: path_string(&agent),
@@ -2535,7 +2535,7 @@ mod tests {
         let agent =
             |agent_id: &str, cwd: &Path, worktree: &Path| crate::integrations::AgentLaunchSpec {
                 agent_id: agent_id.into(),
-                cli: crate::pty::agent::AgentCli::Codex,
+                cli: crate::pty::agent::AgentCli::Codex.into(),
                 cwd: path_string(cwd),
                 project_root: path_string(&root),
                 worktree_root: path_string(worktree),
@@ -2796,7 +2796,7 @@ mod tests {
             rules_dir: path_string(&root.join("rules")),
             agents: vec![crate::integrations::AgentLaunchSpec {
                 agent_id: "alice".into(),
-                cli: crate::pty::agent::AgentCli::Codex,
+                cli: crate::pty::agent::AgentCli::Codex.into(),
                 cwd: path_string(agent_cwd),
                 project_root: path_string(root),
                 worktree_root: path_string(agent),

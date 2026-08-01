@@ -32,7 +32,7 @@ use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
@@ -510,6 +510,13 @@ struct ProjectAgentIdentity {
     avatar_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectAgentIdentityListing {
+    identities: Vec<ProjectAgentIdentity>,
+    workspace_entry_count: usize,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProjectAgentSaveRequest {
@@ -661,6 +668,15 @@ struct ProjectAgentBunshinResult {
 struct ProjectAgentFreshSessionResult {
     detail: ProjectAgentDetail,
     request: pty::agent::AgentSpawnRequest,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+enum ProjectAgentLaunchResolution {
+    Ready {
+        request: pty::agent::AgentSpawnRequest,
+    },
+    SessionUnavailable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1315,7 +1331,20 @@ fn project_agent_load_detail(
     manager: State<'_, IntegrationManager>,
     request: ProjectAgentRequest,
 ) -> Result<ProjectAgentDetail, String> {
-    load_project_agent_detail(&manager, request.project_root.as_deref(), &request.agent_id)
+    let started = Instant::now();
+    let requested_root = request.project_root.as_deref().unwrap_or("<active>");
+    let result =
+        load_project_agent_detail(&manager, request.project_root.as_deref(), &request.agent_id);
+    if let Err(err) = &result {
+        kota_debug_log(&format!(
+            "[hydration] detail failed requested_root={} agent={} elapsed_ms={} error={}",
+            requested_root,
+            request.agent_id,
+            started.elapsed().as_millis(),
+            err
+        ));
+    }
+    result
 }
 
 #[tauri::command]
@@ -1330,8 +1359,13 @@ fn project_agent_commend(
 fn project_agent_resolve_launch(
     manager: State<'_, IntegrationManager>,
     request: ProjectAgentRequest,
-) -> Result<pty::agent::AgentSpawnRequest, String> {
-    resolve_project_agent_launch(&manager, request.project_root.as_deref(), &request.agent_id)
+) -> Result<ProjectAgentLaunchResolution, String> {
+    let launch =
+        resolve_project_agent_launch(&manager, request.project_root.as_deref(), &request.agent_id)?;
+    if claude_resume_target_availability(&launch) == ResumeTargetAvailability::Unavailable {
+        return Ok(ProjectAgentLaunchResolution::SessionUnavailable);
+    }
+    Ok(ProjectAgentLaunchResolution::Ready { request: launch })
 }
 
 #[tauri::command]
@@ -1427,6 +1461,20 @@ fn ember_scheduler_tick(
 ) -> Result<ember::EmberSchedulerTickResult, String> {
     ember::scheduler_tick(&app, &request.project_roots, &request.working_agent_ids)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn ember_deliver_human_reminder(
+    app: AppHandle,
+    manager: State<'_, IntegrationManager>,
+    request: ember::EmberHumanReminderRequest,
+) -> Result<ember::EmberHumanReminderResult, String> {
+    let project_root = resolve_project_root_for_listing(&manager, request.project_root.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ember::deliver_human_reminder(&app, &project_root, request).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("join ember_deliver_human_reminder: {err}"))?
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1536,7 +1584,7 @@ fn project_agent_list_archived(
 fn project_agent_list_identities(
     manager: State<'_, IntegrationManager>,
     project_root: Option<String>,
-) -> Result<Vec<ProjectAgentIdentity>, String> {
+) -> Result<ProjectAgentIdentityListing, String> {
     list_project_agent_identities(&manager, project_root.as_deref())
 }
 
@@ -1647,9 +1695,28 @@ async fn ember_consolidate_dreams(
     manager: State<'_, IntegrationManager>,
     request: violet::EmberDreamConsolidateRequest,
 ) -> Result<violet::EmberDreamConsolidateState, String> {
-    let project_root = resolve_project_root_for_listing(&manager, request.project_root.as_deref())?;
+    let requested_roots = request
+        .project_roots
+        .iter()
+        .map(|root| root.trim())
+        .filter(|root| !root.is_empty())
+        .collect::<Vec<_>>();
+    let mut project_roots = Vec::new();
+    let mut seen = BTreeSet::new();
+    if requested_roots.is_empty() {
+        let root = resolve_project_root_for_listing(&manager, request.project_root.as_deref())?;
+        seen.insert(root.clone());
+        project_roots.push(root);
+    } else {
+        for requested_root in requested_roots {
+            let root = resolve_project_root_for_listing(&manager, Some(requested_root))?;
+            if seen.insert(root.clone()) {
+                project_roots.push(root);
+            }
+        }
+    }
     tauri::async_runtime::spawn_blocking(move || {
-        violet::consolidate_ember_dreams(&project_root, request)
+        violet::consolidate_ember_dreams(&project_roots, request)
     })
     .await
     .map_err(|err| format!("join Ember dream consolidation task: {err}"))?
@@ -2006,7 +2073,7 @@ fn bartender_conflict_prompt(
         .filter(|value| !value.is_empty())
         .unwrap_or("Inspect the conflict state, explain the competing changes, and resolve only files owned by your current task.");
     format!(
-        "{instruction}\n\nYour commit `{commit}` conflicts while I sync `{}` into room HEAD `{room_head}`.\n\nPlease resolve this in your own worktree, commit the fix, and reply if you need a product decision. Do not edit the room/source worktree directly.\n\nGit said:\n{}",
+        "{instruction}\n\nYour commit `{commit}` conflicts while I sync `{}` into room HEAD `{room_head}`.\n\nRebase your agent branch onto the exact room HEAD `{room_head}`, resolving conflicts during the rebase — do not merge the room HEAD into your branch; Bartender can only replay a linear history. Leave the worktree clean, then retry sync. If the rebase cannot safely preserve the intended result, stop and reply with the product decision you need. Never edit the room/source worktree.\n\nGit said:\n{}",
         workspace.repo_full_name,
         conflict.message.trim()
     )
@@ -2982,7 +3049,7 @@ fn materialize_tavern_incarnation(
         manager
             .upsert_active_workspace_agent(integrations::AgentLaunchSpec {
                 agent_id: request.agent_id.clone(),
-                cli,
+                cli: cli.into(),
                 cwd: path_string(&ctx.cwd),
                 project_root: path_string(&ctx.project_root),
                 worktree_root: path_string(&ctx.worktree_root),
@@ -3031,6 +3098,7 @@ fn cli_from_shell(
         "antigravity" | "agy" | "antigravity-cli" => Ok(pty::agent::AgentCli::Antigravity),
         "opencode" | "open-code" => Ok(pty::agent::AgentCli::Opencode),
         "pi" => Ok(pty::agent::AgentCli::Pi),
+        "kimi" | "kimi-code" => Ok(pty::agent::AgentCli::Kimi),
         other => Err(format!("unsupported SHELL provider/command: {other}")),
     }
 }
@@ -3405,6 +3473,7 @@ fn formal_hero_code(template_id: &str) -> String {
 fn generated_session_id_for_cli(cli: pty::agent::AgentCli) -> Option<String> {
     match cli {
         pty::agent::AgentCli::Pi => Some(Uuid::new_v4().to_string()),
+        pty::agent::AgentCli::Kimi => None,
         _ => None,
     }
 }
@@ -3440,7 +3509,8 @@ fn compile_provider_adapter(
         pty::agent::AgentCli::Codex
         | pty::agent::AgentCli::Antigravity
         | pty::agent::AgentCli::Opencode
-        | pty::agent::AgentCli::Pi => "AGENTS.md",
+        | pty::agent::AgentCli::Pi
+        | pty::agent::AgentCli::Kimi => "AGENTS.md",
     };
     let skill_dir = if cli == pty::agent::AgentCli::Claude {
         ".claude/skills"
@@ -3584,9 +3654,9 @@ fn compile_provider_adapter(
         String::new(),
         "### Ember".into(),
         "- Create, view, update, or delete project scheduled prompts with `kota-ember`.".into(),
-        "- Prompt bodies are provided on stdin. Targets use agent AKA, agent id, or `human_name`.".into(),
+        "- Prompt bodies are provided on stdin. Targets use agent AKA, agent id, or the configured account human name (`<your-name>` in examples).".into(),
         "- Use `--in`, `--at`, `--idle`, or supported `--cron` expressions; unsupported cron is rejected rather than guessed.".into(),
-        "- Examples: `kota-ember add --to Gem --in 2h <<'EOF'`, `kota-ember add --to human_name --at \"2026-06-08 17:30\" <<'EOF'`, `kota-ember list`, `kota-ember show <schedule-id>`, `kota-ember update <schedule-id> --at \"2026-06-08 17:30\"`, `kota-ember delete <schedule-id>`.".into(),
+        "- Examples: `kota-ember add --to Gem --in 2h <<'EOF'`, `kota-ember add --to '<your-name>' --at \"2026-06-08 17:30\" <<'EOF'`, `kota-ember list`, `kota-ember show <schedule-id>`, `kota-ember update <schedule-id> --at \"2026-06-08 17:30\"`, `kota-ember delete <schedule-id>`.".into(),
         String::new(),
         "### System Agents".into(),
         "- Violet - materializes native logs into chathistory and summaries.".into(),
@@ -5859,6 +5929,67 @@ enum ProjectAgentLaunchMode {
     Fresh,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResumeTargetAvailability {
+    Resumable,
+    Unavailable,
+    Unknown,
+}
+
+fn claude_resume_target_availability(
+    launch: &pty::agent::AgentSpawnRequest,
+) -> ResumeTargetAvailability {
+    if launch.cli != pty::agent::AgentCli::Claude {
+        return ResumeTargetAvailability::Unknown;
+    }
+    if claude_args_request_resume(&launch.args) || claude_args_request_subcommand(&launch.args) {
+        return ResumeTargetAvailability::Unknown;
+    }
+    let Some(session_id) = launch
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+    else {
+        return ResumeTargetAvailability::Resumable;
+    };
+    let cwd = Path::new(&launch.cwd);
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
+    let Some(config_dir) = config_dir else {
+        return ResumeTargetAvailability::Unknown;
+    };
+    claude_resume_target_availability_in(&config_dir, cwd, session_id)
+}
+
+fn claude_resume_target_availability_in(
+    config_dir: &Path,
+    cwd: &Path,
+    session_id: &str,
+) -> ResumeTargetAvailability {
+    let path = config_dir
+        .join("projects")
+        .join(claude_project_dir_name(cwd))
+        .join(format!("{session_id}.jsonl"));
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => ResumeTargetAvailability::Resumable,
+        Ok(_) => ResumeTargetAvailability::Unknown,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            ResumeTargetAvailability::Unavailable
+        }
+        Err(_) => ResumeTargetAvailability::Unknown,
+    }
+}
+
 fn resolve_project_agent_launch_with_mode(
     manager: &IntegrationManager,
     requested_project_root: Option<&str>,
@@ -5877,8 +6008,18 @@ fn resolve_project_agent_launch_with_mode(
     let reset_pending = project_agent_session_reset_pending(&ctx.cwd);
     let session_id = if mode == ProjectAgentLaunchMode::Fresh {
         None
-    } else {
+    } else if detail.session_id.is_some() || reset_pending {
         detail.session_id.clone()
+    } else if detail.cli == pty::agent::AgentCli::Kimi {
+        latest_project_agent_session_id(detail.cli, &ctx.cwd).unwrap_or_else(|err| {
+            eprintln!(
+                "Kota could not locate the latest Kimi session for {}: {err}",
+                ctx.cwd.display()
+            );
+            None
+        })
+    } else {
+        None
     };
     let args = match mode {
         ProjectAgentLaunchMode::Fresh => fresh_project_agent_launch_args(detail.cli, &detail.args),
@@ -6222,27 +6363,69 @@ fn save_project_agent_layout(
 fn list_project_agent_identities(
     manager: &IntegrationManager,
     requested_project_root: Option<&str>,
-) -> Result<Vec<ProjectAgentIdentity>, String> {
-    let project_root = resolve_project_root_for_listing(manager, requested_project_root)?;
+) -> Result<ProjectAgentIdentityListing, String> {
+    let started = Instant::now();
+    let requested_root = requested_project_root.unwrap_or("<active>");
+    kota_debug_log(&format!(
+        "[hydration] identities start requested_root={requested_root}"
+    ));
+    let project_root = match resolve_project_root_for_listing(manager, requested_project_root) {
+        Ok(project_root) => project_root,
+        Err(err) => {
+            kota_debug_log(&format!(
+                "[hydration] identities failed requested_root={} elapsed_ms={} error={}",
+                requested_root,
+                started.elapsed().as_millis(),
+                err
+            ));
+            return Err(err);
+        }
+    };
+    let result = scan_project_agent_identities(&project_root);
+    match &result {
+        Ok(listing) => kota_debug_log(&format!(
+            "[hydration] identities done root={} identities={} workspace_entries={} elapsed_ms={}",
+            project_root.display(),
+            listing.identities.len(),
+            listing.workspace_entry_count,
+            started.elapsed().as_millis()
+        )),
+        Err(err) => kota_debug_log(&format!(
+            "[hydration] identities failed root={} elapsed_ms={} error={}",
+            project_root.display(),
+            started.elapsed().as_millis(),
+            err
+        )),
+    }
+    result
+}
+
+fn scan_project_agent_identities(
+    project_root: &Path,
+) -> Result<ProjectAgentIdentityListing, String> {
     let agents_root = project_root.join(".agent-workspaces");
     if !agents_root.exists() {
-        return Ok(Vec::new());
+        return Ok(ProjectAgentIdentityListing {
+            identities: Vec::new(),
+            workspace_entry_count: 0,
+        });
     }
     let mut agents = Vec::new();
+    let mut workspace_entry_count = 0usize;
     for entry in fs::read_dir(&agents_root)
         .map_err(|err| format!("read {}: {err}", agents_root.display()))?
     {
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
-        if !path.is_dir() || !path.join("agent.yaml").exists() {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if !path.is_dir() || !file_name.starts_with(integrations::PROJECT_AGENT_ID_PREFIX) {
             continue;
         }
-        let Some(agent_id) = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
+        workspace_entry_count += 1;
+        if !path.join("agent.yaml").exists() {
             continue;
-        };
+        }
+        let agent_id = file_name;
         let agent_yaml = read_yaml_mapping(&path.join("agent.yaml")).unwrap_or_default();
         let display_name = yaml_string(&agent_yaml, "display-name")
             .or_else(|| yaml_string(&agent_yaml, "displayName"))
@@ -6264,14 +6447,17 @@ fn list_project_agent_identities(
         let avatar_id =
             yaml_string(&agent_yaml, "avatar-id").or_else(|| yaml_string(&agent_yaml, "avatarId"));
         let recruited_at = yaml_string(&agent_yaml, "recruited-at");
-        agents.push((recruited_at, ProjectAgentIdentity {
-            agent_id,
-            display_name,
-            source_hero_id,
-            status,
-            provider,
-            avatar_id,
-        }));
+        agents.push((
+            recruited_at,
+            ProjectAgentIdentity {
+                agent_id,
+                display_name,
+                source_hero_id,
+                status,
+                provider,
+                avatar_id,
+            },
+        ));
     }
     // Stable fallback ordering for fresh/unsaved layouts: recruitment order,
     // not display name, so renames and version upgrades stop reshuffling
@@ -6282,7 +6468,10 @@ fn list_project_agent_identities(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => a.1.agent_id.cmp(&b.1.agent_id),
     });
-    Ok(agents.into_iter().map(|(_, identity)| identity).collect())
+    Ok(ProjectAgentIdentityListing {
+        identities: agents.into_iter().map(|(_, identity)| identity).collect(),
+        workspace_entry_count,
+    })
 }
 
 fn set_project_agent_status(
@@ -6454,6 +6643,9 @@ fn kage_bunshin_project_agent(
         pty::agent::AgentCli::Pi => {
             return Err("Kage Bunshin is not implemented for Pi agents yet".into());
         }
+        pty::agent::AgentCli::Kimi => {
+            return Err("Kage Bunshin is not implemented for Kimi agents yet".into());
+        }
     };
     let launch = pty::agent::AgentSpawnRequest {
         agent_id: clone_id.clone(),
@@ -6585,6 +6777,7 @@ fn cli_from_project_agent_files(
         pty::agent::AgentCli::Antigravity,
         pty::agent::AgentCli::Opencode,
         pty::agent::AgentCli::Pi,
+        pty::agent::AgentCli::Kimi,
     ] {
         if cwd.join(adapter_file_for_cli(cli)).exists() {
             return Ok(cli);
@@ -6603,6 +6796,7 @@ fn cli_from_shell_name(raw: &str) -> Result<pty::agent::AgentCli, String> {
         "antigravity" | "agy" | "antigravity-cli" => Ok(pty::agent::AgentCli::Antigravity),
         "opencode" | "open-code" => Ok(pty::agent::AgentCli::Opencode),
         "pi" => Ok(pty::agent::AgentCli::Pi),
+        "kimi" | "kimi-code" => Ok(pty::agent::AgentCli::Kimi),
         other => Err(format!("unsupported agent shell: {other}")),
     }
 }
@@ -6860,6 +7054,9 @@ fn sync_shell_launch_args(shell: &mut ShellYaml, cli: pty::agent::AgentCli) {
             sync_flag_arg(&mut shell.args, "--model", model);
             sync_flag_arg(&mut shell.args, "--thinking", effort);
         }
+        pty::agent::AgentCli::Kimi => {
+            sync_flag_arg(&mut shell.args, "--model", model);
+        }
     }
 }
 
@@ -7010,6 +7207,11 @@ fn ensure_default_permission_args(cli: pty::agent::AgentCli, args: &mut Vec<Stri
                 args.push("--approve".into());
             }
         }
+        pty::agent::AgentCli::Kimi => {
+            if !has_any_arg(args, &["--yolo", "-y", "--auto"], &[]) {
+                args.push("--yolo".into());
+            }
+        }
     }
 }
 
@@ -7043,7 +7245,7 @@ fn project_agent_launch_args(cli: pty::agent::AgentCli, args: &[String]) -> Vec<
                 out.insert(0, "--continue".into());
             }
         }
-        pty::agent::AgentCli::Pi => {}
+        pty::agent::AgentCli::Pi | pty::agent::AgentCli::Kimi => {}
     }
     out
 }
@@ -7078,6 +7280,12 @@ fn strip_session_args_for_fresh_launch(
             &["--continue", "-c", "--resume", "-r", "--no-session"],
             &["--session", "--session-id", "--fork"],
             &["--session=", "--session-id=", "--fork="],
+        ),
+        pty::agent::AgentCli::Kimi => strip_flag_args(
+            args,
+            &["--continue", "-c"],
+            &["--session", "-S"],
+            &["--session="],
         ),
     }
 }
@@ -7137,7 +7345,7 @@ fn project_agent_auto_resume_available(cli: pty::agent::AgentCli, cwd: &Path) ->
         | pty::agent::AgentCli::Opencode => latest_project_agent_session_id(cli, cwd)
             .map(|session_id| session_id.is_some())
             .unwrap_or(false),
-        pty::agent::AgentCli::Pi => false,
+        pty::agent::AgentCli::Pi | pty::agent::AgentCli::Kimi => false,
     }
 }
 
@@ -7156,6 +7364,7 @@ fn latest_project_agent_session_id(
         pty::agent::AgentCli::Claude => latest_claude_session_id(cwd),
         pty::agent::AgentCli::Codex => latest_codex_session_id(cwd),
         pty::agent::AgentCli::Opencode => latest_opencode_session_id(cwd),
+        pty::agent::AgentCli::Kimi => latest_kimi_session_id(cwd),
         pty::agent::AgentCli::Antigravity | pty::agent::AgentCli::Pi => Ok(None),
     }
 }
@@ -7363,6 +7572,103 @@ fn latest_opencode_session_id(cwd: &Path) -> Result<Option<String>, String> {
         }
     }
     Ok(best.map(|(_, id)| id))
+}
+
+fn latest_kimi_session_id(cwd: &Path) -> Result<Option<String>, String> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(None);
+    };
+    let kimi_home = std::env::var_os("KIMI_CODE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".kimi-code"));
+    latest_kimi_session_id_in(&kimi_home, cwd)
+}
+
+fn latest_kimi_session_id_in(kimi_home: &Path, cwd: &Path) -> Result<Option<String>, String> {
+    let sessions_dir = kimi_home.join("sessions");
+    if !sessions_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let mut workspace_dirs = Vec::new();
+    let index_path = kimi_home.join("workspaces.json");
+    if let Ok(text) = fs::read_to_string(&index_path) {
+        if let Ok(index) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(workspaces) = index
+                .get("workspaces")
+                .and_then(serde_json::Value::as_object)
+            {
+                for (workspace_id, workspace) in workspaces {
+                    if workspace
+                        .get("root")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|root| paths_same(Path::new(root), cwd))
+                    {
+                        let dir = sessions_dir.join(workspace_id);
+                        if dir.is_dir() {
+                            workspace_dirs.push(dir);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if workspace_dirs.is_empty() {
+        let entries = fs::read_dir(&sessions_dir)
+            .map_err(|err| format!("read {}: {err}", sessions_dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("read {} entry: {err}", sessions_dir.display()))?;
+            if entry.path().is_dir() {
+                workspace_dirs.push(entry.path());
+            }
+        }
+    }
+
+    let mut best: Option<(SystemTime, String)> = None;
+    for workspace_dir in workspace_dirs {
+        let entries = fs::read_dir(&workspace_dir)
+            .map_err(|err| format!("read {}: {err}", workspace_dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("read {} entry: {err}", workspace_dir.display()))?;
+            let session_dir = entry.path();
+            let Some(session_id) = session_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| name.starts_with("session_"))
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let state_path = session_dir.join("state.json");
+            let Ok(state_text) = fs::read_to_string(&state_path) else {
+                continue;
+            };
+            let Ok(state) = serde_json::from_str::<serde_json::Value>(&state_text) else {
+                continue;
+            };
+            if !state
+                .get("workDir")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|work_dir| paths_same(Path::new(work_dir), cwd))
+            {
+                continue;
+            }
+            let wire = session_dir.join("agents").join("main").join("wire.jsonl");
+            let Ok(modified) = fs::metadata(&wire).and_then(|metadata| metadata.modified()) else {
+                continue;
+            };
+            if best
+                .as_ref()
+                .map_or(true, |(best_modified, _)| modified > *best_modified)
+            {
+                best = Some((modified, session_id));
+            }
+        }
+    }
+    Ok(best.map(|(_, session_id)| session_id))
 }
 
 fn paths_same(left: &Path, right: &Path) -> bool {
@@ -7859,6 +8165,13 @@ const SUPPORTED_SHELLS: &[SupportedShellDefinition] = &[
         summary: "Pi's local coding agent.",
     },
     SupportedShellDefinition {
+        id: "kimi",
+        name: "Kimi Code",
+        bin: "kimi",
+        install_url: "https://code.kimi.com/",
+        summary: "Moonshot AI's local coding agent CLI.",
+    },
+    SupportedShellDefinition {
         id: "antigravity",
         name: "Antigravity CLI",
         bin: "agy",
@@ -8203,6 +8516,7 @@ fn default_model_options(provider: &str) -> Vec<SupportedProviderModel> {
             ),
             model("openai/gpt-5.5", "openai/gpt-5.5", "kota fallback"),
         ],
+        "kimi" => vec![model("default", "Kimi CLI default", "kota seed")],
         _ => Vec::new(),
     }
 }
@@ -9249,6 +9563,20 @@ fn pty_agent_route(
 #[tauri::command]
 fn auth_config_status(manager: State<'_, IntegrationManager>) -> integrations::OAuthConfigStatus {
     manager.auth_config_status()
+}
+
+#[tauri::command]
+async fn storage_measure_status(
+    manager: State<'_, IntegrationManager>,
+) -> Result<integrations::StorageMeasurementStatus, String> {
+    Ok(manager.storage_measure_status())
+}
+
+#[tauri::command]
+async fn storage_measure_start(
+    manager: State<'_, IntegrationManager>,
+) -> Result<integrations::StorageMeasurementStatus, String> {
+    Ok(manager.storage_measure_start())
 }
 
 #[tauri::command]
@@ -11519,7 +11847,7 @@ fn agent_diff_identity_for_spec(agent: &integrations::AgentLaunchSpec) -> AgentD
         .and_then(|yaml| yaml_string(yaml, "provider").or_else(|| yaml_string(yaml, "shell")))
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| Some(shell_name_for_cli(agent.cli).to_string()));
+        .or_else(|| Some(agent.cli.name().to_string()));
     let avatar_id = yaml
         .as_ref()
         .and_then(|yaml| yaml_string(yaml, "avatar-id").or_else(|| yaml_string(yaml, "avatarId")))
@@ -11766,7 +12094,8 @@ fn adapter_file_for_cli(cli: pty::agent::AgentCli) -> &'static str {
         pty::agent::AgentCli::Codex
         | pty::agent::AgentCli::Antigravity
         | pty::agent::AgentCli::Opencode
-        | pty::agent::AgentCli::Pi => "AGENTS.md",
+        | pty::agent::AgentCli::Pi
+        | pty::agent::AgentCli::Kimi => "AGENTS.md",
     }
 }
 
@@ -11811,6 +12140,7 @@ fn shell_name_for_cli(cli: pty::agent::AgentCli) -> &'static str {
         pty::agent::AgentCli::Antigravity => "antigravity",
         pty::agent::AgentCli::Opencode => "opencode",
         pty::agent::AgentCli::Pi => "pi",
+        pty::agent::AgentCli::Kimi => "kimi",
     }
 }
 
@@ -11948,7 +12278,7 @@ pub fn run() {
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_webdriver_automation::init());
 
-    builder
+    let app = builder
         .manage(PtyManager::default())
         .manage(IntegrationManager::default())
         .manage(BartenderManager::default())
@@ -12046,6 +12376,8 @@ pub fn run() {
             pty_agent_list,
             pty_agent_route,
             auth_config_status,
+            storage_measure_status,
+            storage_measure_start,
             auth_config_save,
             google_drive_status,
             google_drive_disconnect,
@@ -12124,6 +12456,7 @@ pub fn run() {
             ember_schedule_state,
             ember_schedule_save,
             ember_scheduler_tick,
+            ember_deliver_human_reminder,
             ember_prepare_dreams,
             ember_consolidate_dreams,
             project_agent_save_detail,
@@ -12161,8 +12494,16 @@ pub fn run() {
             dev_resolve_project_root,
             gh_auth_status
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Kota v2");
+        .build(tauri::generate_context!())
+        .expect("error while building Kota v2");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            app_handle
+                .state::<IntegrationManager>()
+                .shutdown_storage_measurement();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -12186,6 +12527,54 @@ mod tests {
     #[test]
     fn ping_returns_pong() {
         assert_eq!(ping(), "pong");
+    }
+
+    #[test]
+    fn project_agent_identity_scan_reports_workspace_entries_separately() {
+        let root = temp_dir("agent-identity-listing");
+        let missing = scan_project_agent_identities(&root).unwrap();
+        assert!(missing.identities.is_empty());
+        assert_eq!(missing.workspace_entry_count, 0);
+
+        let agents_root = root.join(".agent-workspaces");
+        fs::create_dir_all(&agents_root).unwrap();
+        let empty = scan_project_agent_identities(&root).unwrap();
+        assert!(empty.identities.is_empty());
+        assert_eq!(empty.workspace_entry_count, 0);
+
+        fs::create_dir_all(agents_root.join("agent-partial")).unwrap();
+        let partial = scan_project_agent_identities(&root).unwrap();
+        assert!(partial.identities.is_empty());
+        assert_eq!(partial.workspace_entry_count, 1);
+
+        fs::create_dir_all(agents_root.join("manual-backup")).unwrap();
+        let with_unrelated_directory = scan_project_agent_identities(&root).unwrap();
+        assert!(with_unrelated_directory.identities.is_empty());
+        assert_eq!(with_unrelated_directory.workspace_entry_count, 1);
+
+        let valid = agents_root.join("agent-alice");
+        fs::create_dir_all(&valid).unwrap();
+        fs::write(
+            valid.join("agent.yaml"),
+            "display-name: Alice\nrecruited-from: hero-cc\nstatus: active\n",
+        )
+        .unwrap();
+        fs::write(valid.join("SHELL.yaml"), "provider: claude\n").unwrap();
+        fs::write(agents_root.join("README.txt"), "not an agent\n").unwrap();
+        let mixed = scan_project_agent_identities(&root).unwrap();
+        assert_eq!(mixed.workspace_entry_count, 2);
+        assert_eq!(mixed.identities.len(), 1);
+        assert_eq!(mixed.identities[0].agent_id, "agent-alice");
+        assert_eq!(mixed.identities[0].display_name, "Alice");
+        let serialized = serde_json::to_value(&mixed).unwrap();
+        assert_eq!(serialized["workspaceEntryCount"], 2);
+
+        let invalid_root = temp_dir("agent-identity-listing-file");
+        fs::write(invalid_root.join(".agent-workspaces"), "not a directory\n").unwrap();
+        assert!(scan_project_agent_identities(&invalid_root).is_err());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(invalid_root);
     }
 
     #[test]
@@ -12334,7 +12723,7 @@ zai          glm-5.2           1M       131.1K   yes       no
             rules_dir: path_string(&root.join("rules")),
             agents: vec![integrations::AgentLaunchSpec {
                 agent_id: "alice".into(),
-                cli: pty::agent::AgentCli::Codex,
+                cli: pty::agent::AgentCli::Codex.into(),
                 cwd: path_string(&agent_cwd),
                 project_root: path_string(&root),
                 worktree_root: path_string(&agent),
@@ -12523,6 +12912,7 @@ zai          glm-5.2           1M       131.1K   yes       no
             pty::agent::AgentCli::Codex,
             pty::agent::AgentCli::Antigravity,
             pty::agent::AgentCli::Opencode,
+            pty::agent::AgentCli::Kimi,
         ] {
             assert_eq!(generated_session_id_for_cli(cli), None);
         }
@@ -12654,6 +13044,10 @@ zai          glm-5.2           1M       131.1K   yes       no
         assert_eq!(
             project_agent_launch_args(pty::agent::AgentCli::Opencode, &[]),
             strings(&["--continue", "--pure", "--dangerously-skip-permissions"])
+        );
+        assert_eq!(
+            project_agent_launch_args(pty::agent::AgentCli::Kimi, &[]),
+            strings(&["--yolo"])
         );
     }
 
@@ -12861,6 +13255,19 @@ zai          glm-5.2           1M       131.1K   yes       no
     }
 
     #[test]
+    fn sync_shell_launch_args_keeps_kimi_cli_default_model_unset() {
+        let mut shell = ShellYaml {
+            model: Some("default".into()),
+            args: strings(&["--model", "custom-model", "--yolo"]),
+            ..ShellYaml::default()
+        };
+
+        sync_shell_launch_args(&mut shell, pty::agent::AgentCli::Kimi);
+
+        assert_eq!(shell.args, strings(&["--yolo"]));
+    }
+
+    #[test]
     fn bunshin_support_excludes_antigravity() {
         assert!(project_agent_cli_supports_bunshin(
             pty::agent::AgentCli::Claude
@@ -12876,6 +13283,9 @@ zai          glm-5.2           1M       131.1K   yes       no
         ));
         assert!(!project_agent_cli_supports_bunshin(
             pty::agent::AgentCli::Pi
+        ));
+        assert!(!project_agent_cli_supports_bunshin(
+            pty::agent::AgentCli::Kimi
         ));
     }
 
@@ -12911,6 +13321,52 @@ zai          glm-5.2           1M       131.1K   yes       no
             pty::agent::AgentCli::Pi,
             &cwd
         ));
+        assert!(!project_agent_auto_resume_available(
+            pty::agent::AgentCli::Kimi,
+            &cwd
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn latest_kimi_session_uses_canonical_cwd_and_main_wire_only() {
+        let root = temp_dir("latest-kimi-session");
+        let kimi_home = root.join("kimi-home");
+        let cwd = root.join("agent-cwd");
+        let matching = kimi_home.join("sessions/wd_match/session_kimi_match");
+        let wrong = kimi_home.join("sessions/wd_wrong/session_kimi_wrong");
+        fs::create_dir_all(matching.join("agents/main")).unwrap();
+        fs::create_dir_all(wrong.join("agents/main")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            kimi_home.join("workspaces.json"),
+            serde_json::json!({
+                "version": 1,
+                "workspaces": {
+                    "wd_match": {"root": path_string(&cwd)},
+                    "wd_wrong": {"root": path_string(&root.join("other-cwd"))}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            matching.join("state.json"),
+            serde_json::json!({"workDir": path_string(&cwd)}).to_string(),
+        )
+        .unwrap();
+        fs::write(matching.join("agents/main/wire.jsonl"), "{}\n").unwrap();
+        fs::write(
+            wrong.join("state.json"),
+            serde_json::json!({"workDir": path_string(&root.join("other-cwd"))}).to_string(),
+        )
+        .unwrap();
+        fs::write(wrong.join("agents/main/wire.jsonl"), "{}\n{}\n").unwrap();
+
+        assert_eq!(
+            latest_kimi_session_id_in(&kimi_home, &cwd).unwrap(),
+            Some("session_kimi_match".into())
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -13270,6 +13726,13 @@ zai          glm-5.2           1M       131.1K   yes       no
                 "--dangerously-skip-permissions".to_string(),
             ],
         );
+        assert_eq!(
+            fresh_project_agent_launch_args(
+                pty::agent::AgentCli::Kimi,
+                &["--session".into(), "session_kimi".into(),],
+            ),
+            vec!["--yolo".to_string()],
+        );
     }
 
     #[test]
@@ -13320,6 +13783,35 @@ zai          glm-5.2           1M       131.1K   yes       no
         assert_eq!(
             latest_claude_session_id_in(&storage, &cwd).unwrap(),
             Some("new-session".into())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_resume_target_only_reports_a_definitely_missing_session() {
+        let root = temp_dir("claude-resume-target");
+        let config_dir = root.join(".claude");
+        let cwd = root.join("project").join(".agent-workspaces").join("alice");
+        let project_storage = config_dir
+            .join("projects")
+            .join(claude_project_dir_name(&cwd));
+        fs::create_dir_all(&project_storage).unwrap();
+
+        assert_eq!(
+            claude_resume_target_availability_in(&config_dir, &cwd, "expired-session"),
+            ResumeTargetAvailability::Unavailable
+        );
+
+        fs::write(project_storage.join("live-session.jsonl"), "{}\n").unwrap();
+        assert_eq!(
+            claude_resume_target_availability_in(&config_dir, &cwd, "live-session"),
+            ResumeTargetAvailability::Resumable
+        );
+
+        fs::create_dir(project_storage.join("unknown-session.jsonl")).unwrap();
+        assert_eq!(
+            claude_resume_target_availability_in(&config_dir, &cwd, "unknown-session"),
+            ResumeTargetAvailability::Unknown
         );
         let _ = fs::remove_dir_all(root);
     }

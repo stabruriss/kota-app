@@ -77,9 +77,10 @@ import {
   saveTavernHeroProfiles,
   resetSystemPrompt,
   saveTerminalEnhancement,
+  storageMeasureStart,
+  storageMeasureStatus,
   supportedShellsStatus,
   terminalEnhancementStatus,
-  workspaceStatus,
   type AccountSkillDraft,
   type AccountUserIdentity,
   type AccountRuleDraft,
@@ -87,6 +88,7 @@ import {
   type GhAuthInfo,
   type OAuthConfigStatus,
   type ProjectAgentRecord,
+  type StorageMeasurementStatus,
   type SupportedShellStatus,
   type TavernHeroProfileDraft,
   type WorkspaceProject,
@@ -120,6 +122,7 @@ import avatarEmber from '../assets/tavern/optimized/avatars/ember.webp';
 import avatarAntigravity from '../assets/tavern/optimized/avatars/antigravity.webp';
 import avatarLaughingMan from '../assets/tavern/optimized/avatars/laughing-man.webp';
 import avatarMagi from '../assets/tavern/optimized/avatars/magi.webp';
+import avatarKimi from '../assets/tavern/optimized/avatars/kimi.webp';
 import avatarOpencode from '../assets/tavern/optimized/avatars/opencode.webp';
 import avatarPi from '../assets/tavern/optimized/avatars/pi.webp';
 import avatarPuppeteer from '../assets/tavern/optimized/avatars/puppeteer.webp';
@@ -142,6 +145,12 @@ import iconGhost from '../assets/tavern/icons/ghost.svg';
 import iconShell from '../assets/tavern/icons/shell.svg';
 import iconSkills from '../assets/tavern/icons/skills.svg';
 import iconTurns from '../assets/tavern/icons/turns.svg';
+import providerIconAntigravity from '../assets/tavern/icons/providers/googlegemini.svg';
+import providerIconClaude from '../assets/tavern/icons/providers/claude.svg';
+import providerIconCodex from '../assets/tavern/icons/providers/openai.svg';
+import providerIconKimi from '../assets/tavern/icons/providers/kimi.svg';
+import providerIconOpencode from '../assets/tavern/icons/providers/opencode.svg';
+import providerIconPi from '../assets/tavern/icons/providers/pi.svg';
 import { LaughingManSettings } from './LaughingManSettings';
 
 interface TavernModalProps {
@@ -157,14 +166,14 @@ interface TavernModalProps {
 export type TavernTab = 'heroes' | 'rules' | 'skills' | 'link' | 'archived';
 const SHOW_GOOGLE_DRIVE_CARD = false;
 const TAVERN_TABS: TavernTab[] = ['heroes', 'rules', 'skills', 'link', 'archived'];
-type ProviderId = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'pi';
+type ProviderId = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'pi' | 'kimi';
 export type AgentCardKind = 'invited' | 'custom';
 type SystemHeroId = 'magi' | 'violet' | 'ember' | 'bbs' | 'laughing-man' | 'puppeteer' | 'bartender';
 type ProfileTarget =
   | { type: 'agent'; id: string }
   | { type: 'system'; id: SystemHeroId }
   | { type: 'user' };
-type TavernLoadTask = 'heroes' | 'account' | 'archived' | 'shells' | 'skills' | 'terminal' | 'rules' | 'prompts';
+type TavernLoadTask = 'heroes' | 'account' | 'archived' | 'shells' | 'skills' | 'rules' | 'prompts';
 type TavernPrepareTask = 'heroes' | 'accountUser' | 'images';
 export interface TavernLoadingLogItem {
   id: string;
@@ -176,6 +185,7 @@ interface ProviderSpec {
   id: ProviderId;
   name: string;
   cli: string;
+  icon: string;
   installUrl: string;
   defaultModel: string;
   defaultEffort?: string;
@@ -250,18 +260,8 @@ interface SystemPromptResetTarget {
 
 const PROFILE_STORAGE_KEY = 'kota-v2.tavern.hero-profiles';
 const CUSTOM_HERO_STORAGE_KEY = 'kota-v2.tavern.custom-heroes';
-const TAVERN_LOAD_LABELS: Record<TavernLoadTask, string> = {
-  heroes: 'Heroes',
-  account: 'Account',
-  archived: 'Archives',
-  shells: 'Providers',
-  skills: 'Skills',
-  terminal: 'Terminal',
-  rules: 'Rules',
-  prompts: 'Prompts',
-};
 const TAVERN_PREPARE_LABELS: Record<TavernPrepareTask, string> = {
-  heroes: TAVERN_LOAD_LABELS.heroes,
+  heroes: 'Heroes',
   accountUser: 'Account user',
   images: 'Images',
 };
@@ -300,6 +300,7 @@ const TAVERN_PRELOAD_ASSETS = [
   avatarAntigravity,
   avatarOpencode,
   avatarPi,
+  avatarKimi,
   avatarMagi,
   avatarViolet,
   avatarEmber,
@@ -332,6 +333,7 @@ const TAVERN_CRITICAL_PRELOAD_ASSETS = [
   avatarAntigravity,
   avatarOpencode,
   avatarPi,
+  avatarKimi,
   avatarUserDefault,
   roomClassic,
 ];
@@ -343,7 +345,7 @@ interface PreparedTavernOpenState {
 
 interface PreparedTavernAccountStatus {
   config: OAuthConfigStatus;
-  activeWorkspace: WorkspaceProject | null;
+  storageMeasurement: StorageMeasurementStatus;
 }
 
 let preparedTavernOpenState: PreparedTavernOpenState | null = null;
@@ -410,11 +412,11 @@ export async function prepareTavernForOpen(onLoadingChange?: (items: TavernLoadi
 }
 
 async function loadTavernAccountStatus(): Promise<PreparedTavernAccountStatus> {
-  const [config, workspace] = await Promise.all([
+  const [config, storageMeasurement] = await Promise.all([
     authConfigStatus(),
-    workspaceStatus(),
+    storageMeasureStatus(),
   ]);
-  return { config, activeWorkspace: workspace.active };
+  return { config, storageMeasurement };
 }
 
 function withTavernPrepareTimeout<T>(task: Promise<T>): Promise<T> {
@@ -474,6 +476,7 @@ const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     id: 'claude',
     name: 'Claude Code',
     cli: 'claude',
+    icon: providerIconClaude,
     installUrl: 'https://docs.anthropic.com/en/docs/claude-code/setup',
     defaultModel: 'default',
     defaultEffort: 'max',
@@ -483,6 +486,7 @@ const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     id: 'codex',
     name: 'Codex',
     cli: 'codex',
+    icon: providerIconCodex,
     installUrl: 'https://github.com/openai/codex',
     defaultModel: 'default',
     defaultEffort: 'xhigh',
@@ -492,6 +496,7 @@ const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     id: 'antigravity',
     name: 'Antigravity CLI',
     cli: 'agy',
+    icon: providerIconAntigravity,
     installUrl: 'https://www.antigravity.google/docs/cli/cli-getting-started',
     defaultModel: 'default',
     defaultAvatarId: 'antigravity',
@@ -501,6 +506,7 @@ const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     id: 'opencode',
     name: 'OpenCode',
     cli: 'opencode',
+    icon: providerIconOpencode,
     installUrl: 'https://opencode.ai/docs',
     defaultModel: 'opencode/deepseek-v4-flash-free',
     defaultAvatarId: 'opencode',
@@ -510,10 +516,21 @@ const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     id: 'pi',
     name: 'Pi',
     cli: 'pi',
+    icon: providerIconPi,
     installUrl: 'https://pi.dev',
     defaultModel: PI_DEFAULT_MODEL,
     defaultEffort: 'xhigh',
     defaultAvatarId: 'pi',
+    beta: true,
+  },
+  kimi: {
+    id: 'kimi',
+    name: 'Kimi Code',
+    cli: 'kimi',
+    icon: providerIconKimi,
+    installUrl: 'https://code.kimi.com/',
+    defaultModel: 'default',
+    defaultAvatarId: 'kimi',
     beta: true,
   },
 };
@@ -526,6 +543,7 @@ const HERO_TEMPLATES: AgentCardSpec[] = [
   { id: 'hero-gem', kind: 'custom', provider: 'antigravity', name: 'Gem' },
   { id: 'hero-op', kind: 'custom', provider: 'opencode', name: 'Op' },
   { id: 'hero-pi', kind: 'custom', provider: 'pi', name: 'Pi' },
+  { id: 'hero-kimi', kind: 'custom', provider: 'kimi', name: 'Kimi' },
 ];
 const DEFAULT_HERO_TEMPLATE_IDS = new Set(HERO_TEMPLATES.map((hero) => hero.id));
 const FACTORY_DEFAULT_MODEL_MIGRATIONS: Record<string, { provider: ProviderId; model: string }> = {
@@ -705,6 +723,7 @@ const LEGACY_TEMPLATE_NAMES: Record<ProviderId, readonly string[]> = {
   antigravity: ['Agy', 'Gem', 'David', 'Gemini', 'Gemini CLI', 'Antigravity', 'Antigravity CLI', 'Twin Star'],
   opencode: ['Op', 'Charlie', 'OpenCode', 'OpenCode CLI', 'Open Lantern'],
   pi: ['Pi', 'Pi CLI', 'Pi Agent'],
+  kimi: ['Kimi', 'Kimi Code', 'Kimi Code CLI'],
 };
 const STALE_FAKE_CUSTOM_HERO_NAMES = new Set([
   'Amber Clerk',
@@ -741,8 +760,8 @@ export function TavernModal({
 }: TavernModalProps) {
   const [tab, setTab] = useState<TavernTab>('heroes');
   const [config, setConfig] = useState<OAuthConfigStatus | null>(null);
+  const [storageMeasurement, setStorageMeasurement] = useState<StorageMeasurementStatus | null>(null);
   const [ghAuth, setGhAuth] = useState<GhAuthInfo | null>(initialGhAuth);
-  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceProject | null>(null);
   const [archivedWorkspaces, setArchivedWorkspaces] = useState<WorkspaceProject[]>([]);
   const [shells, setShells] = useState<SupportedShellStatus[]>([]);
   const [modelRefreshBusy, setModelRefreshBusy] = useState<ProviderId | null>(null);
@@ -789,6 +808,7 @@ export function TavernModal({
     body: string;
   } | null>(null);
   const [heroFilesReady, setHeroFilesReady] = useState(false);
+  const [storageAgeNow, setStorageAgeNow] = useState(() => Date.now());
   const saveProfilesTimerRef = useRef<number | null>(null);
   const lastSavedProfilesPayloadRef = useRef<string | null>(null);
   const profilePersistenceHeroesRef = useRef<AgentCardSpec[]>([...HERO_TEMPLATES, ...customHeroes]);
@@ -808,19 +828,6 @@ export function TavernModal({
     });
   }, []);
 
-  const loadingItems = useMemo<TavernLoadingLogItem[]>(
-    () => Object.entries(loadingTasks)
-      .map(([task, startedAt]) => {
-        if (typeof startedAt !== 'number') return null;
-        const label = TAVERN_LOAD_LABELS[task as TavernLoadTask];
-        if (!label) return null;
-        return { id: task, label, startedAt };
-      })
-      .filter((item): item is TavernLoadingLogItem => item !== null),
-    [loadingTasks],
-  );
-  const loadingLabels = useMemo(() => loadingItems.map((item) => item.label), [loadingItems]);
-
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -839,7 +846,33 @@ export function TavernModal({
   const refreshAccount = useCallback(async () => {
     const status = await loadTavernAccountStatus();
     setConfig(status.config);
-    setActiveWorkspace(status.activeWorkspace);
+    setStorageMeasurement(status.storageMeasurement);
+    setStorageAgeNow(Date.now());
+  }, []);
+
+  const beginStorageMeasurement = useCallback(async () => {
+    setStorageMeasurement((current) => ({
+      updating: true,
+      onDiskBytes: current?.onDiskBytes ?? null,
+      availableBytes: current?.availableBytes ?? null,
+      measuredAt: current?.measuredAt ?? null,
+      error: null,
+    }));
+    try {
+      const status = await storageMeasureStart();
+      if (!mountedRef.current) return;
+      setStorageMeasurement(status);
+      setStorageAgeNow(Date.now());
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setStorageMeasurement((current) => ({
+        updating: false,
+        onDiskBytes: current?.onDiskBytes ?? null,
+        availableBytes: current?.availableBytes ?? null,
+        measuredAt: current?.measuredAt ?? null,
+        error: String(err).replace(/^Error:\s*/, '') || 'Refresh failed',
+      }));
+    }
   }, []);
 
   const refreshArchivedWorkspaces = useCallback(async () => {
@@ -958,6 +991,39 @@ export function TavernModal({
     refreshShells,
     setTaskLoading,
   ]);
+
+  useEffect(() => {
+    if (!open || tab !== 'link' || !storageMeasurement?.updating) return;
+    let cancelled = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const status = await storageMeasureStatus();
+        if (!cancelled) {
+          setStorageMeasurement(status);
+          setStorageAgeNow(Date.now());
+        }
+      } catch {
+        // Keep the optimistic Updating state. The next cheap status poll may recover.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [open, storageMeasurement?.updating, tab]);
+
+  useEffect(() => {
+    if (!open || tab !== 'link' || storageMeasurement?.measuredAt == null) return;
+    setStorageAgeNow(Date.now());
+    const timer = window.setInterval(() => setStorageAgeNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [open, storageMeasurement?.measuredAt, tab]);
 
   useEffect(() => {
     if (!open) return;
@@ -1202,18 +1268,14 @@ export function TavernModal({
   useEffect(() => {
     if (!open || tab !== 'link') return;
     let cancelled = false;
-    setTaskLoading('terminal', true);
     void refreshTerminalEnhancement()
       .catch((err) => {
         if (!cancelled) setError(String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setTaskLoading('terminal', false);
       });
     return () => {
       cancelled = true;
     };
-  }, [open, refreshTerminalEnhancement, setTaskLoading, tab]);
+  }, [open, refreshTerminalEnhancement, tab]);
 
   const beginGithubCliLogin = useCallback(async () => {
     const status = await ghAuthStatus();
@@ -1424,7 +1486,6 @@ export function TavernModal({
   const resumeArchivedWorkspace = async (workspace: WorkspaceProject) => {
     await run('resume project', async () => {
       const next = await resumeWorkspaceProject(workspace.projectId);
-      setActiveWorkspace(next);
       await refreshArchivedWorkspaces();
       onWorkspaceResumed?.(next);
       onClose();
@@ -1667,7 +1728,6 @@ export function TavernModal({
     }
   };
 
-  const localStorageDetails = buildLocalStorageDetails(config, activeWorkspace);
   const githubCliState = ghAuth == null ? 'checking' : ghAuth.authenticated ? 'ok' : ghAuth.cliMissing ? 'missing' : 'setup';
   const githubCliPrimary = ghAuth?.authenticated
     ? (
@@ -1694,15 +1754,6 @@ export function TavernModal({
           <div className="tavern-title">Tavern</div>
           <div className="tavern-subtitle">Heroes, shared pools, and account links</div>
         </div>
-        <SupportedProviders
-          shells={shells}
-          ghAuth={ghAuth}
-          shellsLoading={!!loadingTasks.shells}
-          onGithubCliAction={() => {
-            void run('github cli', beginGithubCliLogin);
-          }}
-        />
-        <TavernLoadingStatus labels={loadingLabels} />
       </header>
 
       <div className="tavern-tabs" role="tablist">
@@ -1797,6 +1848,11 @@ export function TavernModal({
                 </span>
               </button>
             </div>
+
+            <SupportedProviders
+              shells={shells}
+              shellsLoading={!!loadingTasks.shells}
+            />
           </section>
 
           {archivedHeroes.length > 0 && (
@@ -2068,16 +2124,31 @@ export function TavernModal({
             </div>
           </section>
 
-          <section className="tavern-section full tavern-local-storage">
+          <section
+            className="tavern-section full tavern-local-storage"
+            aria-label="Local Storage"
+            data-testid="tavern-local-storage"
+          >
             <div className="tavern-card-head">
               <div>
                 <div className="tavern-section-title">Local Storage</div>
               </div>
             </div>
             <div className="tavern-readouts tavern-local-readouts">
-              {localStorageDetails.map(([label, value, size]) => (
-                <Readout key={label} label={label} value={value} detail={size ? `Size ${size}` : undefined} />
-              ))}
+              {config?.appPath && <Readout label="Running app" value={config.appPath} />}
+              {config?.localAccountFolder && (
+                <Readout
+                  label="Account folder"
+                  value={config.localAccountFolder}
+                  detail={(
+                    <StorageMeasurementDetail
+                      status={storageMeasurement}
+                      now={storageAgeNow}
+                      onRefresh={() => void beginStorageMeasurement()}
+                    />
+                  )}
+                />
+              )}
             </div>
           </section>
         </div>
@@ -2121,12 +2192,6 @@ export function TavernModal({
           ))}
         </div>
       )}
-
-      <TavernLoadingLog
-        items={loadingItems}
-        lead="Still loading"
-        className="tavern-bottom-loading-log"
-      />
 
       {profileTarget?.type === 'agent' && (
         <AgentProfileOverlay
@@ -3198,19 +3263,6 @@ function Avatar({ className }: { className: string }) {
   );
 }
 
-function TavernLoadingStatus({ labels }: { labels: string[] }) {
-  if (labels.length === 0) return null;
-  return (
-    <div className="tavern-loading-chip" role="status" aria-live="polite">
-      <span className="tavern-loading-spinner" aria-hidden />
-      <span>
-        Loading {labels[0]}
-        {labels.length > 1 ? ` +${labels.length - 1}` : ''}
-      </span>
-    </div>
-  );
-}
-
 export function TavernLoadingLog({
   items,
   lead = 'Loading',
@@ -3270,53 +3322,36 @@ function TavernLoadingBlock({ label }: { label: string }) {
 
 function SupportedProviders({
   shells,
-  ghAuth,
   shellsLoading,
-  onGithubCliAction,
 }: {
   shells: SupportedShellStatus[];
-  ghAuth: GhAuthInfo | null;
   shellsLoading: boolean;
-  onGithubCliAction: () => void;
 }) {
   const shellById = new Map(shells.map((shell) => [shell.id, shell]));
-  const ghState = ghAuth == null ? 'checking' : ghAuth.authenticated ? 'ok' : ghAuth.cliMissing ? 'missing' : 'setup';
-  const ghTitle = ghAuth?.authenticated
-    ? `GitHub CLI logged in as ${ghAuth.username ?? 'unknown'}`
-    : ghAuth == null
-      ? 'Checking GitHub CLI'
-      : ghAuth.cliMissing
-      ? 'GitHub CLI not found'
-      : ghAuth?.error ?? 'Login with GitHub CLI';
   return (
-    <section className="tavern-supported-providers" aria-label="Supported providers">
-      <div>Supported providers</div>
+    <section className="tavern-provider-status" aria-label="Providers' Status">
+      <div className="tavern-provider-status-label">Providers' Status</div>
       <div className="tavern-provider-lights">
-        <button
-          type="button"
-          className={`github-cli-provider ${ghState}`}
-          title={ghTitle}
-          onClick={ghAuth?.authenticated || ghAuth == null ? undefined : onGithubCliAction}
-        >
-          <span className={`tavern-provider-dot ${ghState}`} />
-          <span>GitHub CLI</span>
-        </button>
         {PROVIDER_IDS.map((providerId) => {
           const provider = PROVIDERS[providerId];
           const shell = shellById.get(providerId);
           const checking = shellsLoading && !shell;
           const installed = !!shell?.installed;
+          const state = checking ? 'checking' : installed ? 'ready' : 'missing';
           return (
             <a
               key={providerId}
               href={shell?.installUrl ?? provider.installUrl}
               target="_blank"
               rel="noreferrer"
-              className={checking ? 'checking' : installed ? 'ready' : ''}
+              className={state}
               title={checking ? `Checking ${provider.name}` : installed ? `${provider.name} installed at ${shell?.resolvedBin}` : shell?.summary ?? provider.cli}
             >
-              <span className={`tavern-provider-dot ${checking ? 'checking' : installed ? 'ok' : ''}`} />
-              <span>{provider.name}</span>
+              <span className="tavern-provider-icon" aria-hidden="true">
+                <img src={provider.icon} alt="" />
+                <span className={`tavern-provider-dot ${checking ? 'checking' : installed ? 'ok' : 'missing'}`} />
+              </span>
+              <span className="tavern-provider-name">{provider.name}</span>
               {provider.beta && <span className="tavern-beta-badge" aria-label="Beta provider">BETA</span>}
             </a>
           );
@@ -3326,21 +3361,90 @@ function SupportedProviders({
   );
 }
 
-function buildLocalStorageDetails(
-  config: OAuthConfigStatus | null,
-  workspace: WorkspaceProject | null,
-): Array<[string, string, string?]> {
-  const details: Array<[string, string, string?]> = [];
-  if (config?.appPath) details.push(['Running app', config.appPath]);
-  if (config?.localAccountFolder) {
-    details.push(['Account folder', config.localAccountFolder, formatBytes(config.localAccountBytes)]);
-  }
-  if (workspace?.sourceDir) {
-    details.push(['Project files', workspace.sourceDir, formatBytes(workspace.sourceDirBytes)]);
-  } else if (config?.localProjectRoot) {
-    details.push(['Project files', config.localProjectRoot, formatBytes(config.localProjectRootBytes)]);
-  }
-  return details;
+function StorageMeasurementDetail({
+  status,
+  now,
+  onRefresh,
+}: {
+  status: StorageMeasurementStatus | null;
+  now: number;
+  onRefresh: () => void;
+}) {
+  const hasMeasurement = status?.onDiskBytes != null;
+  const updating = status?.updating ?? false;
+  const size = hasMeasurement
+    ? `≈ ${formatBytes(status.onDiskBytes ?? 0)}`
+    : updating
+      ? 'Updating…'
+      : status
+        ? 'not measured'
+        : '…';
+  return (
+    <span className="tavern-storage-detail" role="status" aria-live="polite">
+      <span>
+        Size <span className="tavern-storage-value">{size}</span>
+        {!hasMeasurement && updating && (
+          <span className="tavern-storage-update-hint">(will take 2–5 min)</span>
+        )}
+      </span>
+      {hasMeasurement && updating && (
+        <>
+          <StorageDetailSeparator />
+          <span className="tavern-storage-updating">
+            Updating… <span className="tavern-storage-update-hint">(will take 2–5 min)</span>
+          </span>
+        </>
+      )}
+      {hasMeasurement && status?.availableBytes != null && (
+        <>
+          <StorageDetailSeparator />
+          <span><span className="tavern-storage-value">{formatBytes(status.availableBytes)}</span> available</span>
+        </>
+      )}
+      {hasMeasurement && status?.measuredAt != null && (
+        <>
+          <StorageDetailSeparator />
+          <span>Updated {formatStorageMeasurementAge(status.measuredAt, now)}</span>
+        </>
+      )}
+      {status?.error && (
+        <>
+          <StorageDetailSeparator />
+          <span className="tavern-storage-error">Refresh failed</span>
+        </>
+      )}
+      {status && (
+        <button
+          type="button"
+          className={`tavern-storage-refresh${updating ? ' updating' : ''}`}
+          aria-label="Refresh storage usage"
+          title="Refresh storage usage"
+          disabled={updating}
+          onClick={onRefresh}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden>
+            <path d="M13.2 5.25A5.7 5.7 0 1 0 13 11" />
+            <path d="M13.2 2.6v2.9h-2.9" />
+          </svg>
+        </button>
+      )}
+    </span>
+  );
+}
+
+function StorageDetailSeparator() {
+  return <span className="tavern-storage-separator" aria-hidden>·</span>;
+}
+
+export function formatStorageMeasurementAge(measuredAt: number, now = Date.now()): string {
+  const elapsedSeconds = Math.max(0, Math.floor(now / 1000) - measuredAt);
+  if (elapsedSeconds < 60) return 'just now';
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours}h ago`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  return `${elapsedDays} ${elapsedDays === 1 ? 'day' : 'days'} ago`;
 }
 
 function githubInitial(username: string | null | undefined): string {
@@ -3439,13 +3543,13 @@ function ConnectionLogo({ kind }: { kind: 'google-drive' | 'github' }) {
   );
 }
 
-function Readout({ label, value, detail }: { label: string; value: string; detail?: string }) {
+function Readout({ label, value, detail }: { label: string; value: string; detail?: ReactNode }) {
   return (
     <div className="tavern-readout">
       <span>{label}</span>
       <b>
         {value}
-        {detail && <small>{detail}</small>}
+        {detail != null && <small>{detail}</small>}
       </b>
     </div>
   );
@@ -3590,6 +3694,8 @@ function providerCli(provider: ProviderId): AgentCli {
       return 'opencode';
     case 'pi':
       return 'pi';
+    case 'kimi':
+      return 'kimi';
   }
 }
 
@@ -3601,6 +3707,7 @@ function providerIdFromStored(value: unknown, fallback?: ProviderId): ProviderId
   if (typeof value !== 'string') return fallback;
   if (isProviderId(value)) return value;
   if (value === 'gemini' || value === 'gemini-cli') return 'antigravity';
+  if (value === 'kimi-code') return 'kimi';
   return fallback;
 }
 
@@ -3685,6 +3792,8 @@ function launchArgs(draft: HeroDraft): string[] {
       return [...modelArgs, '--pure', '--dangerously-skip-permissions'];
     case 'pi':
       return [...modelArgs, '--thinking', draft.effort ?? 'xhigh', '--approve'];
+    case 'kimi':
+      return [...modelArgs, '--yolo'];
   }
 }
 
@@ -3729,6 +3838,7 @@ function tavernShellProviderClass(providerId: ProviderId): string {
     case 'antigravity': return 'provider-gemini';
     case 'opencode': return 'provider-opencode';
     case 'pi': return 'provider-pi';
+    case 'kimi': return 'provider-kimi';
   }
 }
 

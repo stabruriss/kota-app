@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::agent_bus::{AgentBusManager, AgentBusSendRequest};
 use crate::integrations::IntegrationManager;
 use crate::pty::PtyManager;
+use crate::violet::ActorMessageRecord;
 
 const KOTA_HOME_DIR: &str = "Kota";
 const STORE_SCHEMA: &str = "kota.ember.schedules.v1";
@@ -25,8 +26,11 @@ const EMBER_ACTOR_ID: &str = "ember";
 const EMBER_ACTOR_NAME: &str = "Ember";
 // Must match HUMAN_TELEGRAM_TARGET_ID in src/ember-config.ts.
 const HUMAN_TELEGRAM_TARGET_ID: &str = "__kota_human_telegram__";
+const MAX_DRAFTS: usize = 20;
 const MAX_SCHEDULES: usize = 40;
 const MAX_HISTORY: usize = 120;
+const DELIVERY_GRACE_SECONDS: i64 = 120;
+const NOT_DELIVERED: &str = "Not Delivered";
 
 #[derive(Debug, Default)]
 struct EmberDeliveryOutcome {
@@ -54,6 +58,22 @@ struct EmberDispatchWatch {
     watched_path: PathBuf,
 }
 
+struct EmberDispatchFileLock {
+    path: PathBuf,
+    token: String,
+}
+
+impl Drop for EmberDispatchFileLock {
+    fn drop(&mut self) {
+        if fs::read_to_string(&self.path)
+            .ok()
+            .is_some_and(|token| token == self.token)
+        {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmberProjectRequest {
@@ -67,6 +87,25 @@ pub struct EmberStateSaveRequest {
     #[serde(default)]
     pub project_root: Option<String>,
     pub state: EmberStateFile,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmberHumanReminderRequest {
+    #[serde(default)]
+    pub project_root: Option<String>,
+    pub event_id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmberHumanReminderResult {
+    pub event_id: String,
+    pub delivered: bool,
+    pub room_status: String,
+    pub telegram_status: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -102,8 +141,15 @@ pub struct EmberStateFile {
     pub schedules: Vec<EmberSchedule>,
     #[serde(default)]
     pub history: Vec<EmberHistoryRecord>,
-    #[serde(default)]
-    pub app_last_seen_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmberDraft {
+    id: String,
+    text: String,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,6 +264,10 @@ struct EmberDispatchFile {
     schedule_id: Option<String>,
     #[serde(default)]
     schedule: Option<EmberSchedule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draft_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draft: Option<EmberDraft>,
 }
 
 #[derive(Clone, Debug)]
@@ -323,49 +373,67 @@ impl EmberManager {
         paths.sort();
 
         for path in paths {
-            let Some(file_name) = path.file_name().map(|name| name.to_owned()) else {
-                continue;
-            };
-            let processing_path = processing.join(&file_name);
-            if fs::rename(&path, &processing_path).is_err() {
-                continue;
-            }
-            let result = self.process_dispatch_file(app, project_root, &processing_path);
-            let target_dir = if result.is_ok() { &delivered } else { &failed };
-            let target_path = unique_path(target_dir.join(&file_name));
-            let _ = fs::rename(&processing_path, &target_path);
-            if let Err(err) = result {
-                let _ = fs::write(target_path.with_extension("error.txt"), err.to_string());
-            }
+            consume_dispatch_path(
+                project_root,
+                &path,
+                &processing,
+                &delivered,
+                &failed,
+                || emit_changed(app, project_root),
+            )?;
         }
         Ok(())
     }
+}
 
-    fn process_dispatch_file(
-        &self,
-        app: &AppHandle,
-        project_root: &Path,
-        path: &Path,
-    ) -> Result<()> {
-        let text = fs::read_to_string(path)?;
-        let request = serde_json::from_str::<EmberDispatchFile>(&text)?;
-        if request.schema != DISPATCH_SCHEMA {
-            bail!("unsupported Ember dispatch schema: {}", request.schema);
+fn consume_dispatch_path(
+    project_root: &Path,
+    path: &Path,
+    processing: &Path,
+    delivered: &Path,
+    failed: &Path,
+    on_changed: impl FnOnce(),
+) -> Result<()> {
+    with_dispatch_file_lock(project_root, || {
+        let Some(file_name) = path.file_name().map(|name| name.to_owned()) else {
+            return Ok(());
+        };
+        let processing_path = processing.join(&file_name);
+        if fs::rename(path, &processing_path).is_err() {
+            return Ok(());
         }
-        let dispatch_project_root = PathBuf::from(&request.project_root);
-        if !paths_same(project_root, &dispatch_project_root) {
-            bail!(
-                "Ember dispatch project mismatch: {} != {}",
-                dispatch_project_root.display(),
-                project_root.display()
-            );
+        let result = process_dispatch_file_state(project_root, &processing_path);
+        if result.is_ok() {
+            on_changed();
         }
-        let mut state = load_state(project_root)?;
-        apply_dispatch_to_state(project_root, &mut state, request, actor_agent())?;
-        save_state(project_root, &state)?;
-        emit_changed(app, project_root);
+        let target_dir = if result.is_ok() { delivered } else { failed };
+        let target_path = unique_path(target_dir.join(&file_name));
+        let _ = fs::rename(&processing_path, &target_path);
+        if let Err(err) = result {
+            let _ = fs::write(target_path.with_extension("error.txt"), err.to_string());
+        }
         Ok(())
+    })
+}
+
+fn process_dispatch_file_state(project_root: &Path, path: &Path) -> Result<()> {
+    let text = fs::read_to_string(path)?;
+    let request = serde_json::from_str::<EmberDispatchFile>(&text)?;
+    if request.schema != DISPATCH_SCHEMA {
+        bail!("unsupported Ember dispatch schema: {}", request.schema);
     }
+    let dispatch_project_root = PathBuf::from(&request.project_root);
+    if !paths_same(project_root, &dispatch_project_root) {
+        bail!(
+            "Ember dispatch project mismatch: {} != {}",
+            dispatch_project_root.display(),
+            project_root.display()
+        );
+    }
+    let mut state = load_state(project_root)?;
+    apply_dispatch_to_state(project_root, &mut state, request, actor_agent())?;
+    save_state(project_root, &state)?;
+    Ok(())
 }
 
 pub fn load_project_state(project_root: &Path) -> Result<EmberStateFile> {
@@ -378,7 +446,7 @@ pub fn save_project_state(
     mut state: EmberStateFile,
 ) -> Result<EmberStateFile> {
     state.schema = STORE_SCHEMA.into();
-    state.drafts.truncate(20);
+    state.drafts.truncate(MAX_DRAFTS);
     state.history.truncate(MAX_HISTORY);
     state.schedules.truncate(MAX_SCHEDULES);
     for schedule in &mut state.schedules {
@@ -412,7 +480,9 @@ pub fn scheduler_tick(
         let _ = ember.refresh_dispatch_watcher(app, &project_root);
         let mut state = load_state(&project_root)?;
         let now = Utc::now();
-        let mut changed = reconcile_missed_app_not_running(&mut state, now);
+        let overdue_count = reconcile_overdue_not_delivered(&mut state, now);
+        failed = failed.saturating_add(overdue_count);
+        let mut changed = overdue_count > 0;
         let mut emit_change = changed;
         let due_ids = state
             .schedules
@@ -444,30 +514,43 @@ pub fn scheduler_tick(
             match result {
                 Ok(outcome) => {
                     fired += 1;
-                    let partial_error = outcome.partial_error();
                     state.history.insert(
                         0,
-                        history_for_schedule(&schedule, "delivered", now, partial_error, None),
+                        history_for_schedule(
+                            &schedule,
+                            "delivered",
+                            now,
+                            outcome.partial_error(),
+                            None,
+                        ),
                     );
                     mark_schedule_delivered(&mut state, &schedule, now);
+                    state.history.truncate(MAX_HISTORY);
+                    changed = true;
+                    emit_change = true;
                 }
                 Err(err) => {
                     failed += 1;
-                    let error = err.to_string();
+                    crate::kota_debug_log(&format!(
+                        "[ember] delivery attempt failed for {}: {err}",
+                        schedule.id
+                    ));
                     state.history.insert(
                         0,
-                        history_for_schedule(&schedule, "failed", now, Some(error.clone()), None),
+                        history_for_schedule(
+                            &schedule,
+                            "failed",
+                            now,
+                            Some(NOT_DELIVERED.into()),
+                            None,
+                        ),
                     );
-                    mark_schedule_failed(&mut state, &schedule.id, &error, now);
+                    mark_schedule_failed(&mut state, &schedule.id, NOT_DELIVERED, now);
+                    state.history.truncate(MAX_HISTORY);
+                    changed = true;
+                    emit_change = true;
                 }
             }
-            state.history.truncate(MAX_HISTORY);
-            changed = true;
-            emit_change = true;
-        }
-        if should_write_heartbeat(state.app_last_seen_at.as_deref(), now) {
-            state.app_last_seen_at = Some(now.to_rfc3339());
-            changed = true;
         }
         if changed {
             save_state(&project_root, &state)?;
@@ -481,13 +564,6 @@ pub fn scheduler_tick(
         fired,
         failed,
     })
-}
-
-fn should_write_heartbeat(last_seen: Option<&str>, now: chrono::DateTime<Utc>) -> bool {
-    let Some(last_seen) = last_seen.and_then(parse_rfc3339) else {
-        return true;
-    };
-    now.signed_duration_since(last_seen) >= chrono::Duration::seconds(60)
 }
 
 fn deliver_schedule(
@@ -511,8 +587,33 @@ fn deliver_schedule(
             .cloned()
             .unwrap_or_else(|| target.clone());
         if is_human_telegram_target(target) {
-            match deliver_human_telegram_reminder(&manager, project_root, schedule, target) {
-                Ok(()) => outcome.delivered += 1,
+            let event_id = ember_event_id("reminder", &schedule.id, target);
+            match deliver_human_reminder(
+                app,
+                project_root,
+                EmberHumanReminderRequest {
+                    project_root: Some(path_string(project_root)),
+                    event_id,
+                    text: schedule.text.clone(),
+                },
+            ) {
+                Ok(result) if result.delivered => {
+                    outcome.delivered += 1;
+                    outcome.failed.extend(
+                        result
+                            .warnings
+                            .into_iter()
+                            .map(|warning| format!("{label}: {warning}")),
+                    );
+                }
+                Ok(result) => outcome.failed.push(format!(
+                    "{label}: {}",
+                    if result.warnings.is_empty() {
+                        "Could not deliver the reminder to the human target.".into()
+                    } else {
+                        result.warnings.join("; ")
+                    }
+                )),
                 Err(err) => outcome.failed.push(format!("{label}: {err}")),
             }
             continue;
@@ -562,22 +663,89 @@ fn deliver_schedule(
 }
 
 fn render_reminder_prompt(schedule: &EmberSchedule) -> String {
-    format!("Ember scheduled prompt\n\n{}", schedule.text.trim())
+    render_reminder_text(&schedule.text)
 }
 
-fn deliver_human_telegram_reminder(
-    manager: &IntegrationManager,
+fn render_reminder_text(text: &str) -> String {
+    format!("Ember scheduled prompt\n\n{}", text.trim())
+}
+
+pub(crate) fn deliver_human_reminder(
+    app: &AppHandle,
     project_root: &Path,
-    schedule: &EmberSchedule,
-    target: &str,
-) -> Result<()> {
-    let (project_id, project_name) = project_log_info(manager, project_root);
-    crate::laughing_man::send_ember_reminder(crate::laughing_man::LmEmberReminderRequest {
-        event_id: ember_event_id("reminder", &schedule.id, target),
-        text: schedule.text.clone(),
-        project_id: Some(project_id),
-        project_name: Some(project_name),
-        project_root: Some(path_string(project_root)),
+    request: EmberHumanReminderRequest,
+) -> Result<EmberHumanReminderResult> {
+    let event_id = request.event_id.trim().to_string();
+    if event_id.is_empty() {
+        bail!("Ember human reminder requires an event id");
+    }
+    if event_id.len() > 256
+        || !event_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+    {
+        bail!("Ember human reminder event id is invalid");
+    }
+    let text = request.text.trim().to_string();
+    if text.is_empty() {
+        bail!("Ember human reminder requires text");
+    }
+
+    let agent_bus = app.state::<AgentBusManager>();
+    let room_result = agent_bus.record_actor_notice(
+        app,
+        project_root,
+        ActorMessageRecord {
+            actor_id: EMBER_ACTOR_ID.into(),
+            actor_name: EMBER_ACTOR_NAME.into(),
+            text: render_reminder_text(&text),
+            target_agent_ids: vec![HUMAN_TELEGRAM_TARGET_ID.into()],
+            event_id: event_id.clone(),
+            actor_intent: Some("reminder".into()),
+        },
+        Some(&event_id),
+    );
+    let mut warnings = Vec::new();
+    let room_status = match room_result {
+        Ok(result) if result.duplicate => "duplicate",
+        Ok(result) if result.recorded => "delivered",
+        Ok(_) => "failed",
+        Err(err) => {
+            warnings.push(format!("Room delivery failed: {err}"));
+            "failed"
+        }
+    }
+    .to_string();
+
+    let mut telegram_status = "skipped".to_string();
+    if crate::laughing_man::ember_reminder_route_configured() {
+        let manager = app.state::<IntegrationManager>();
+        let (project_id, project_name) = project_log_info(&manager, project_root);
+        match crate::laughing_man::send_ember_reminder(
+            crate::laughing_man::LmEmberReminderRequest {
+                event_id: event_id.clone(),
+                text,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                project_root: Some(path_string(project_root)),
+            },
+        ) {
+            Ok(()) => telegram_status = "delivered".into(),
+            Err(err) => {
+                telegram_status = "failed".into();
+                warnings.push(format!("Laughing Man delivery failed: {err}"));
+            }
+        }
+    }
+
+    let delivered =
+        matches!(room_status.as_str(), "delivered" | "duplicate") || telegram_status == "delivered";
+    Ok(EmberHumanReminderResult {
+        event_id,
+        delivered,
+        room_status,
+        telegram_status,
+        warnings,
     })
 }
 
@@ -646,33 +814,23 @@ fn mark_schedule_failed(
     }
 }
 
-fn reconcile_missed_app_not_running(
+fn reconcile_overdue_not_delivered(
     state: &mut EmberStateFile,
     now: chrono::DateTime<Utc>,
-) -> bool {
-    let Some(last_seen) = state.app_last_seen_at.as_deref().and_then(parse_rfc3339) else {
-        state.app_last_seen_at = Some(now.to_rfc3339());
-        return true;
-    };
-    if now.signed_duration_since(last_seen) < chrono::Duration::seconds(90) {
-        return false;
-    }
-    let mut changed = false;
+) -> usize {
+    let overdue_before = now - chrono::Duration::seconds(DELIVERY_GRACE_SECONDS);
     let mut missed = Vec::new();
     for schedule in &mut state.schedules {
-        if schedule.status != "scheduled" {
+        if schedule.status != "scheduled" || schedule.wait_for_idle.unwrap_or(false) {
             continue;
         }
         let Some(next_due) = parse_rfc3339(&schedule.next_run_at) else {
             continue;
         };
-        if schedule_changed_after(schedule, last_seen) {
+        if next_due > overdue_before {
             continue;
         }
-        if next_due <= last_seen || next_due > now {
-            continue;
-        }
-        let missed_count = count_missed_runs(schedule, now).max(1);
+        let missed_count = count_missed_runs(schedule, overdue_before).max(1);
         missed.push((schedule.clone(), missed_count, next_due));
         if schedule_should_continue(
             schedule,
@@ -684,42 +842,30 @@ fn reconcile_missed_app_not_running(
             schedule.next_run_at =
                 next_run_after(schedule, now).unwrap_or_else(|| now.to_rfc3339());
             schedule.updated_at = now.to_rfc3339();
+            schedule.error = Some(NOT_DELIVERED.into());
         } else {
             schedule.run_count = schedule.run_count.saturating_add(missed_count);
             schedule.last_run_at = Some(now.to_rfc3339());
             schedule.updated_at = now.to_rfc3339();
             schedule.status = "failed".into();
-            schedule.error = Some("app not running".into());
+            schedule.error = Some(NOT_DELIVERED.into());
         }
-        changed = true;
     }
-    for (schedule, missed_count, scheduled_for) in missed {
+    let missed_count = missed.len();
+    for (schedule, missed_runs, scheduled_for) in missed {
         state.history.insert(
             0,
             history_for_schedule(
                 &schedule,
                 "failed",
                 now,
-                Some("app not running".into()),
-                Some((scheduled_for.to_rfc3339(), missed_count)),
+                Some(NOT_DELIVERED.into()),
+                Some((scheduled_for.to_rfc3339(), missed_runs)),
             ),
         );
     }
     state.history.truncate(MAX_HISTORY);
-    changed
-}
-
-fn schedule_changed_after(schedule: &EmberSchedule, timestamp: chrono::DateTime<Utc>) -> bool {
-    schedule
-        .created_at
-        .as_str()
-        .pipe(parse_rfc3339)
-        .is_some_and(|created_at| created_at > timestamp)
-        || schedule
-            .updated_at
-            .as_str()
-            .pipe(parse_rfc3339)
-            .is_some_and(|updated_at| updated_at > timestamp)
+    missed_count
 }
 
 fn count_missed_runs(schedule: &EmberSchedule, now: chrono::DateTime<Utc>) -> u32 {
@@ -982,6 +1128,28 @@ fn human_telegram_target_name(target: &str) -> Option<String> {
     human_telegram_target_name_for(target, configured_name.as_deref())
 }
 
+fn validate_cli_schedule_targets(project_root: &Path, schedule: &EmberSchedule) -> Result<()> {
+    let configured_name = configured_account_user_display_name();
+    validate_cli_schedule_targets_for(project_root, schedule, configured_name.as_deref())
+}
+
+fn validate_cli_schedule_targets_for(
+    project_root: &Path,
+    schedule: &EmberSchedule,
+    configured_human_name: Option<&str>,
+) -> Result<()> {
+    let agent_bus = AgentBusManager::default();
+    for target in target_ids(schedule) {
+        if human_telegram_target_name_for(&target, configured_human_name).is_some() {
+            continue;
+        }
+        agent_bus
+            .resolve_target_agent_id(project_root, &target)
+            .map_err(|err| anyhow!("invalid Ember target {target:?}: {err}"))?;
+    }
+    Ok(())
+}
+
 fn target_names(schedule: &EmberSchedule) -> Vec<String> {
     let ids = target_ids(schedule);
     let mut names = Vec::new();
@@ -1002,6 +1170,73 @@ fn target_names(schedule: &EmberSchedule) -> Vec<String> {
         names.push(name);
     }
     names
+}
+
+fn draft_id(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+fn ember_drafts(state: &EmberStateFile) -> Vec<EmberDraft> {
+    state
+        .drafts
+        .iter()
+        .filter_map(|value| serde_json::from_value::<EmberDraft>(value.clone()).ok())
+        .filter(|draft| !draft.id.trim().is_empty() && !draft.text.trim().is_empty())
+        .collect()
+}
+
+fn find_draft(state: &EmberStateFile, id: &str) -> Result<Option<EmberDraft>> {
+    let Some(value) = state
+        .drafts
+        .iter()
+        .find(|value| draft_id(value) == Some(id))
+    else {
+        return Ok(None);
+    };
+    serde_json::from_value::<EmberDraft>(value.clone())
+        .map(Some)
+        .map_err(|err| anyhow!("invalid Ember draft {id}: {err}"))
+}
+
+fn normalize_draft(mut draft: EmberDraft) -> Result<EmberDraft> {
+    draft.text = draft.text.trim().to_string();
+    if draft.text.is_empty() {
+        bail!("Ember draft requires note text");
+    }
+    if draft.id.trim().is_empty() {
+        draft.id = mint_id("draft");
+    }
+    let now = Utc::now().to_rfc3339();
+    if draft.created_at.trim().is_empty() {
+        draft.created_at = now.clone();
+    }
+    if draft.updated_at.trim().is_empty() {
+        draft.updated_at = now;
+    }
+    Ok(draft)
+}
+
+fn upsert_draft(state: &mut EmberStateFile, draft: EmberDraft) -> Result<()> {
+    let value = serde_json::to_value(&draft)?;
+    if let Some(existing) = state
+        .drafts
+        .iter_mut()
+        .find(|candidate| draft_id(candidate) == Some(draft.id.as_str()))
+    {
+        *existing = value;
+        return Ok(());
+    }
+    if state.drafts.len() >= MAX_DRAFTS {
+        bail!(
+            "Draft limit reached ({MAX_DRAFTS}). Delete one with kota-ember delete <draft-id> first."
+        );
+    }
+    state.drafts.insert(0, value);
+    Ok(())
 }
 
 fn upsert_schedule(state: &mut EmberStateFile, schedule: EmberSchedule) {
@@ -1133,7 +1368,20 @@ fn load_state(project_root: &Path) -> Result<EmberStateFile> {
     state.schema = STORE_SCHEMA.into();
     state.schedules.truncate(MAX_SCHEDULES);
     state.history.truncate(MAX_HISTORY);
+    for schedule in &mut state.schedules {
+        normalize_legacy_not_delivered(&mut schedule.error);
+    }
+    for record in &mut state.history {
+        normalize_legacy_not_delivered(&mut record.error);
+        normalize_legacy_not_delivered(&mut record.reason);
+    }
     Ok(state)
+}
+
+fn normalize_legacy_not_delivered(error: &mut Option<String>) {
+    if error.as_deref() == Some("app not running") {
+        *error = Some(NOT_DELIVERED.into());
+    }
 }
 
 fn load_state_with_pending_dispatch(project_root: &Path) -> Result<EmberStateFile> {
@@ -1202,6 +1450,21 @@ fn apply_dispatch_to_state(
                 .ok_or_else(|| anyhow!("Ember delete dispatch missing scheduleId"))?;
             state.schedules.retain(|schedule| schedule.id != schedule_id);
         }
+        "upsert-draft" => {
+            let draft = request
+                .draft
+                .ok_or_else(|| anyhow!("Ember draft upsert dispatch missing draft"))?;
+            upsert_draft(state, normalize_draft(draft)?)?;
+        }
+        "delete-draft" => {
+            let id = request
+                .draft_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("Ember draft delete dispatch missing draftId"))?;
+            state.drafts.retain(|draft| draft_id(draft) != Some(id));
+        }
         other => bail!("unknown Ember dispatch action: {other}"),
     }
     Ok(())
@@ -1224,7 +1487,6 @@ fn empty_state() -> EmberStateFile {
         drafts: Vec::new(),
         schedules: Vec::new(),
         history: Vec::new(),
-        app_last_seen_at: None,
     }
 }
 
@@ -1270,6 +1532,59 @@ fn dispatch_failed_dir(project_root: &Path) -> PathBuf {
         .join("project-memory")
         .join(".ember")
         .join("failed")
+}
+
+fn dispatch_lock_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join("project-memory")
+        .join(".ember")
+        .join("dispatch.lock")
+}
+
+fn acquire_dispatch_file_lock(project_root: &Path) -> Result<EmberDispatchFileLock> {
+    let path = dispatch_lock_path(project_root);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("invalid Ember dispatch lock path: {}", path.display()))?;
+    fs::create_dir_all(parent)?;
+    let token = Uuid::new_v4().to_string();
+    for attempt in 0..=100 {
+        match fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(err) = file.write_all(token.as_bytes()) {
+                    let _ = fs::remove_file(&path);
+                    return Err(err.into());
+                }
+                return Ok(EmberDispatchFileLock { path, token });
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > Duration::from_secs(10 * 60));
+                if stale {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                if attempt == 100 {
+                    bail!("Ember dispatch is busy; retry the command");
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    unreachable!()
+}
+
+fn with_dispatch_file_lock<T>(project_root: &Path, op: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _lock = acquire_dispatch_file_lock(project_root)?;
+    op()
 }
 
 pub fn install_cli_shim() -> Result<PathBuf> {
@@ -1347,6 +1662,9 @@ pub fn run_cli() -> Result<()> {
 
 fn cli_add(args: Vec<String>) -> Result<()> {
     let project_root = cli_project_root(&args)?;
+    if args.iter().any(|arg| arg == "--draft") {
+        return cli_add_draft(&project_root, &args);
+    }
     let patch = parse_cli_patch(args, true)?;
     let text = patch
         .text
@@ -1396,6 +1714,7 @@ fn cli_add(args: Vec<String>) -> Result<()> {
         updated_by: Some(actor_agent()),
     };
     apply_cli_timing(&mut schedule, patch.timing, now)?;
+    validate_cli_schedule_targets(&project_root, &schedule)?;
     normalize_schedule(&project_root, &mut schedule, actor_agent())?;
     enqueue_dispatch(&project_root, "upsert", Some(schedule.clone()), None)?;
     println!("{}", schedule.id);
@@ -1403,9 +1722,74 @@ fn cli_add(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn cli_add_draft(project_root: &Path, args: &[String]) -> Result<()> {
+    validate_draft_add_args(args)?;
+    let text = read_stdin_body(true)?
+        .ok_or_else(|| anyhow!("kota-ember add --draft requires note text on stdin"))?;
+    let draft = enqueue_new_draft(project_root, text)?;
+    println!("{}", draft.id);
+    Ok(())
+}
+
+fn enqueue_new_draft(project_root: &Path, text: String) -> Result<EmberDraft> {
+    with_dispatch_file_lock(project_root, || {
+        let state = load_state_with_pending_dispatch(project_root)?;
+        if state.drafts.len() >= MAX_DRAFTS {
+            bail!(
+                "Draft limit reached ({MAX_DRAFTS}). Delete one with kota-ember delete <draft-id> first."
+            );
+        }
+        let created_at = Utc::now();
+        let timestamp = created_at.to_rfc3339();
+        let draft = normalize_draft(EmberDraft {
+            id: mint_id("draft"),
+            text,
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+        })?;
+        enqueue_draft_dispatch_at_unlocked(
+            project_root,
+            "upsert-draft",
+            Some(draft.clone()),
+            None,
+            created_at,
+        )?;
+        Ok(draft)
+    })
+}
+
 fn cli_list(args: Vec<String>) -> Result<()> {
     let json = args.iter().any(|arg| arg == "--json");
     let project_root = cli_project_root(&args)?;
+    if args.iter().any(|arg| arg == "--draft") {
+        validate_draft_list_args(&args)?;
+        let state = with_dispatch_file_lock(&project_root, || {
+            load_state_with_pending_dispatch(&project_root)
+        })?;
+        let drafts = ember_drafts(&state);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&drafts)?);
+            return Ok(());
+        }
+        if drafts.is_empty() {
+            println!("No Ember drafts.");
+            return Ok(());
+        }
+        for draft in drafts {
+            println!(
+                "{}  {}",
+                draft.id,
+                draft
+                    .text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        return Ok(());
+    }
     let state = load_state_with_pending_dispatch(&project_root)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&state.schedules)?);
@@ -1428,10 +1812,17 @@ fn cli_list(args: Vec<String>) -> Result<()> {
 
 fn cli_show(args: Vec<String>) -> Result<()> {
     let project_root = cli_project_root(&args)?;
-    let id = args
-        .iter()
-        .find(|arg| !arg.starts_with("--"))
-        .ok_or_else(|| anyhow!("usage: kota-ember show <schedule-id>"))?;
+    let id = cli_item_id(&args)
+        .ok_or_else(|| anyhow!("usage: kota-ember show <schedule-or-draft-id>"))?;
+    if is_draft_id(id) {
+        let state = with_dispatch_file_lock(&project_root, || {
+            load_state_with_pending_dispatch(&project_root)
+        })?;
+        let draft =
+            find_draft(&state, id)?.ok_or_else(|| anyhow!("Ember draft not found: {id}"))?;
+        println!("{}", serde_json::to_string_pretty(&draft)?);
+        return Ok(());
+    }
     let state = load_state_with_pending_dispatch(&project_root)?;
     let schedule = state
         .schedules
@@ -1444,11 +1835,12 @@ fn cli_show(args: Vec<String>) -> Result<()> {
 
 fn cli_update(args: Vec<String>) -> Result<()> {
     let project_root = cli_project_root(&args)?;
-    let id = args
-        .iter()
-        .find(|arg| !arg.starts_with("--"))
+    let id = cli_item_id(&args)
         .cloned()
-        .ok_or_else(|| anyhow!("usage: kota-ember update <schedule-id> [options]"))?;
+        .ok_or_else(|| anyhow!("usage: kota-ember update <schedule-or-draft-id> [options]"))?;
+    if is_draft_id(&id) {
+        return cli_update_draft(&project_root, &id, &args);
+    }
     let patch = parse_cli_patch(args.into_iter().filter(|arg| arg != &id).collect(), false)?;
     let state = load_state_with_pending_dispatch(&project_root)?;
     let mut schedule = state
@@ -1479,6 +1871,7 @@ fn cli_update(args: Vec<String>) -> Result<()> {
                 .to_rfc3339(),
         );
     }
+    validate_cli_schedule_targets(&project_root, &schedule)?;
     schedule.updated_at = Utc::now().to_rfc3339();
     schedule.updated_by = Some(actor_agent());
     normalize_schedule(&project_root, &mut schedule, actor_agent())?;
@@ -1488,14 +1881,141 @@ fn cli_update(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn cli_update_draft(project_root: &Path, id: &str, args: &[String]) -> Result<()> {
+    validate_draft_update_args(args, id)?;
+    let text = read_stdin_body(true)?
+        .ok_or_else(|| anyhow!("kota-ember update <draft-id> requires note text on stdin"))?;
+    with_dispatch_file_lock(project_root, || {
+        let state = load_state_with_pending_dispatch(project_root)?;
+        let mut draft =
+            find_draft(&state, id)?.ok_or_else(|| anyhow!("Ember draft not found: {id}"))?;
+        let updated_at = Utc::now();
+        draft.text = text;
+        draft.updated_at = updated_at.to_rfc3339();
+        let draft = normalize_draft(draft)?;
+        enqueue_draft_dispatch_at_unlocked(
+            project_root,
+            "upsert-draft",
+            Some(draft),
+            None,
+            updated_at,
+        )?;
+        Ok(())
+    })?;
+    println!("{id}");
+    Ok(())
+}
+
 fn cli_delete(args: Vec<String>) -> Result<()> {
     let project_root = cli_project_root(&args)?;
-    let id = args
-        .iter()
-        .find(|arg| !arg.starts_with("--"))
-        .ok_or_else(|| anyhow!("usage: kota-ember delete <schedule-id>"))?;
+    let id = cli_item_id(&args)
+        .ok_or_else(|| anyhow!("usage: kota-ember delete <schedule-or-draft-id>"))?;
+    if is_draft_id(id) {
+        enqueue_draft_dispatch(&project_root, "delete-draft", None, Some(id.clone()))?;
+        println!("{id}");
+        return Ok(());
+    }
     enqueue_dispatch(&project_root, "delete", None, Some(id.clone()))?;
     println!("{id}");
+    Ok(())
+}
+
+fn is_draft_id(id: &str) -> bool {
+    id.starts_with("draft-")
+}
+
+fn cli_item_id(args: &[String]) -> Option<&String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--project-root" {
+            i += 2;
+            continue;
+        }
+        if !args[i].starts_with("--") {
+            return args.get(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_schedule_only_argument(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--to" | "--in" | "--at" | "--idle" | "--cron" | "--end-after" | "--end-at"
+    )
+}
+
+fn validate_draft_add_args(args: &[String]) -> Result<()> {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--draft" => i += 1,
+            "--project-root" => {
+                i += 1;
+                if args.get(i).is_none() {
+                    bail!("--project-root requires a directory");
+                }
+                i += 1;
+            }
+            value if is_schedule_only_argument(value) => {
+                bail!("kota-ember add --draft does not accept schedule argument: {value}");
+            }
+            value if value.starts_with("--") => {
+                bail!("unknown kota-ember add --draft argument: {value}");
+            }
+            value => bail!("unexpected kota-ember add --draft argument: {value}"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_draft_list_args(args: &[String]) -> Result<()> {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--draft" | "--json" => i += 1,
+            "--project-root" => {
+                i += 1;
+                if args.get(i).is_none() {
+                    bail!("--project-root requires a directory");
+                }
+                i += 1;
+            }
+            value if value.starts_with("--") => {
+                bail!("unknown kota-ember list --draft argument: {value}");
+            }
+            value => bail!("unexpected kota-ember list --draft argument: {value}"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_draft_update_args(args: &[String], id: &str) -> Result<()> {
+    let mut i = 0;
+    let mut saw_id = false;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project-root" => {
+                i += 1;
+                if args.get(i).is_none() {
+                    bail!("--project-root requires a directory");
+                }
+                i += 1;
+            }
+            value if value == id && !saw_id => {
+                saw_id = true;
+                i += 1;
+            }
+            value if is_schedule_only_argument(value) => {
+                bail!("Ember draft update does not accept schedule argument: {value}");
+            }
+            value if value.starts_with("--") => {
+                bail!("unknown kota-ember draft update argument: {value}");
+            }
+            value => bail!("unexpected kota-ember draft update argument: {value}"),
+        }
+    }
     Ok(())
 }
 
@@ -1822,8 +2342,72 @@ fn enqueue_dispatch(
         action: action.into(),
         schedule_id,
         schedule,
+        draft_id: None,
+        draft: None,
     };
     let path = outbox.join(format!("{}.json", sanitize_id(&id)));
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&request)?)?;
+    fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+fn enqueue_draft_dispatch(
+    project_root: &Path,
+    action: &str,
+    draft: Option<EmberDraft>,
+    draft_id: Option<String>,
+) -> Result<PathBuf> {
+    with_dispatch_file_lock(project_root, || {
+        let created_at = Utc::now();
+        enqueue_draft_dispatch_at_unlocked(project_root, action, draft, draft_id, created_at)
+    })
+}
+
+#[cfg(test)]
+fn enqueue_draft_dispatch_at(
+    project_root: &Path,
+    action: &str,
+    draft: Option<EmberDraft>,
+    draft_id: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+) -> Result<PathBuf> {
+    with_dispatch_file_lock(project_root, || {
+        enqueue_draft_dispatch_at_unlocked(project_root, action, draft, draft_id, created_at)
+    })
+}
+
+fn enqueue_draft_dispatch_at_unlocked(
+    project_root: &Path,
+    action: &str,
+    draft: Option<EmberDraft>,
+    draft_id: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+) -> Result<PathBuf> {
+    let outbox = dispatch_outbox_dir(project_root);
+    fs::create_dir_all(&outbox)?;
+    let id = draft_id
+        .clone()
+        .or_else(|| draft.as_ref().map(|draft| draft.id.clone()))
+        .unwrap_or_else(|| mint_id("dispatch"));
+    let request = EmberDispatchFile {
+        schema: DISPATCH_SCHEMA.into(),
+        created_at: created_at.to_rfc3339(),
+        project_root: path_string(project_root),
+        action: action.into(),
+        schedule_id: None,
+        schedule: None,
+        draft_id,
+        draft,
+    };
+    let order = created_at
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| created_at.timestamp_micros().saturating_mul(1_000));
+    let nonce = &Uuid::new_v4().simple().to_string()[..12];
+    let path = outbox.join(format!(
+        "draft-{order:020}-{}-{nonce}.json",
+        sanitize_id(&id)
+    ));
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(&request)?)?;
     fs::rename(&tmp, &path)?;
@@ -1851,19 +2435,19 @@ fn print_cli_usage() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  kota-ember add --to <agent-or-human[,agent-or-human...]> (--in <duration> | --at <local time> | --idle | --cron <expr>) <<'EOF'");
+    eprintln!("  kota-ember add --draft <<'EOF'");
     eprintln!("  kota-ember list [--json]");
-    eprintln!("  kota-ember show <schedule-id>");
-    eprintln!("  kota-ember update <schedule-id> [options] [<<'EOF']");
-    eprintln!("  kota-ember delete <schedule-id>");
+    eprintln!("  kota-ember list --draft [--json]");
+    eprintln!("  kota-ember show <schedule-or-draft-id>");
+    eprintln!("  kota-ember update <schedule-or-draft-id> [options] [<<'EOF']");
+    eprintln!("  kota-ember delete <schedule-or-draft-id>");
     eprintln!("  kota-ember install-shim");
     eprintln!();
     eprintln!("Targets:");
     eprintln!("  Agent targets accept an AKA, display name, or agent id.");
-    eprintln!("  Human targets accept the account human name, or __kota_human_telegram__.");
-    eprintln!("  Human reminders are delivered through Laughing Man Telegram at run time.");
-    eprintln!(
-        "  Multiple targets can be comma-separated: --to Gem,agent-123,human_name"
-    );
+    eprintln!("  Human targets accept the configured account name (shown as <your-name>), or __kota_human_telegram__.");
+    eprintln!("  Human reminders appear in the room and also use Laughing Man when configured.");
+    eprintln!("  Multiple targets can be comma-separated: --to 'Gem,agent-123,<your-name>'");
     eprintln!();
     eprintln!("Timing:");
     eprintln!("  --in <duration>       Delay such as 10m, 2h, or 1d.");
@@ -1874,19 +2458,36 @@ fn print_cli_usage() {
     eprintln!("  --end-at <time>       Stop a repeating schedule at a local/RFC3339 datetime.");
     eprintln!("  --project-root <dir>  Override project root detection.");
     eprintln!();
+    eprintln!("Draft notes:");
+    eprintln!(
+        "  add --draft creates a note without targets or timing and never schedules delivery."
+    );
+    eprintln!("  list --draft lists notes only; combine it with --json for structured output.");
+    eprintln!("  show, update, and delete accept draft-* ids as well as schedule-* ids.");
+    eprintln!(
+        "  Draft updates replace note text from stdin; drafts cannot be converted to schedules."
+    );
+    eprintln!(
+        "  Draft notes are limited to {MAX_DRAFTS}; delete one before adding another at the limit."
+    );
+    eprintln!("  Schedule-only arguments are rejected when creating or updating a draft.");
+    eprintln!();
     eprintln!("Prompt body:");
     eprintln!("  add requires prompt text on stdin.");
+    eprintln!("  add --draft and update <draft-id> require non-empty note text on stdin.");
     eprintln!(
         "  update replaces prompt text when stdin is non-empty; otherwise it only patches options."
     );
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  printf 'Review the release notes' | kota-ember add --to Gem --in 2h");
-    eprintln!("  kota-ember add --to human_name --at \"2026-06-18 14:00\" <<'EOF'");
+    eprintln!("  kota-ember add --to '<your-name>' --at \"2026-06-18 14:00\" <<'EOF'");
     eprintln!("  Discuss whether human Ember reminders should use Cloudflare.");
     eprintln!("  EOF");
     eprintln!("  printf 'Updated reminder text' | kota-ember update schedule-abc --at \"2026-06-18 15:00\"");
     eprintln!("  kota-ember list --json");
+    eprintln!("  printf 'Investigate Ember history cleanup' | kota-ember add --draft");
+    eprintln!("  kota-ember list --draft --json");
 }
 
 #[derive(Clone, Debug)]
@@ -2242,6 +2843,32 @@ mod tests {
         }
     }
 
+    fn ember_test_project(label: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("kota-ember-{label}-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_test_agent(project_root: &Path, agent_id: &str, display_name: &str) {
+        let cwd = project_root.join(".agent-workspaces").join(agent_id);
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(
+            cwd.join("agent.yaml"),
+            format!("id: {agent_id}\ndisplay-name: {display_name}\nstatus: active\n"),
+        )
+        .unwrap();
+    }
+
+    fn draft_note(id: &str, text: &str) -> EmberDraft {
+        EmberDraft {
+            id: id.into(),
+            text: text.into(),
+            created_at: "2026-07-30T12:00:00Z".into(),
+            updated_at: "2026-07-30T12:00:00Z".into(),
+        }
+    }
+
     fn schedule_for_reconcile(
         id: &str,
         mode: &str,
@@ -2315,6 +2942,52 @@ mod tests {
     }
 
     #[test]
+    fn cli_add_target_validation_rejects_any_unresolvable_target() {
+        let root = ember_test_project("invalid-add-target");
+        write_test_agent(&root, "agent-alice", "Gem v. kota");
+        let schedule =
+            schedule_with_targets(vec!["Gem", "human_name"], vec!["Gem v. kota", "human_name"]);
+
+        let error = validate_cli_schedule_targets_for(&root, &schedule, Some("老无"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("invalid Ember target \"human_name\""));
+        assert!(error.contains("agent not found for reference: human_name"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_update_target_validation_rejects_unresolvable_final_target() {
+        let root = ember_test_project("invalid-update-target");
+        write_test_agent(&root, "agent-alice", "Gem v. kota");
+        let mut schedule = schedule_with_targets(vec!["agent-alice"], vec!["Gem v. kota"]);
+        schedule.target_agent_ids = vec!["missing-agent".into()];
+
+        let error = validate_cli_schedule_targets_for(&root, &schedule, Some("老无"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("invalid Ember target \"missing-agent\""));
+        assert!(error.contains("agent not found for reference: missing-agent"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_target_validation_accepts_aka_agent_id_and_configured_human_name() {
+        let root = ember_test_project("valid-targets");
+        write_test_agent(&root, "agent-alice", "Gem v. kota");
+        let schedule = schedule_with_targets(
+            vec!["Gem", "@agent-alice", "老无", HUMAN_TELEGRAM_TARGET_ID],
+            vec!["Gem v. kota", "Gem v. kota", "老无", "老无"],
+        );
+
+        validate_cli_schedule_targets_for(&root, &schedule, Some("老无")).unwrap();
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn wait_for_idle_ignores_human_telegram_target() {
         let human_only = schedule_with_targets(vec![HUMAN_TELEGRAM_TARGET_ID], vec!["User"]);
         let working = HashSet::from([HUMAN_TELEGRAM_TARGET_ID.to_string()]);
@@ -2335,7 +3008,10 @@ mod tests {
         let mut schedule = schedule_with_targets(vec![HUMAN_TELEGRAM_TARGET_ID], vec!["human_name"]);
         schedule.id = "schedule-pending".into();
 
-        enqueue_dispatch(&root, "upsert", Some(schedule), None).unwrap();
+        let path = enqueue_dispatch(&root, "upsert", Some(schedule), None).unwrap();
+        let dispatch: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert!(dispatch.get("draftId").is_none());
+        assert!(dispatch.get("draft").is_none());
 
         assert!(load_state(&root).unwrap().schedules.is_empty());
         let state = load_state_with_pending_dispatch(&root).unwrap();
@@ -2366,54 +3042,359 @@ mod tests {
     }
 
     #[test]
-    fn missed_reconcile_keeps_new_idle_schedule_pending() {
-        let last_seen = utc(10, 0, 0);
-        let created_at = utc(10, 2, 54);
-        let now = utc(10, 2, 56);
+    fn pending_draft_upsert_is_visible_to_cli_state_reads() {
+        let root =
+            std::env::temp_dir().join(format!("kota-ember-test-{}", Uuid::new_v4().simple()));
+        let draft = draft_note("draft-pending", "Review the launch note");
+
+        enqueue_draft_dispatch(&root, "upsert-draft", Some(draft), None).unwrap();
+
+        assert!(load_state(&root).unwrap().drafts.is_empty());
+        let state = load_state_with_pending_dispatch(&root).unwrap();
+        let drafts = ember_drafts(&state);
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].id, "draft-pending");
+        assert_eq!(drafts[0].text, "Review the launch note");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pending_draft_delete_is_visible_to_cli_state_reads() {
+        let root =
+            std::env::temp_dir().join(format!("kota-ember-test-{}", Uuid::new_v4().simple()));
         let mut state = empty_state();
-        state.app_last_seen_at = Some(last_seen.to_rfc3339());
+        state
+            .drafts
+            .push(serde_json::to_value(draft_note("draft-delete", "Old note")).unwrap());
+        save_state(&root, &state).unwrap();
+
+        enqueue_draft_dispatch(&root, "delete-draft", None, Some("draft-delete".into())).unwrap();
+
+        assert_eq!(load_state(&root).unwrap().drafts.len(), 1);
+        assert!(load_state_with_pending_dispatch(&root)
+            .unwrap()
+            .drafts
+            .is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn draft_limit_rejects_new_note_without_dropping_existing_data() {
+        let mut state = empty_state();
+        for index in 0..MAX_DRAFTS {
+            state.drafts.push(
+                serde_json::to_value(draft_note(
+                    &format!("draft-{index}"),
+                    &format!("Note {index}"),
+                ))
+                .unwrap(),
+            );
+        }
+        let first_id = draft_id(&state.drafts[0]).unwrap().to_string();
+
+        let error = upsert_draft(&mut state, draft_note("draft-overflow", "One too many"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Draft limit reached (20)"));
+        assert_eq!(state.drafts.len(), MAX_DRAFTS);
+        assert_eq!(draft_id(&state.drafts[0]), Some(first_id.as_str()));
+        assert!(find_draft(&state, "draft-overflow").unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_draft_actions_preserve_delete_then_add_order_at_limit() {
+        let root =
+            std::env::temp_dir().join(format!("kota-ember-test-{}", Uuid::new_v4().simple()));
+        let mut state = empty_state();
+        for index in 0..(MAX_DRAFTS - 1) {
+            state.drafts.push(
+                serde_json::to_value(draft_note(
+                    &format!("draft-existing-{index}"),
+                    &format!("Note {index}"),
+                ))
+                .unwrap(),
+            );
+        }
+        state
+            .drafts
+            .push(serde_json::to_value(draft_note("draft-zzz-old", "Old note")).unwrap());
+        save_state(&root, &state).unwrap();
+
+        let delete_at = utc(12, 0, 0);
+        enqueue_draft_dispatch_at(
+            &root,
+            "delete-draft",
+            None,
+            Some("draft-zzz-old".into()),
+            delete_at,
+        )
+        .unwrap();
+        enqueue_draft_dispatch_at(
+            &root,
+            "upsert-draft",
+            Some(draft_note("draft-aaa-new", "New note")),
+            None,
+            delete_at + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+
+        let projected = load_state_with_pending_dispatch(&root).unwrap();
+        assert_eq!(projected.drafts.len(), MAX_DRAFTS);
+        assert!(find_draft(&projected, "draft-zzz-old").unwrap().is_none());
+        assert!(find_draft(&projected, "draft-aaa-new").unwrap().is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_draft_adds_reserve_the_last_slot_once() {
+        use std::sync::{Arc, Barrier};
+
+        let root =
+            std::env::temp_dir().join(format!("kota-ember-test-{}", Uuid::new_v4().simple()));
+        let mut state = empty_state();
+        for index in 0..(MAX_DRAFTS - 1) {
+            state.drafts.push(
+                serde_json::to_value(draft_note(
+                    &format!("draft-existing-{index}"),
+                    &format!("Note {index}"),
+                ))
+                .unwrap(),
+            );
+        }
+        save_state(&root, &state).unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let first = {
+            let root = root.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                enqueue_new_draft(&root, "First concurrent note".into())
+            })
+        };
+        let second = {
+            let root = root.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                enqueue_new_draft(&root, "Second concurrent note".into())
+            })
+        };
+        barrier.wait();
+
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert!(results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .any(|error| error.to_string().contains("Draft limit reached (20)")));
+        assert_eq!(
+            load_state_with_pending_dispatch(&root)
+                .unwrap()
+                .drafts
+                .len(),
+            MAX_DRAFTS
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_schedule_and_draft_dispatches_preserve_both_updates() {
+        use std::sync::{Arc, Barrier};
+
+        let root =
+            std::env::temp_dir().join(format!("kota-ember-test-{}", Uuid::new_v4().simple()));
+        let mut schedule =
+            schedule_with_targets(vec![HUMAN_TELEGRAM_TARGET_ID], vec!["human_name"]);
+        schedule.id = "schedule-concurrent".into();
+        let schedule_path = enqueue_dispatch(&root, "upsert", Some(schedule), None).unwrap();
+        let draft_path = enqueue_draft_dispatch(
+            &root,
+            "upsert-draft",
+            Some(draft_note("draft-concurrent", "Keep this note")),
+            None,
+        )
+        .unwrap();
+        let processing = dispatch_processing_dir(&root);
+        let delivered = dispatch_delivered_dir(&root);
+        let failed = dispatch_failed_dir(&root);
+        fs::create_dir_all(&processing).unwrap();
+        fs::create_dir_all(&delivered).unwrap();
+        fs::create_dir_all(&failed).unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let schedule_consumer = {
+            let root = root.clone();
+            let path = schedule_path.clone();
+            let processing = processing.clone();
+            let delivered = delivered.clone();
+            let failed = failed.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                consume_dispatch_path(&root, &path, &processing, &delivered, &failed, || {})
+            })
+        };
+        let draft_consumer = {
+            let root = root.clone();
+            let path = draft_path.clone();
+            let processing = processing.clone();
+            let delivered = delivered.clone();
+            let failed = failed.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                consume_dispatch_path(&root, &path, &processing, &delivered, &failed, || {})
+            })
+        };
+        barrier.wait();
+        schedule_consumer.join().unwrap().unwrap();
+        draft_consumer.join().unwrap().unwrap();
+
+        let state = load_state(&root).unwrap();
+        assert!(state
+            .schedules
+            .iter()
+            .any(|schedule| schedule.id == "schedule-concurrent"));
+        assert!(find_draft(&state, "draft-concurrent").unwrap().is_some());
+        assert_eq!(fs::read_dir(failed).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn draft_cli_arguments_reject_schedule_options() {
+        assert!(validate_draft_add_args(&["--draft".into()]).is_ok());
+        assert!(validate_draft_list_args(&["--draft".into(), "--json".into()]).is_ok());
+        let item_args = vec![
+            "--project-root".into(),
+            "/tmp/project".into(),
+            "draft-one".into(),
+        ];
+        assert_eq!(
+            cli_item_id(&item_args).map(String::as_str),
+            Some("draft-one")
+        );
+        assert!(
+            validate_draft_add_args(&["--draft".into(), "--to".into(), "agent-one".into()])
+                .unwrap_err()
+                .to_string()
+                .contains("does not accept schedule argument: --to")
+        );
+        assert!(validate_draft_update_args(
+            &["draft-one".into(), "--at".into(), "tomorrow".into()],
+            "draft-one"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("does not accept schedule argument: --at"));
+    }
+
+    #[test]
+    fn overdue_reconcile_keeps_idle_schedule_pending() {
+        let changed_at = utc(9, 50, 0);
+        let due_at = utc(10, 0, 0);
+        let now = utc(10, 3, 0);
+        let mut state = empty_state();
         state.schedules.push(schedule_for_reconcile(
-            "schedule-new-idle",
+            "schedule-idle",
             "idle",
-            created_at,
-            created_at,
+            due_at,
+            changed_at,
         ));
 
-        let changed = reconcile_missed_app_not_running(&mut state, now);
+        let reconciled = reconcile_overdue_not_delivered(&mut state, now);
 
-        assert!(!changed);
+        assert_eq!(reconciled, 0);
         assert_eq!(state.schedules[0].status, "scheduled");
         assert_eq!(state.schedules[0].error, None);
         assert!(state.history.is_empty());
     }
 
     #[test]
-    fn missed_reconcile_fails_existing_schedule_due_while_app_absent() {
-        let last_seen = utc(10, 0, 0);
+    fn overdue_reconcile_honors_full_two_minute_grace() {
         let changed_at = utc(9, 50, 0);
-        let due_at = utc(10, 1, 0);
+        let due_at = utc(10, 1, 1);
         let now = utc(10, 3, 0);
         let mut state = empty_state();
-        state.app_last_seen_at = Some(last_seen.to_rfc3339());
         state.schedules.push(schedule_for_reconcile(
-            "schedule-old-delay",
+            "schedule-in-grace",
             "delay",
             due_at,
             changed_at,
         ));
 
-        let changed = reconcile_missed_app_not_running(&mut state, now);
+        let reconciled = reconcile_overdue_not_delivered(&mut state, now);
 
-        assert!(changed);
+        assert_eq!(reconciled, 0);
+        assert_eq!(state.schedules[0].status, "scheduled");
+        assert_eq!(state.schedules[0].error, None);
+        assert!(state.history.is_empty());
+    }
+
+    #[test]
+    fn overdue_reconcile_marks_schedule_not_delivered_at_two_minutes() {
+        let changed_at = utc(9, 50, 0);
+        let due_at = utc(10, 1, 0);
+        let now = utc(10, 3, 0);
+        let mut state = empty_state();
+        state.schedules.push(schedule_for_reconcile(
+            "schedule-overdue",
+            "delay",
+            due_at,
+            changed_at,
+        ));
+
+        let reconciled = reconcile_overdue_not_delivered(&mut state, now);
+
+        assert_eq!(reconciled, 1);
         assert_eq!(state.schedules[0].status, "failed");
-        assert_eq!(state.schedules[0].error.as_deref(), Some("app not running"));
+        assert_eq!(state.schedules[0].error.as_deref(), Some(NOT_DELIVERED));
         assert_eq!(state.history.len(), 1);
         assert_eq!(state.history[0].status, "failed");
+        assert_eq!(state.history[0].error.as_deref(), Some(NOT_DELIVERED));
         assert_eq!(state.history[0].missed_runs, Some(1));
         let due_at_text = due_at.to_rfc3339();
         assert_eq!(
             state.history[0].scheduled_for.as_deref(),
             Some(due_at_text.as_str())
+        );
+    }
+
+    #[test]
+    fn overdue_reconcile_keeps_repeating_schedule_active_and_flagged() {
+        let changed_at = utc(9, 50, 0);
+        let due_at = utc(10, 0, 0);
+        let now = utc(10, 3, 0);
+        let mut schedule = schedule_for_reconcile("schedule-repeat", "delay", due_at, changed_at);
+        schedule.repeat_enabled = Some(true);
+        schedule.repeat_kind = Some("fixed".into());
+        schedule.repeat_every_minutes = Some(60);
+        schedule.end_mode = Some("never".into());
+        let mut state = empty_state();
+        state.schedules.push(schedule);
+
+        let reconciled = reconcile_overdue_not_delivered(&mut state, now);
+
+        assert_eq!(reconciled, 1);
+        assert_eq!(state.schedules[0].status, "scheduled");
+        assert_eq!(state.schedules[0].error.as_deref(), Some(NOT_DELIVERED));
+        assert!(parse_rfc3339(&state.schedules[0].next_run_at).is_some_and(|next| next > now));
+        assert_eq!(state.history[0].status, "failed");
+        assert_eq!(state.history[0].error.as_deref(), Some(NOT_DELIVERED));
+    }
+
+    #[test]
+    fn delivery_outcome_keeps_partial_success_as_warning() {
+        let outcome = EmberDeliveryOutcome {
+            delivered: 1,
+            failed: vec!["Agent Two: unavailable".into()],
+        };
+
+        assert_eq!(
+            outcome.partial_error().as_deref(),
+            Some("Some targets failed: Agent Two: unavailable")
         );
     }
 }

@@ -40,7 +40,6 @@ import {
   bbsHumanReply,
   fileImageDataUrl,
   lmMessageLog,
-  lmSendEmberReminder,
   lmSetMuted,
   lmStart,
   lmStatus,
@@ -60,6 +59,7 @@ import {
   bartenderStatus,
   bartenderSyncLocal,
   bartenderSyncReceipt,
+  emberDeliverHumanReminder,
   emberConsolidateDreams,
   emberPrepareDreams,
   emberScheduleSave,
@@ -100,6 +100,7 @@ import {
   createEmberHistoryRecord,
   createEmberSchedule,
   emberActorHuman,
+  EMBER_NOT_DELIVERED,
   HUMAN_TELEGRAM_TARGET_ID,
   emberScheduleSummary,
   emberScheduleTargetIds,
@@ -167,7 +168,7 @@ export type ResolveDreamProjectTargets = () => Promise<readonly DreamProjectTarg
 type EmberModalTab = 'scheduled' | 'drafts' | 'history';
 type EmberSendMode = 'idle' | 'delay' | 'at';
 type EmberEditorTarget = { kind: 'new' | 'schedule' | 'draft'; id?: string };
-type EmberTargetOption = { id: AgentId; name: string; kind: 'agent' | 'human-telegram' };
+type EmberTargetOption = { id: AgentId; name: string; kind: 'agent' | 'human' };
 type BbsFilter = 'tagged' | 'all';
 type BartenderConflictBlocker = {
   agentId: AgentId;
@@ -859,7 +860,7 @@ function delayTotalMinutes(hours: number, minutes: number): number {
 
 function emberCountdownLabel(schedule: EmberSchedule, nowMs: number): string {
   if (schedule.status === 'paused') return 'Paused';
-  if (schedule.status === 'failed') return 'Failed';
+  if (schedule.status === 'failed') return EMBER_NOT_DELIVERED;
   if (schedule.status === 'sent') return 'Sent';
   const target = Date.parse(schedule.nextRunAt);
   if (!Number.isFinite(target)) return emberTimeLabel(schedule.nextRunAt);
@@ -876,11 +877,11 @@ function emberCountdownLabel(schedule: EmberSchedule, nowMs: number): string {
 }
 
 function emberHistoryStatusLabel(record: EmberHistoryRecord): string {
-  return record.status === 'failed' ? 'Failed' : 'Delivered';
+  return record.status === 'failed' ? EMBER_NOT_DELIVERED : 'Delivered';
 }
 
 function emberHistoryKindLabel(record: EmberHistoryRecord): string {
-  if (record.status === 'failed') return 'Failed';
+  if (record.status === 'failed') return EMBER_NOT_DELIVERED;
   return record.triggeredBy === 'manual' ? 'Manually triggered' : 'Delivered';
 }
 
@@ -1221,22 +1222,19 @@ export function RightColumn({
     }
     return out;
   }, [agentMeta, roomAgents]);
-  const canTargetHumanTelegram = lm?.configured === true && typeof lm.ownerUserId === 'number';
   const emberTargetOptions = useMemo<EmberTargetOption[]>(() => {
     const out: EmberTargetOption[] = emberAgentOptions.map((agent) => ({
       ...agent,
       kind: 'agent',
     }));
-    if (canTargetHumanTelegram) {
-      const humanName = bbsUserIdentity?.name.trim() || 'User';
-      out.push({
-        id: HUMAN_TELEGRAM_TARGET_ID,
-        name: humanName,
-        kind: 'human-telegram',
-      });
-    }
+    const humanName = bbsUserIdentity?.name.trim() || 'User';
+    out.push({
+      id: HUMAN_TELEGRAM_TARGET_ID,
+      name: humanName,
+      kind: 'human',
+    });
     return out;
-  }, [bbsUserIdentity, canTargetHumanTelegram, emberAgentOptions]);
+  }, [bbsUserIdentity, emberAgentOptions]);
   const emberTargetNameById = useMemo(() => (
     new Map(emberTargetOptions.map((target) => [target.id, target.name] as const))
   ), [emberTargetOptions]);
@@ -1454,15 +1452,17 @@ export function RightColumn({
     return result;
   }, []);
 
-  const sendEmberTelegramReminder = useCallback(async (schedule: EmberSchedule) => {
-    await lmSendEmberReminder({
+  const sendEmberHumanReminder = useCallback(async (schedule: EmberSchedule) => {
+    const result = await emberDeliverHumanReminder({
+      projectRoot: emberProjectRoot,
       eventId: emberEventId('reminder', schedule.id, HUMAN_TELEGRAM_TARGET_ID),
       text: schedule.text,
-      projectId: workspace?.projectId ?? emberProjectRoot ?? 'current',
-      projectName: workspace ? workspaceProjectDisplayName(workspace) : 'Current project',
-      projectRoot: emberProjectRoot,
     });
-  }, [emberProjectRoot, workspace]);
+    if (!result.delivered) {
+      throw new Error(result.warnings.join('; ') || 'Could not deliver the reminder to the human target.');
+    }
+    return result;
+  }, [emberProjectRoot]);
 
   const runEmberSchedule = useCallback(async (schedule: EmberSchedule, source: 'auto' | 'manual') => {
     if (emberRunningRef.current.has(schedule.id)) return;
@@ -1473,8 +1473,10 @@ export function RightColumn({
       const targetAgentIds = emberScheduleTargetIds(schedule);
       const targetNames = emberScheduleTargetNames(schedule);
       const results = await Promise.allSettled(targetAgentIds.map(async (agentId, index) => {
+        let warnings: string[] = [];
         if (isHumanTelegramTarget(agentId)) {
-          await sendEmberTelegramReminder(schedule);
+          const result = await sendEmberHumanReminder(schedule);
+          warnings = result.warnings;
         } else {
           await sendEmberBusMessage(
             emberProjectRoot,
@@ -1487,16 +1489,18 @@ export function RightColumn({
         return {
           id: agentId,
           name: targetNames[index] ?? emberTargetNameFor(agentId),
+          warnings,
         };
       }));
       const delivered = results.flatMap((result) => (
         result.status === 'fulfilled' ? [result.value] : []
       ));
-      const failures = results.flatMap((result, index) => (
-        result.status === 'rejected'
-          ? [`${targetNames[index] ?? (targetAgentIds[index] ? emberTargetNameFor(targetAgentIds[index]!) : 'target')}: ${String(result.reason)}`]
-          : []
-      ));
+      const failures = results.flatMap((result, index) => {
+        if (result.status === 'rejected') {
+          return [`${targetNames[index] ?? (targetAgentIds[index] ? emberTargetNameFor(targetAgentIds[index]!) : 'target')}: ${String(result.reason)}`];
+        }
+        return result.value.warnings.map((warning) => `${result.value.name}: ${warning}`);
+      });
       if (delivered.length === 0) {
         throw new Error(failures.join('; ') || 'Ember schedule could not reach any target.');
       }
@@ -1524,7 +1528,8 @@ export function RightColumn({
       }));
       setEmberMessage(`Sent to ${delivered.map((result) => result.name).join(', ')}.${partialError ? ` ${partialError}` : ''}`);
     } catch (err) {
-      const message = String(err);
+      console.warn('[ember] schedule delivery failed', err);
+      const message = EMBER_NOT_DELIVERED;
       const sentAt = new Date().toISOString();
       setEmberState((current) => ({
         ...current,
@@ -1547,7 +1552,7 @@ export function RightColumn({
       emberRunningRef.current.delete(schedule.id);
       setEmberBusy((current) => (current === schedule.id ? null : current));
     }
-  }, [emberProjectRoot, emberTargetNameFor, sendEmberBusMessage, sendEmberTelegramReminder]);
+  }, [emberProjectRoot, emberTargetNameFor, sendEmberBusMessage, sendEmberHumanReminder]);
 
   const resetEmberEditor = useCallback(() => {
     const now = Date.now();
@@ -1937,31 +1942,14 @@ export function RightColumn({
       ? `Ember is consolidating dreams across ${roots.length} projects.`
       : 'Ember is consolidating dreams.');
     try {
-      // This serializes the PWR UP fanout path. If other Dream entrypoints start
-      // writing concurrently, move the guard behind emberConsolidateDreams and
-      // key it by the account dreams path.
-      let processedEntryCount = 0;
-      let archivedEntryCount = 0;
-      let activeEntryCount = 0;
-      const errors: string[] = [];
-      for (const root of roots) {
-        try {
-          const state = await emberConsolidateDreams({
-            projectRoot: root,
-            provider: violetSummaryConfig.provider,
-          });
-          processedEntryCount += state.processedEntryCount;
-          archivedEntryCount += state.archivedEntryCount;
-          activeEntryCount = Math.max(activeEntryCount, state.activeEntryCount);
-          if (state.error) errors.push(state.error);
-        } catch (err) {
-          errors.push(String(err));
-        }
-      }
-      const message = errors.length > 0
-        ? `Dream consolidation finished with ${errors.length} error${errors.length === 1 ? '' : 's'}.`
-        : processedEntryCount > 0
-          ? `Dreams consolidated: ${activeEntryCount} active, ${archivedEntryCount} archived.`
+      const state = await emberConsolidateDreams({
+        projectRoots: roots,
+        provider: violetSummaryConfig.provider,
+      });
+      const message = state.error
+        ? 'Dream consolidation finished with 1 error.'
+        : state.processedEntryCount > 0
+          ? `Dreams consolidated: ${state.activeEntryCount} active, ${state.archivedEntryCount} archived.`
           : 'No new dream entries found.';
       setEmberMessage(message);
       setDreamVigilReady(true);
@@ -2910,6 +2898,9 @@ export function RightColumn({
   const activeEmberSchedules = emberSchedules.filter((schedule) => (
     schedule.status !== 'sent' && schedule.id !== emberBusy
   ));
+  const hasEmberDeliveryFailure = emberSchedules.some((schedule) => (
+    !!schedule.error?.trim()
+  ));
   const emberRunBusy = emberBusy ? emberSchedules.find((schedule) => schedule.id === emberBusy) ?? null : null;
   const activeEmberCount = activeEmberSchedules.length;
   const emberDraftCount = emberDrafts.length;
@@ -3763,7 +3754,9 @@ export function RightColumn({
             className={`ember-card ${dreamOverlay !== 'off' ? 'dream-active' : ''}`}
             role="button"
             tabIndex={0}
-            aria-label="Open Ember schedules and drafts"
+            aria-label={hasEmberDeliveryFailure
+              ? 'Open Ember schedules and drafts, not delivered'
+              : 'Open Ember schedules and drafts'}
             onClick={() => setEmberModalOpen(true)}
             onKeyDown={(event) => {
               if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -3772,10 +3765,13 @@ export function RightColumn({
             }}
           >
             <div className="ember-card-head">
-              <span className="system-agent-avatar tavern-avatar-art system-ember" aria-hidden>
-                <span />
-                <i />
-                <b />
+              <span className="ember-card-avatar" aria-hidden>
+                <span className="system-agent-avatar tavern-avatar-art system-ember">
+                  <span />
+                  <i />
+                  <b />
+                </span>
+                {hasEmberDeliveryFailure && <span className="ember-delivery-alert" />}
               </span>
               <span className="system-agent-copy">
                 <b>Ember</b>
@@ -4078,10 +4074,10 @@ export function RightColumn({
                       ) : emberTargetOptions.map((target) => {
                         const selected = emberTargets.includes(target.id);
                         const meta = target.kind === 'agent' ? agentMeta?.[target.id] : null;
-                        const avatarId = target.kind === 'human-telegram'
+                        const avatarId = target.kind === 'human'
                           ? bbsUserIdentity?.avatarId ?? 'user-default'
                           : meta?.avatarId;
-                        const avatarClass = target.kind === 'human-telegram'
+                        const avatarClass = target.kind === 'human'
                           ? avatarClassForId(avatarId, null)
                           : meta?.avatarClass ?? avatarClassForAgentFallback(null, target.id);
                         const avatarStyle = avatarImageStyleForId(avatarId);
@@ -4089,7 +4085,7 @@ export function RightColumn({
                           <button
                             key={target.id}
                             type="button"
-                            className={`${selected ? 'selected' : ''} ${target.kind === 'human-telegram' ? 'human-telegram' : ''}`.trim()}
+                            className={`${selected ? 'selected' : ''} ${target.kind === 'human' ? 'human' : ''}`.trim()}
                             aria-pressed={selected}
                             onClick={() => {
                               setEmberTargets((current) => {
@@ -4263,7 +4259,7 @@ export function RightColumn({
                             {repeating ? 'Repeat schedule' : 'One-time schedule'}
                           </span>
                           <span className={`ember-card-status ${schedule.status}`}>
-                            {schedule.status === 'scheduled' ? emberCountdownLabel(schedule, emberNow) : schedule.status}
+                            {emberCountdownLabel(schedule, emberNow)}
                           </span>
                           <b>{emberScheduleSummary(schedule)} · {emberScheduleTargetLabel(schedule)}</b>
                           <small>{emberScheduleAttribution(schedule)}</small>

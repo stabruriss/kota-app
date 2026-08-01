@@ -2,6 +2,7 @@ import {
   onVioletRoomChanged,
   syncVioletRoom,
   type VioletRoomRequest,
+  type VioletRoomState,
 } from '../pty-client';
 
 const BURST_DELAYS_MS = [0, 1500, 5000, 12000, 25000] as const;
@@ -105,6 +106,24 @@ export function requestVioletProjectAgentSync(
   }).catch(() => {});
 }
 
+export function syncVioletProjectAgentsNow(
+  projectRoot: string | null,
+  targetAgentIds: readonly string[],
+): Promise<VioletRoomState> {
+  const agentIds = normalizeIds(targetAgentIds);
+  const engine = ENGINES.get(engineKey(projectRoot));
+  if (engine) return engine.syncAgentsNow(agentIds);
+  // Without an active engine there is no authoritative frontend roster.
+  // A full sync lets the backend discover the roster instead of replacing
+  // the project watcher with only the agent that just exited.
+  return syncVioletRoom({
+    projectRoot,
+    limit: DEFAULT_LIMIT,
+    agentIds: null,
+    watchAgentIds: null,
+  });
+}
+
 class VioletProjectSyncEngine {
   private nextSubscriptionId = 1;
   private subscriptions = new Map<number, EngineSubscription>();
@@ -121,6 +140,7 @@ class VioletProjectSyncEngine {
   private rerunAfterFlight = false;
   private stopped = false;
   private unlistenChanged: (() => void) | null = null;
+  private syncTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly projectRoot: string | null) {
     void onVioletRoomChanged((payload) => {
@@ -225,6 +245,17 @@ class VioletProjectSyncEngine {
     this.scheduleReconcile();
   }
 
+  syncAgentsNow(targetAgentIds: readonly string[]): Promise<VioletRoomState> {
+    const agentIds = normalizeIds(targetAgentIds);
+    const hasAuthoritativeRoster = this.roomAgentIds.length > 0;
+    return this.enqueueSync({
+      projectRoot: this.projectRoot,
+      limit: DEFAULT_LIMIT,
+      agentIds: hasAuthoritativeRoster ? agentIds : null,
+      watchAgentIds: hasAuthoritativeRoster ? this.roomAgentIds : null,
+    });
+  }
+
   private scheduleWorkingBurst(agentIds: readonly string[] = this.workingAgentIds): void {
     this.burstAgentIds = normalizeIds([
       ...this.burstAgentIds,
@@ -314,7 +345,7 @@ class VioletProjectSyncEngine {
             ? this.roomAgentIds
             : null,
       };
-      await syncVioletRoom(request);
+      await this.enqueueSync(request);
     } catch {
       // Best-effort; the next native-change/reconcile/prompt will retry.
     } finally {
@@ -347,6 +378,17 @@ class VioletProjectSyncEngine {
   private clearBurstTimers(): void {
     for (const timer of this.burstTimers) window.clearTimeout(timer);
     this.burstTimers = [];
+  }
+
+  private enqueueSync(request: VioletRoomRequest): Promise<VioletRoomState> {
+    const run = this.syncTail
+      .catch(() => undefined)
+      .then(() => syncVioletRoom(request));
+    this.syncTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 }
 

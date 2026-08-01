@@ -41,8 +41,16 @@ import {
 } from './chrome/TavernModal';
 import { ProjectSetupModal } from './chrome/ProjectSetupModal';
 import { Hearth } from './chrome/Hearth';
-import { useAgentRuntime } from './hooks/useAgentRuntime';
-import type { AgentCli, AgentSpawnRequest, AgentSummary } from './types/agent-pty';
+import {
+  useAgentRuntime,
+  type AgentRuntimeExitContext,
+} from './hooks/useAgentRuntime';
+import {
+  isAgentCli,
+  type AgentCli,
+  type AgentSpawnRequest,
+  type AgentSummary,
+} from './types/agent-pty';
 import {
   GITHUB_CLI_INSTALL_URL,
   GITHUB_CLI_LOGIN_COMMAND,
@@ -56,6 +64,7 @@ import {
   ghAuthStatus,
   hasTauriRuntime,
   incarnateTavernHero,
+  inspectProjectAgentIdentities,
   isAgentSessionLeaseConflictError,
   inspectWorkspaceProject,
   kageBunshinProjectAgent,
@@ -94,6 +103,7 @@ import {
   type SupportedShellStatus,
   type TavernHeroProfileDraft,
   type VioletChatMessage,
+  type WorkspaceAgentSpec,
   type WorkspaceProject,
 } from './pty-client';
 import type { SceneKey } from './mock/fixtures';
@@ -109,6 +119,7 @@ import {
 } from './chrome/ProjectAgentName';
 import { avatarClassForId, refreshUserHeroAvatars } from './lib/hero-avatars';
 import { emitVioletComposerSent } from './chrome/violet-room-events';
+import { reconcileVioletComposerAfterAgentExit } from './chrome/violet-composer-exit';
 import { formatAgentPromptInput, normalizeAgentPromptPayload } from './lib/agent-prompt';
 import { mintProjectAgentId } from './lib/project-agent-ids';
 import { agentSlotIndexFromKey, MAX_AGENT_SLOTS } from './lib/agent-slots';
@@ -117,11 +128,22 @@ import {
   type ExistingAgentLaunchResult,
 } from './lib/existing-agent-launch';
 import {
+  appendWorkspaceTabOrder,
+  normalizeWorkspaceTabOrder,
+  reconcileDiscoveredWorkspaceTabOrder,
+  removeWorkspaceTabOrder,
+  reorderVisibleWorkspaceTabOrder,
+} from './lib/workspace-tab-order';
+import {
   connectVioletProjectSyncEngine,
   requestVioletProjectAgentSync,
   requestVioletProjectPromptSync,
   type VioletProjectSyncHandle,
 } from './lib/violet-sync-engine';
+import type {
+  RoomQuoteInsertResult,
+  RoomQuoteReference,
+} from './lib/room-quote';
 
 const PRIVATE_CHAT_UI_ENABLED = false;
 const KAGE_BUNSHIN_UI_ENABLED = false;
@@ -165,6 +187,8 @@ const LS_DEV_PROJECT_ROOT = 'kota-v2.dev.project-root';
 const LS_VIOLET_UNREAD = 'kota-v2.violet-unread.v1';
 const LS_AGENT_LAYOUT = 'kota-v2.agent-layout.v1';
 const AGENT_LAYOUT_WRITE_DEBOUNCE_MS = 800;
+const AGENT_HYDRATION_RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
+const AGENT_HYDRATION_IPC_TIMEOUT_MS = 10_000;
 // Legacy localStorage layouts predate the clockwise slot order (layout file
 // v2); remap them so agents keep their physical seats during migration.
 const LEGACY_SEAT_ORDER_TO_CLOCKWISE = [6, 0, 1, 2, 7, 5, 4, 3] as const;
@@ -222,6 +246,16 @@ interface AgentHydrationProgress {
   projectId: ProjectId;
   completed: number;
   total: number;
+}
+
+interface ConfirmedAgentHydration {
+  projectId: ProjectId;
+  generation: number;
+  rosterIds: AgentId[];
+}
+
+interface AgentHydrationFailure {
+  projectId: ProjectId;
 }
 
 interface RoomUiSnapshot {
@@ -483,6 +517,17 @@ function projectAgentIdentityFromDetail(
   };
 }
 
+function projectAgentIdentityFromWorkspaceAgent(agent: WorkspaceAgentSpec): ProjectAgentIdentity {
+  return {
+    agentId: agent.agentId,
+    displayName: agent.agentId,
+    sourceHeroId: 'unknown',
+    status: 'active',
+    provider: agent.cli,
+    avatarId: null,
+  };
+}
+
 function upsertProjectAgentIdentity(
   identities: readonly ProjectAgentIdentity[],
   nextIdentity: ProjectAgentIdentity,
@@ -512,7 +557,7 @@ function displayableProjectAgentStatus(status: string): boolean {
 }
 
 function orderedProjectAgentIds(
-  workspaceAgents: readonly AgentSpawnRequest[],
+  workspaceAgents: readonly WorkspaceAgentSpec[],
   identities: readonly ProjectAgentIdentity[],
 ): AgentId[] {
   const seen = new Set<string>();
@@ -611,6 +656,105 @@ function provisionalLayoutForWorkspace(workspace: WorkspaceProject | null | unde
   const ids = provisionalProjectAgentIds(workspace);
   if (ids.length === 0) return null;
   return tableLayoutForProjectAgentsWithSavedSlots(workspace?.projectId, ids);
+}
+
+function sameOptionalStrings(
+  left: readonly string[] | null | undefined,
+  right: readonly string[] | null | undefined,
+): boolean {
+  const leftItems = left ?? [];
+  const rightItems = right ?? [];
+  return leftItems.length === rightItems.length
+    && leftItems.every((item, index) => item === rightItems[index]);
+}
+
+function sameWorkspaceAgents(
+  left: readonly WorkspaceAgentSpec[],
+  right: readonly WorkspaceAgentSpec[],
+): boolean {
+  return left.length === right.length && left.every((agent, index) => {
+    const other = right[index];
+    return !!other
+      && agent.agentId === other.agentId
+      && agent.cli === other.cli
+      && agent.cwd === other.cwd
+      && agent.projectRoot === other.projectRoot
+      && (agent.worktreeRoot ?? null) === (other.worktreeRoot ?? null)
+      && (agent.sharedDir ?? null) === (other.sharedDir ?? null)
+      && (agent.rulesDir ?? null) === (other.rulesDir ?? null)
+      && (agent.adapterPath ?? null) === (other.adapterPath ?? null)
+      && sameOptionalStrings(agent.args, other.args)
+      && (agent.sessionId ?? null) === (other.sessionId ?? null)
+      && (agent.projectId ?? null) === (other.projectId ?? null)
+      && (agent.projectRemote ?? null) === (other.projectRemote ?? null)
+      && (agent.projectBaseRef ?? null) === (other.projectBaseRef ?? null)
+      && !!agent.takeover === !!other.takeover;
+  });
+}
+
+function refreshedActiveWorkspace(
+  current: WorkspaceProject | null,
+  requestedProjectId: ProjectId,
+  fresh: WorkspaceProject,
+): WorkspaceProject | null {
+  if (!current || current.projectId !== requestedProjectId) return current;
+  return sameWorkspaceAgents(current.agents, fresh.agents) ? current : fresh;
+}
+
+function waitForAgentHydrationRetry(delayMs: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(true);
+    }, delayMs);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      resolve(false);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+class AgentHydrationTimeoutError extends Error {
+  constructor() {
+    super('agent hydration timed out');
+    this.name = 'AgentHydrationTimeoutError';
+  }
+}
+
+class AgentHydrationCancelledError extends Error {
+  constructor() {
+    super('agent hydration cancelled');
+    this.name = 'AgentHydrationCancelledError';
+  }
+}
+
+function withAgentHydrationDeadline<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new AgentHydrationCancelledError());
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer = 0;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const settle = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      complete();
+    };
+    const onAbort = () => settle(() => reject(new AgentHydrationCancelledError()));
+    timer = window.setTimeout(() => {
+      settle(() => reject(new AgentHydrationTimeoutError()));
+    }, AGENT_HYDRATION_IPC_TIMEOUT_MS);
+    signal.addEventListener('abort', onAbort, { once: true });
+    operation.then(
+      (value) => settle(() => resolve(value)),
+      (err) => settle(() => reject(err)),
+    );
+  });
 }
 
 function workspaceProjectName(workspace: WorkspaceProject): string {
@@ -738,14 +882,7 @@ function workspaceProjectIds(workspaces: readonly WorkspaceProject[]): ProjectId
 }
 
 function uniqueProjectIds(ids: readonly unknown[]): ProjectId[] {
-  const seen = new Set<string>();
-  const next: ProjectId[] = [];
-  for (const id of ids) {
-    if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue;
-    seen.add(id);
-    next.push(id);
-  }
-  return next;
+  return normalizeWorkspaceTabOrder(ids);
 }
 
 function sameProjectIdOrder(left: readonly ProjectId[], right: readonly ProjectId[]): boolean {
@@ -768,16 +905,16 @@ function persistWorkspaceTabOrder(ids: readonly ProjectId[]): void {
 function orderWorkspaceProjects(workspaces: readonly WorkspaceProject[]): WorkspaceProject[] {
   const byId = new Map(workspaces.map((workspace) => [workspace.projectId, workspace]));
   const order = loadWorkspaceTabOrder();
-  const ordered = order
+  const reconciled = reconcileDiscoveredWorkspaceTabOrder(
+    order,
+    workspaceProjectIds(workspaces),
+  );
+  if (!sameProjectIdOrder(order, reconciled.persistedOrder)) {
+    persistWorkspaceTabOrder(reconciled.persistedOrder);
+  }
+  return reconciled.visibleOrder
     .map((projectId) => byId.get(projectId))
     .filter((workspace): workspace is WorkspaceProject => !!workspace);
-  const orderedIds = new Set(ordered.map((workspace) => workspace.projectId));
-  for (const workspace of workspaces) {
-    if (!orderedIds.has(workspace.projectId)) ordered.push(workspace);
-  }
-  const nextOrder = workspaceProjectIds(ordered);
-  if (!sameProjectIdOrder(order, nextOrder)) persistWorkspaceTabOrder(nextOrder);
-  return ordered;
 }
 
 function sameLmSelectedForSync(left: LmSelected | null, right: LmSelected | null): boolean {
@@ -989,8 +1126,14 @@ export function App() {
   const violetSyncRef = useRef<VioletProjectSyncHandle | null>(null);
   const lmVioletSyncRef = useRef<VioletProjectSyncHandle | null>(null);
   const [lmSelectedForSync, setLmSelectedForSync] = useState<LmSelected | null>(null);
-  const hydratedAgentLayoutProjectRef = useRef<ProjectId | null>(null);
-  const [hydratedLayoutProjectId, setHydratedLayoutProjectId] = useState<ProjectId | null>(null);
+  const confirmedAgentHydrationRef = useRef<ConfirmedAgentHydration | null>(null);
+  const [confirmedAgentHydration, setConfirmedAgentHydration] = useState<ConfirmedAgentHydration | null>(null);
+  const agentHydrationGenerationRef = useRef(0);
+  const agentHydrationAbortRef = useRef<AbortController | null>(null);
+  const workspaceRefreshesRef = useRef<Map<ProjectId, Promise<WorkspaceProject>>>(new Map());
+  const projectsWithConfirmedAgentRosterRef = useRef<Set<ProjectId>>(new Set());
+  const [agentHydrationFailure, setAgentHydrationFailure] = useState<AgentHydrationFailure | null>(null);
+  const [agentHydrationRetryNonce, setAgentHydrationRetryNonce] = useState(0);
   const [agentHydrationProgress, setAgentHydrationProgress] = useState<AgentHydrationProgress | null>(null);
   const [appearanceProjectId, setAppearanceProjectId] = useState<ProjectId>(DEFAULT_PROJECT_ID);
   const [centerpiece, setCenterpiece] = useState<Centerpiece>(() => loadCenterpiece(DEFAULT_PROJECT_ID));
@@ -1003,27 +1146,58 @@ export function App() {
   const [roomTheme, setRoomTheme] = useState<RoomTheme>(() => loadRoomTheme(DEFAULT_PROJECT_ID));
   const [deskTheme, setDeskTheme] = useState<DeskTheme>(() => loadDeskTheme(DEFAULT_PROJECT_ID));
 
+  const unsupportedAgentProviders = useMemo(() => {
+    const providers = new Map<AgentId, string>();
+    for (const agent of activeWorkspace?.agents ?? []) {
+      if (isAgentCli(agent.cli)) continue;
+      providers.set(agent.agentId as AgentId, agent.cli.trim() || 'unknown');
+    }
+    return providers;
+  }, [activeWorkspace]);
   const onTableAgents = useMemo(
-    () => agentLayout.tableSlots.filter((id): id is AgentId => !!id),
-    [agentLayout.tableSlots],
+    () => agentLayout.tableSlots.filter((id): id is AgentId => (
+      !!id && !unsupportedAgentProviders.has(id)
+    )),
+    [agentLayout.tableSlots, unsupportedAgentProviders],
   );
   const shortcutAgentsOrdered = useMemo(
     () => agentLayout.tableSlots.slice(0, MAX_AGENT_SLOTS),
     [agentLayout.tableSlots],
   );
   const shortcutTargetAgents = useMemo(
-    () => shortcutAgentsOrdered.filter((id): id is AgentId => !!id),
-    [shortcutAgentsOrdered],
+    () => shortcutAgentsOrdered.filter((id): id is AgentId => (
+      !!id && !unsupportedAgentProviders.has(id)
+    )),
+    [shortcutAgentsOrdered, unsupportedAgentProviders],
   );
   const firstEmptySeatIndex = useMemo(
     () => shortcutAgentsOrdered.findIndex((slot) => slot == null),
     [shortcutAgentsOrdered],
   );
   const tableFull = firstEmptySeatIndex < 0;
-  const agentsHydrating = !!activeWorkspace && hydratedLayoutProjectId !== activeWorkspace.projectId;
+  const activeAgentHydrationFailure = agentHydrationFailure?.projectId === activeWorkspace?.projectId
+    ? agentHydrationFailure
+    : null;
+  const agentsHydrating = !!activeWorkspace
+    && confirmedAgentHydration?.projectId !== activeWorkspace.projectId
+    && !activeAgentHydrationFailure;
   const activeAgentHydrationProgress = agentHydrationProgress?.projectId === activeWorkspace?.projectId
     ? agentHydrationProgress
     : null;
+  const invalidateAgentHydration = useCallback(() => {
+    const activeController = agentHydrationAbortRef.current;
+    agentHydrationAbortRef.current = null;
+    activeController?.abort();
+    agentHydrationGenerationRef.current += 1;
+    confirmedAgentHydrationRef.current = null;
+    setConfirmedAgentHydration(null);
+    setAgentHydrationFailure(null);
+    setAgentHydrationProgress(null);
+    if (persistLayoutTimerRef.current != null) {
+      window.clearTimeout(persistLayoutTimerRef.current);
+      persistLayoutTimerRef.current = null;
+    }
+  }, []);
   const agentMeta = useMemo<Record<AgentId, Agent>>(() => {
     const next: Record<AgentId, Agent> = { ...AGENTS };
     for (const identity of projectAgentIdentities) {
@@ -1034,13 +1208,18 @@ export function App() {
         hue: 'var(--brass-bright)',
       };
       const lifecycleStatus = projectAgentLifecycleStatus(identity.status);
+      const unsupportedProvider = unsupportedAgentProviders.get(identity.agentId as AgentId);
       next[identity.agentId] = {
         ...base,
         name: identity.displayName,
+        role: unsupportedProvider
+          ? `Unsupported provider: ${unsupportedProvider}`
+          : base.role,
         captain: false,
         avatarId: identity.avatarId ?? base.avatarId,
         avatarClass: avatarClassForId(identity.avatarId ?? base.avatarId, identity.provider),
         lifecycleStatus,
+        unsupportedProvider,
       };
     }
     for (const instance of Object.values(agentInstances)) {
@@ -1058,10 +1237,11 @@ export function App() {
         avatarId: instance.avatarId,
         avatarClass: instance.avatarClass ?? avatarClassForId(instance.avatarId, instance.cli),
         lifecycleStatus: undefined,
+        unsupportedProvider: undefined,
       };
     }
     return next;
-  }, [agentInstances, avatarLibraryVersion, projectAgentIdentities]);
+  }, [agentInstances, avatarLibraryVersion, projectAgentIdentities, unsupportedAgentProviders]);
   const confirmInApp = useCallback((
     title: string,
     body: string,
@@ -1130,14 +1310,20 @@ export function App() {
   const rememberWorkspaceTab = useCallback((workspace: WorkspaceProject) => {
     setWorkspaceTabs((prev) => {
       const next = upsertWorkspaceProject(prev, workspace);
-      persistWorkspaceTabOrder(workspaceProjectIds(next));
+      persistWorkspaceTabOrder(appendWorkspaceTabOrder(
+        loadWorkspaceTabOrder(),
+        workspace.projectId,
+      ));
       return next;
     });
   }, []);
   const forgetWorkspaceTab = useCallback((projectId: ProjectId) => {
     setWorkspaceTabs((prev) => {
       const next = prev.filter((workspace) => workspace.projectId !== projectId);
-      persistWorkspaceTabOrder(workspaceProjectIds(next));
+      persistWorkspaceTabOrder(removeWorkspaceTabOrder(
+        loadWorkspaceTabOrder(),
+        projectId,
+      ));
       return next;
     });
   }, []);
@@ -1156,7 +1342,10 @@ export function App() {
         if (seen.has(workspace.projectId)) continue;
         next.push(workspace);
       }
-      persistWorkspaceTabOrder(workspaceProjectIds(next));
+      persistWorkspaceTabOrder(reorderVisibleWorkspaceTabOrder(
+        loadWorkspaceTabOrder(),
+        workspaceProjectIds(next),
+      ));
       return next;
     });
   }, []);
@@ -1190,7 +1379,13 @@ export function App() {
   );
   // M6.A — live agent PTYs (CC / Codex spawned via pty/agent.rs).
   // Recruit/send/dismiss happen here; AgentWindowsLayer renders the windows.
-  const agentRuntime = useAgentRuntime();
+  const handleRuntimeAgentExit = useCallback(({ event, request }: AgentRuntimeExitContext) => (
+    reconcileVioletComposerAfterAgentExit({
+      projectRoot: request.projectRoot,
+      agentId: event.agentId,
+    })
+  ), []);
+  const agentRuntime = useAgentRuntime({ onExit: handleRuntimeAgentExit });
   const recruitWithLeaseTakeover = useCallback(async (request: AgentSpawnRequest): Promise<boolean> => {
     try {
       await agentRuntime.recruit(request);
@@ -1431,7 +1626,10 @@ export function App() {
       if (statusResult.status === 'fulfilled' && statusResult.value.active) {
         const workspace = statusResult.value.active;
         const nextTabs = upsertWorkspaceProject(availableProjects, workspace);
-        persistWorkspaceTabOrder(workspaceProjectIds(nextTabs));
+        persistWorkspaceTabOrder(appendWorkspaceTabOrder(
+          loadWorkspaceTabOrder(),
+          workspace.projectId,
+        ));
         setActiveWorkspace(workspace);
         setActiveProjectId(workspace.projectId);
         setWorkspaceTabs(nextTabs);
@@ -1444,7 +1642,10 @@ export function App() {
           const workspace = await openWorkspaceProject(firstProject.projectId);
           if (cancelled) return;
           const nextTabs = upsertWorkspaceProject(availableProjects, workspace);
-          persistWorkspaceTabOrder(workspaceProjectIds(nextTabs));
+          persistWorkspaceTabOrder(appendWorkspaceTabOrder(
+            loadWorkspaceTabOrder(),
+            workspace.projectId,
+          ));
           setActiveWorkspace(workspace);
           setActiveProjectId(workspace.projectId);
           setWorkspaceTabs(nextTabs);
@@ -1474,7 +1675,10 @@ export function App() {
       const existing = prev.find((workspace) => workspace.projectId === activeWorkspace.projectId);
       if (existing === activeWorkspace) return prev;
       const next = upsertWorkspaceProject(prev, activeWorkspace);
-      persistWorkspaceTabOrder(workspaceProjectIds(next));
+      persistWorkspaceTabOrder(appendWorkspaceTabOrder(
+        loadWorkspaceTabOrder(),
+        activeWorkspace.projectId,
+      ));
       return next;
     });
   }, [activeWorkspace]);
@@ -1572,10 +1776,10 @@ export function App() {
   const roomAgentIds = useMemo(() => {
     const ids = new Set<AgentId>();
     for (const id of agentLayout.tableSlots) {
-      if (id) ids.add(id);
+      if (id && !unsupportedAgentProviders.has(id)) ids.add(id);
     }
     return ids;
-  }, [agentLayout.tableSlots]);
+  }, [agentLayout.tableSlots, unsupportedAgentProviders]);
 
   // Keep PTYs globally alive, but render/route only the current project's
   // agents in this room. Switching project tabs should hide old sessions,
@@ -2019,6 +2223,22 @@ export function App() {
     inputBarRef.current?.insertAttachment(attachment);
     focusComposerEndSoon();
   }, [focusComposerEndSoon]);
+  const insertComposerQuote = useCallback((quote: RoomQuoteReference): RoomQuoteInsertResult => {
+    if (
+      quote.private &&
+      (
+        composerBroadcast ||
+        !targetAgent ||
+        !currentTargetPrivate ||
+        !quote.recipientIds?.includes(targetAgent)
+      )
+    ) {
+      return 'blocked';
+    }
+    const result = inputBarRef.current?.insertQuote(quote) ?? 'blocked';
+    if (result === 'inserted') focusComposerEndSoon();
+    return result;
+  }, [composerBroadcast, currentTargetPrivate, focusComposerEndSoon, targetAgent]);
 
   // Restoring a terminal only affects terminal visibility. Composer routing is
   // owned by selectComposerTarget so target switching never pops a TUI.
@@ -2096,8 +2316,7 @@ export function App() {
   }, [activeLiveAgents, focusComposerEndSoon]);
 
   const resetRoomUiState = useCallback((provisionalLayout?: AgentLayoutState | null) => {
-    hydratedAgentLayoutProjectRef.current = null;
-    setHydratedLayoutProjectId(null);
+    invalidateAgentHydration();
     setMinimized(new Set());
     setTerminalFocusedAgent(null);
     setComposerTarget(null);
@@ -2116,7 +2335,7 @@ export function App() {
     setArchiveOpen(false);
     setGroupChatOpen(false);
     setChatFilterActive(false);
-  }, []);
+  }, [invalidateAgentHydration]);
 
   const currentRoomUiSnapshot = useCallback((): RoomUiSnapshot => ({
     minimized: [...minimized],
@@ -2152,12 +2371,11 @@ export function App() {
   }, [activeWorkspace?.projectId, currentRoomUiSnapshot]);
 
   const restoreRoomUiSnapshot = useCallback((snapshot: RoomUiSnapshot | undefined, workspace?: WorkspaceProject | null) => {
-    hydratedAgentLayoutProjectRef.current = null;
-    setHydratedLayoutProjectId(null);
     if (!snapshot) {
       resetRoomUiState(provisionalLayoutForWorkspace(workspace));
       return;
     }
+    invalidateAgentHydration();
     setMinimized(new Set(snapshot.minimized));
     setTerminalFocusedAgent(snapshot.terminalFocusedAgent);
     setComposerTarget(snapshot.composerTarget);
@@ -2176,7 +2394,7 @@ export function App() {
     setArchiveOpen(false);
     setGroupChatOpen(snapshot.groupChatOpen);
     setChatFilterActive(snapshot.chatFilterActive ?? true);
-  }, [resetRoomUiState]);
+  }, [invalidateAgentHydration, resetRoomUiState]);
 
   const dismissAgentSessions = useCallback(async (agentIds: readonly AgentId[]) => {
     const ids = [...new Set(agentIds)];
@@ -2232,9 +2450,20 @@ export function App() {
     if (cachedWorkspace) {
       switchToWorkspace(cachedWorkspace);
       focusComposerEndSoon();
-      void openWorkspaceProject(projectId).catch((err) => {
-        window.alert(`Open project failed: ${String(err)}`);
-      });
+      const refresh = openWorkspaceProject(projectId);
+      workspaceRefreshesRef.current.set(projectId, refresh);
+      void refresh
+        .then((freshWorkspace) => {
+          setActiveWorkspace((current) => (
+            refreshedActiveWorkspace(current, projectId, freshWorkspace)
+          ));
+        })
+        .catch((err) => {
+          if (workspaceRefreshesRef.current.get(projectId) === refresh) {
+            workspaceRefreshesRef.current.delete(projectId);
+          }
+          window.alert(`Open project failed: ${String(err)}`);
+        });
       return;
     }
     void (async () => {
@@ -2324,12 +2553,22 @@ export function App() {
   ]);
 
   const selectComposerTarget = useCallback((id: AgentId) => {
+    if (unsupportedAgentProviders.has(id)) return;
     setComposerTarget(id);
     setComposerBroadcast(false);
     setBroadcastPopupOpen(false);
     setTerminalFocusedAgent(null);
     focusComposerSoon();
-  }, [focusComposerSoon]);
+  }, [focusComposerSoon, unsupportedAgentProviders]);
+  useEffect(() => {
+    setComposerTarget((current) => (
+      current && unsupportedAgentProviders.has(current) ? null : current
+    ));
+    setBroadcastRecipients((current) => {
+      if (![...current].some((id) => unsupportedAgentProviders.has(id))) return current;
+      return new Set([...current].filter((id) => !unsupportedAgentProviders.has(id)));
+    });
+  }, [unsupportedAgentProviders]);
   const openTargetPicker = useCallback(() => {
     setBroadcastRecipients(() => {
       if (composerBroadcast) return new Set(broadcastRecipients);
@@ -2340,13 +2579,14 @@ export function App() {
     focusComposerSoon();
   }, [broadcastRecipients, composerBroadcast, composerTarget, focusComposerSoon]);
   const toggleBroadcastRecipient = useCallback((id: AgentId) => {
+    if (unsupportedAgentProviders.has(id)) return;
     setBroadcastRecipients((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  }, []);
+  }, [unsupportedAgentProviders]);
   const confirmBroadcastRecipients = useCallback(() => {
     setBroadcastPopupOpen(false);
     if (broadcastRecipients.size > 1) {
@@ -2621,123 +2861,403 @@ export function App() {
 
   useEffect(() => {
     if (!activeWorkspace) {
-      hydratedAgentLayoutProjectRef.current = null;
-      setHydratedLayoutProjectId(null);
-      setAgentHydrationProgress(null);
+      invalidateAgentHydration();
       setProjectAgentIdentities([]);
       return;
     }
-    let cancelled = false;
+    agentHydrationAbortRef.current?.abort();
+    const abortController = new AbortController();
+    agentHydrationAbortRef.current = abortController;
+    const { signal } = abortController;
     const hydrationProjectId = activeWorkspace.projectId;
+    const hydrationGeneration = agentHydrationGenerationRef.current + 1;
+    agentHydrationGenerationRef.current = hydrationGeneration;
+    confirmedAgentHydrationRef.current = null;
+    setConfirmedAgentHydration(null);
+    setAgentHydrationFailure(null);
     setAgentHydrationProgress({ projectId: hydrationProjectId, completed: 0, total: 0 });
+    if (persistLayoutTimerRef.current != null) {
+      window.clearTimeout(persistLayoutTimerRef.current);
+      persistLayoutTimerRef.current = null;
+    }
     setAgentLayout((prev) => {
-      if (hydratedAgentLayoutProjectRef.current === activeWorkspace.projectId) return prev;
       if (prev.tableSlots.some(Boolean)) return prev;
       return provisionalLayoutForWorkspace(activeWorkspace) ?? prev;
     });
 
     const hydrateRoot = activeWorkspace.localRoot;
+    const workspaceAgents = activeWorkspace.agents;
+    const isCurrentHydration = () => (
+      !signal.aborted && agentHydrationGenerationRef.current === hydrationGeneration
+    );
+    type HydrationSnapshot = {
+      identities: ProjectAgentIdentity[];
+      activeIds: AgentId[];
+      detailsById: Map<AgentId, ProjectAgentDetail>;
+    };
+
     void (async () => {
-      let identities: ProjectAgentIdentity[] = [];
-      let identityListLoaded = true;
-      try {
-        identities = await listProjectAgentIdentities(hydrateRoot);
-      } catch (err) {
-        identityListLoaded = false;
-        console.warn('[kota-agent] could not hydrate project agents', err);
-      }
-      if (!cancelled) {
-        setProjectAgentIdentities(identityListLoaded ? identities : []);
+      const pendingRefresh = workspaceRefreshesRef.current.get(hydrationProjectId);
+      if (pendingRefresh) {
+        try {
+          const freshWorkspace = await withAgentHydrationDeadline(pendingRefresh, signal);
+          if (!isCurrentHydration()) return;
+          if (!sameWorkspaceAgents(workspaceAgents, freshWorkspace.agents)) {
+            // The refresh callback applies this workspace and starts a new
+            // generation. This stale cached generation must never settle.
+            return;
+          }
+          if (workspaceRefreshesRef.current.get(hydrationProjectId) === pendingRefresh) {
+            workspaceRefreshesRef.current.delete(hydrationProjectId);
+          }
+        } catch (err) {
+          if (!isCurrentHydration()) return;
+          if (err instanceof AgentHydrationTimeoutError) {
+            console.warn('[kota-agent] workspace refresh timed out before hydration', err);
+            setAgentHydrationProgress(null);
+            setAgentHydrationFailure({ projectId: hydrationProjectId });
+            return;
+          }
+          // A rejected refresh is already surfaced by the project tab. The
+          // disk-backed hydration path remains useful and may still recover.
+        }
       }
 
-      const displayableIdentities = identities.filter((identity) => (
-        displayableProjectAgentStatus(identity.status)
-      ));
-      const displayableIdentityIds = new Set(displayableIdentities.map((identity) => identity.agentId));
-      const workspaceAgents = identityListLoaded
-        ? activeWorkspace.agents.filter((agent) => displayableIdentityIds.has(agent.agentId))
-        : activeWorkspace.agents;
-      const orderedIds = orderedProjectAgentIds(workspaceAgents, displayableIdentities);
-      if (!cancelled) {
+      const applySnapshot = async (snapshot: HydrationSnapshot, confirmed: boolean) => {
+        let savedLayoutFile = null as Awaited<ReturnType<typeof loadProjectAgentLayoutFile>>;
+        try {
+          savedLayoutFile = await withAgentHydrationDeadline(
+            loadProjectAgentLayoutFile(hydrateRoot),
+            signal,
+          );
+        } catch (err) {
+          if (!isCurrentHydration()) return false;
+          console.warn('[kota-agent] hydration layout load failed', err);
+          setAgentHydrationProgress(null);
+          setAgentHydrationFailure({ projectId: hydrationProjectId });
+          return false;
+        }
+        if (!isCurrentHydration()) return false;
+        let savedSlots: readonly (string | null)[] | null = savedLayoutFile?.tableSlots ?? null;
+        if (!savedSlots) {
+          // The confirmed-state debounce below performs the one-time migration
+          // write. Reading the legacy slots here is safe; writing before the
+          // generation is confirmed is not.
+          savedSlots = remapLegacySeatOrder(
+            loadProjectAgentLayout(hydrationProjectId)?.tableSlots ?? null,
+          );
+        }
+        const nextLayout = tableLayoutMergingSavedSlots(savedSlots, snapshot.activeIds);
+        const detailedInstances = Object.fromEntries(
+          snapshot.activeIds.flatMap((agentId) => {
+            const detail = snapshot.detailsById.get(agentId);
+            return detail ? [[agentId, projectAgentDetailToWorkingHero(detail)]] : [];
+          }),
+        ) as Record<AgentId, WorkingHero>;
+        const detailedRecords = Object.fromEntries(
+          snapshot.activeIds.flatMap((agentId) => {
+            const detail = snapshot.detailsById.get(agentId);
+            return detail ? [[agentId, detail.record]] : [];
+          }),
+        ) as Record<AgentId, ProjectAgentRecord>;
+
+        setProjectAgentIdentities(snapshot.identities);
+        if (confirmed) {
+          setAgentInstances(detailedInstances);
+          setAgentRecords(detailedRecords);
+        } else {
+          // A failed detail load must not delete a card that already has usable
+          // in-memory detail. New/missing agents still render from identity data.
+          setAgentInstances((previous) => Object.fromEntries(
+            snapshot.activeIds.flatMap((agentId) => {
+              const instance = detailedInstances[agentId] ?? previous[agentId];
+              return instance ? [[agentId, instance]] : [];
+            }),
+          ) as Record<AgentId, WorkingHero>);
+          setAgentRecords((previous) => Object.fromEntries(
+            snapshot.activeIds.flatMap((agentId) => {
+              const record = detailedRecords[agentId] ?? previous[agentId];
+              return record ? [[agentId, record]] : [];
+            }),
+          ) as Record<AgentId, ProjectAgentRecord>);
+        }
+        setAgentLayout(nextLayout);
+        setComposerTarget((prev) => (prev && snapshot.activeIds.includes(prev) ? prev : null));
+        setBroadcastRecipients((prev) => (
+          new Set([...prev].filter((id) => snapshot.activeIds.includes(id)))
+        ));
+        setPrivateAgents((prev) => (
+          new Set([...prev].filter((id) => snapshot.activeIds.includes(id)))
+        ));
+        return true;
+      };
+
+      let observedNonEmptyRoster = projectsWithConfirmedAgentRosterRef.current.has(
+        hydrationProjectId,
+      );
+      let lastSnapshot: HydrationSnapshot | null = null;
+      let lastSnapshotHasAuthoritativeRoster = false;
+      const attemptCount = AGENT_HYDRATION_RETRY_DELAYS_MS.length + 1;
+      for (let attempt = 0; attempt < attemptCount; attempt += 1) {
+        if (attempt > 0) {
+          const waited = await waitForAgentHydrationRetry(
+            AGENT_HYDRATION_RETRY_DELAYS_MS[attempt - 1]!,
+            signal,
+          );
+          if (!waited || !isCurrentHydration()) return;
+        }
+
+        let listing = null as Awaited<ReturnType<typeof inspectProjectAgentIdentities>> | null;
+        try {
+          listing = await withAgentHydrationDeadline(
+            inspectProjectAgentIdentities(hydrateRoot),
+            signal,
+          );
+        } catch (err) {
+          if (isCurrentHydration()) {
+            console.warn(
+              `[kota-agent] hydration identities attempt ${attempt + 1}/${attemptCount} failed`,
+              err,
+            );
+          }
+        }
+        if (!isCurrentHydration()) return;
+
+        let identities = listing?.identities ?? [];
+        if (identities.length > 0) observedNonEmptyRoster = true;
+        let listingHasUnexplainedEntries = !!listing
+          && listing.workspaceEntryCount > identities.length;
+        const suspiciousEmpty = identities.length === 0 && (
+          !listing
+          || workspaceAgents.length > 0
+          || (listing?.workspaceEntryCount ?? 0) > 0
+          || observedNonEmptyRoster
+        );
+
+        if (!suspiciousEmpty && identities.length === 0) {
+          // A genuinely empty project has no counter-evidence. Confirm with a
+          // second observation in the same attempt, then settle without delay.
+          try {
+            const confirmation = await withAgentHydrationDeadline(
+              inspectProjectAgentIdentities(hydrateRoot),
+              signal,
+            );
+            if (!isCurrentHydration()) return;
+            if (confirmation.identities.length === 0 && confirmation.workspaceEntryCount === 0) {
+              const emptySnapshot: HydrationSnapshot = {
+                identities: [],
+                activeIds: [],
+                detailsById: new Map(),
+              };
+              if (!await applySnapshot(emptySnapshot, true) || !isCurrentHydration()) return;
+              const marker: ConfirmedAgentHydration = {
+                projectId: hydrationProjectId,
+                generation: hydrationGeneration,
+                rosterIds: [],
+              };
+              confirmedAgentHydrationRef.current = marker;
+              setConfirmedAgentHydration(marker);
+              setAgentHydrationProgress(null);
+              return;
+            }
+            listing = confirmation;
+            identities = confirmation.identities;
+            listingHasUnexplainedEntries = confirmation.workspaceEntryCount > identities.length;
+            if (identities.length > 0) observedNonEmptyRoster = true;
+          } catch (err) {
+            console.warn(
+              `[kota-agent] hydration empty confirmation ${attempt + 1}/${attemptCount} failed`,
+              err,
+            );
+          }
+          if (!isCurrentHydration()) return;
+        }
+
+        const displayableIdentities = identities.filter((identity) => (
+          displayableProjectAgentStatus(identity.status)
+        ));
+        const identityById = new Map(
+          identities.map((identity) => [identity.agentId, identity]),
+        );
+        const candidateWorkspaceAgents = identities.length > 0
+          ? workspaceAgents.filter((agent) => {
+            const identity = identityById.get(agent.agentId);
+            return !identity || displayableProjectAgentStatus(identity.status);
+          })
+          : workspaceAgents;
+        const orderedIds = orderedProjectAgentIds(candidateWorkspaceAgents, displayableIdentities);
+
+        // Raw identities that are all archived/dismissed are an authoritative
+        // empty active roster, not a suspicious empty directory observation.
+        if (
+          orderedIds.length === 0
+          && identities.length > 0
+          && !listingHasUnexplainedEntries
+        ) {
+          const emptySnapshot: HydrationSnapshot = {
+            identities,
+            activeIds: [],
+            detailsById: new Map(),
+          };
+          if (!await applySnapshot(emptySnapshot, true) || !isCurrentHydration()) return;
+          projectsWithConfirmedAgentRosterRef.current.delete(hydrationProjectId);
+          const marker: ConfirmedAgentHydration = {
+            projectId: hydrationProjectId,
+            generation: hydrationGeneration,
+            rosterIds: [],
+          };
+          confirmedAgentHydrationRef.current = marker;
+          setConfirmedAgentHydration(marker);
+          setAgentHydrationProgress(null);
+          return;
+        }
+        if (orderedIds.length === 0) continue;
+
+        const detailLoadIds = orderedIds.filter((agentId) => (
+          !unsupportedAgentProviders.has(agentId)
+        ));
         setAgentHydrationProgress({
           projectId: hydrationProjectId,
           completed: 0,
-          total: orderedIds.length,
+          total: detailLoadIds.length,
         });
-      }
-      const detailResults = await Promise.allSettled(
-        orderedIds.map(async (agentId) => {
-          try {
-            return await loadProjectAgentDetail({ agentId, projectRoot: hydrateRoot });
-          } finally {
-            if (!cancelled) {
-              setAgentHydrationProgress((current) => {
-                if (current?.projectId !== hydrationProjectId) return current;
-                return {
-                  ...current,
-                  completed: Math.min(current.completed + 1, current.total),
-                };
-              });
+        const detailResults = await Promise.allSettled(
+          detailLoadIds.map(async (agentId) => {
+            try {
+              const detail = await withAgentHydrationDeadline(
+                loadProjectAgentDetail({ agentId, projectRoot: hydrateRoot }),
+                signal,
+              );
+              return { agentId, detail };
+            } finally {
+              if (isCurrentHydration()) {
+                setAgentHydrationProgress((current) => {
+                  if (current?.projectId !== hydrationProjectId) return current;
+                  return {
+                    ...current,
+                    completed: Math.min(current.completed + 1, current.total),
+                  };
+                });
+              }
             }
+          }),
+        );
+        if (!isCurrentHydration()) return;
+
+        const detailsById = new Map<AgentId, ProjectAgentDetail>();
+        const failedIds: AgentId[] = [];
+        detailResults.forEach((result, index) => {
+          const requestedAgentId = detailLoadIds[index]!;
+          if (result.status === 'fulfilled') {
+            detailsById.set(requestedAgentId, result.value.detail);
+          } else {
+            failedIds.push(requestedAgentId);
+            console.warn(
+              `[kota-agent] hydration detail failed for ${requestedAgentId}`,
+              result.reason,
+            );
           }
-        }),
-      );
-      if (cancelled) return;
+        });
 
-      const details = detailResults
-        .filter((result): result is PromiseFulfilledResult<ProjectAgentDetail> => result.status === 'fulfilled')
-        .map((result) => result.value)
-        .filter((detail) => displayableProjectAgentStatus(detail.status));
-      const activeIds = details.map((detail) => detail.agentId as AgentId);
-      const nextInstances = Object.fromEntries(
-        details.map((detail) => [detail.agentId, projectAgentDetailToWorkingHero(detail)]),
-      ) as Record<AgentId, WorkingHero>;
-      const nextRecords = Object.fromEntries(
-        details.map((detail) => [detail.agentId, detail.record]),
-      ) as Record<AgentId, ProjectAgentRecord>;
+        const snapshotIdentities = [...identities];
+        const identityIndex = new Map(
+          snapshotIdentities.map((identity, index) => [identity.agentId, index]),
+        );
+        const workspaceById = new Map(
+          candidateWorkspaceAgents.map((agent) => [agent.agentId, agent]),
+        );
+        for (const agentId of orderedIds) {
+          const detail = detailsById.get(agentId);
+          const identity = detail
+            ? projectAgentIdentityFromDetail(detail)
+            : identityIndex.has(agentId)
+              ? null
+              : projectAgentIdentityFromWorkspaceAgent(workspaceById.get(agentId)!);
+          if (!identity) continue;
+          const index = identityIndex.get(agentId);
+          if (index == null) {
+            identityIndex.set(agentId, snapshotIdentities.length);
+            snapshotIdentities.push(identity);
+          } else {
+            snapshotIdentities[index] = identity;
+          }
+        }
+        const activeIds = orderedIds.filter((agentId) => {
+          const detail = detailsById.get(agentId);
+          return !detail || displayableProjectAgentStatus(detail.status);
+        });
+        lastSnapshot = {
+          identities: snapshotIdentities,
+          activeIds,
+          detailsById,
+        };
+        lastSnapshotHasAuthoritativeRoster = identities.length > 0
+          && !listingHasUnexplainedEntries;
 
-      const savedLayoutFile = await loadProjectAgentLayoutFile(hydrateRoot).catch(() => null);
-      if (cancelled) return;
-      let savedSlots: readonly (string | null)[] | null = savedLayoutFile?.tableSlots ?? null;
-      let migrateLegacySlots = false;
-      if (!savedSlots) {
-        // One-time migration from the legacy browser-local layout store.
-        savedSlots = remapLegacySeatOrder(loadProjectAgentLayout(activeWorkspace.projectId)?.tableSlots ?? null);
-        migrateLegacySlots = savedSlots != null;
+        if (failedIds.length === 0 && !listingHasUnexplainedEntries) {
+          if (!await applySnapshot(lastSnapshot, true) || !isCurrentHydration()) return;
+          if (activeIds.length > 0) {
+            projectsWithConfirmedAgentRosterRef.current.add(hydrationProjectId);
+          }
+          const marker: ConfirmedAgentHydration = {
+            projectId: hydrationProjectId,
+            generation: hydrationGeneration,
+            rosterIds: [...activeIds],
+          };
+          confirmedAgentHydrationRef.current = marker;
+          setConfirmedAgentHydration(marker);
+          setAgentHydrationProgress(null);
+          return;
+        }
       }
-      const nextLayout = tableLayoutMergingSavedSlots(savedSlots, activeIds);
-      if (migrateLegacySlots) {
-        // Persist only the roster-filtered slots: the legacy store may carry
-        // cross-project poisoning, which must not reach the new file store.
-        void saveProjectAgentLayoutFile(hydrateRoot, nextLayout.tableSlots).catch(() => {});
+
+      if (!isCurrentHydration()) return;
+      if (lastSnapshot && lastSnapshotHasAuthoritativeRoster) {
+        await applySnapshot(lastSnapshot, false);
       }
-      hydratedAgentLayoutProjectRef.current = activeWorkspace.projectId;
-      setHydratedLayoutProjectId(activeWorkspace.projectId);
-      setAgentInstances(nextInstances);
-      setAgentRecords(nextRecords);
-      setAgentLayout(nextLayout);
-      setComposerTarget((prev) => (prev && activeIds.includes(prev) ? prev : null));
-      setBroadcastRecipients((prev) => new Set([...prev].filter((id) => activeIds.includes(id))));
-      setPrivateAgents((prev) => new Set([...prev].filter((id) => activeIds.includes(id))));
+      if (!isCurrentHydration()) return;
+      setAgentHydrationProgress(null);
+      setAgentHydrationFailure({ projectId: hydrationProjectId });
     })();
 
     return () => {
-      cancelled = true;
+      abortController.abort();
+      if (agentHydrationAbortRef.current === abortController) {
+        agentHydrationAbortRef.current = null;
+        agentHydrationGenerationRef.current += 1;
+        if (confirmedAgentHydrationRef.current?.generation === hydrationGeneration) {
+          confirmedAgentHydrationRef.current = null;
+        }
+        if (persistLayoutTimerRef.current != null) {
+          window.clearTimeout(persistLayoutTimerRef.current);
+          persistLayoutTimerRef.current = null;
+        }
+      }
     };
-  }, [activeWorkspace]);
+  }, [
+    activeWorkspace,
+    agentHydrationRetryNonce,
+    invalidateAgentHydration,
+    unsupportedAgentProviders,
+  ]);
 
   useEffect(() => {
     const projectId = activeWorkspace?.projectId ?? null;
     const localRoot = activeWorkspace?.localRoot ?? null;
-    if (!projectId || !localRoot || hydratedAgentLayoutProjectRef.current !== projectId) return undefined;
+    const confirmed = confirmedAgentHydration;
+    if (!projectId || !localRoot || confirmed?.projectId !== projectId) return undefined;
     // Defense in depth: never persist slots naming agents outside the hydrated
     // roster (e.g. a stale cross-project hydrate) — see seat-order findings.
     const roster = new Set(Object.keys(agentInstances));
+    if (confirmed.rosterIds.length > 0 && roster.size === 0) return undefined;
     if (agentLayout.tableSlots.some((id) => id && !roster.has(id))) return undefined;
     if (persistLayoutTimerRef.current != null) window.clearTimeout(persistLayoutTimerRef.current);
+    const capturedConfirmation = confirmed;
+    const capturedSlots = [...agentLayout.tableSlots];
     persistLayoutTimerRef.current = window.setTimeout(() => {
       persistLayoutTimerRef.current = null;
-      void saveProjectAgentLayoutFile(localRoot, agentLayout.tableSlots).catch(() => {});
+      if (confirmedAgentHydrationRef.current !== capturedConfirmation) return;
+      void saveProjectAgentLayoutFile(localRoot, capturedSlots).catch(() => {});
     }, AGENT_LAYOUT_WRITE_DEBOUNCE_MS);
     return () => {
       if (persistLayoutTimerRef.current != null) {
@@ -2745,7 +3265,13 @@ export function App() {
         persistLayoutTimerRef.current = null;
       }
     };
-  }, [activeWorkspace?.projectId, activeWorkspace?.localRoot, agentInstances, agentLayout]);
+  }, [activeWorkspace, agentInstances, agentLayout, confirmedAgentHydration]);
+
+  const retryAgentHydration = useCallback(() => {
+    if (!activeAgentHydrationFailure) return;
+    setAgentHydrationFailure(null);
+    setAgentHydrationRetryNonce((nonce) => nonce + 1);
+  }, [activeAgentHydrationFailure]);
 
   useEffect(() => {
     const ids = Object.keys(agentInstances) as AgentId[];
@@ -3029,19 +3555,72 @@ export function App() {
     }
   }, [projectAgentRoot]);
 
+  const performStartFreshSession = useCallback(async (id: AgentId): Promise<boolean> => {
+    try {
+      const result = await startFreshProjectAgentSession({
+        agentId: id,
+        projectRoot: projectAgentRoot,
+      });
+      const recruited = await recruitWithLeaseTakeover(result.request);
+      if (!recruited) return false;
+      const detail = await clearProjectAgentSessionMetadata({
+        agentId: id,
+        projectRoot: projectAgentRoot,
+      });
+      applyProjectAgentDetail(detail);
+      requestVioletProjectAgentSync(violetProjectRoot, [id], roomAgentIdsOrdered);
+      await refreshAgentPtySummaries();
+      return true;
+    } catch (err) {
+      window.alert(`Start fresh session failed: ${String(err)}`);
+      return false;
+    }
+  }, [
+    applyProjectAgentDetail,
+    clearProjectAgentSessionMetadata,
+    projectAgentRoot,
+    recruitWithLeaseTakeover,
+    refreshAgentPtySummaries,
+    roomAgentIdsOrdered,
+    violetProjectRoot,
+  ]);
+
   const launchExistingProjectAgent = useCallback(async (
     id: AgentId,
     seatIndex?: number | null,
     options: { selectComposer?: boolean } = {},
-  ) => {
+  ): Promise<ExistingAgentLaunchResult> => {
+    const unsupportedProvider = unsupportedAgentProviders.get(id);
+    if (unsupportedProvider) {
+      return {
+        status: 'failed',
+        error: new Error(`Unsupported provider: ${unsupportedProvider}`),
+      };
+    }
     const result = await coordinateExistingAgentLaunch(
       existingAgentLaunchesRef.current,
       id,
       async () => {
-        const request = await resolveProjectAgentLaunch({
+        const resolution = await resolveProjectAgentLaunch({
           agentId: id,
           projectRoot: projectAgentRoot,
         });
+        if (resolution.status === 'sessionUnavailable') {
+          const confirmed = await confirmInApp(
+            "Session can't resume",
+            'The saved session has expired. Start a new session?',
+            {
+              cancelLabel: 'Cancel',
+              confirmLabel: 'OK',
+              plainCopy: true,
+            },
+          );
+          if (!confirmed) return false;
+          if (!await performStartFreshSession(id)) return false;
+          refreshFileTree();
+          return true;
+        }
+        const request = resolution.request;
         requestVioletProjectAgentSync(violetProjectRoot, [id], roomAgentIdsOrdered);
         const recruited = await recruitWithLeaseTakeover(request);
         if (!recruited) return false;
@@ -3065,11 +3644,14 @@ export function App() {
     return result;
   }, [
     placeRecruitedAgent,
+    confirmInApp,
+    performStartFreshSession,
     projectAgentRoot,
     recruitWithLeaseTakeover,
     refreshAgentPtySummaries,
     refreshFileTree,
     roomAgentIdsOrdered,
+    unsupportedAgentProviders,
     violetProjectRoot,
   ]);
 
@@ -3119,41 +3701,19 @@ export function App() {
       },
     );
     if (!confirmed) return;
-    try {
-      const result = await startFreshProjectAgentSession({
-        agentId: id,
-        projectRoot: projectAgentRoot,
-      });
-      const recruited = await recruitWithLeaseTakeover(result.request);
-      if (!recruited) return;
-      const detail = await clearProjectAgentSessionMetadata({
-        agentId: id,
-        projectRoot: projectAgentRoot,
-      });
-      applyProjectAgentDetail(detail);
-      requestVioletProjectAgentSync(violetProjectRoot, [id], roomAgentIdsOrdered);
-      await refreshAgentPtySummaries();
-      placeRecruitedAgent(id, agentLayout.tableSlots.indexOf(id));
-      refreshFileTree();
-      focusAgent(id);
-    } catch (err) {
-      window.alert(`Start fresh session failed: ${String(err)}`);
-    }
+    if (!await performStartFreshSession(id)) return;
+    placeRecruitedAgent(id, agentLayout.tableSlots.indexOf(id));
+    refreshFileTree();
+    focusAgent(id);
   }, [
     agentLayout.tableSlots,
     agentName,
     agentsHydrating,
-    applyProjectAgentDetail,
-    clearProjectAgentSessionMetadata,
     confirmInApp,
     focusAgent,
+    performStartFreshSession,
     placeRecruitedAgent,
-    projectAgentRoot,
-    recruitWithLeaseTakeover,
-    refreshAgentPtySummaries,
     refreshFileTree,
-    roomAgentIdsOrdered,
-    violetProjectRoot,
   ]);
 
   const handleSeatDblClick = useCallback((id: AgentId) => {
@@ -3392,6 +3952,7 @@ export function App() {
         openShortcutRecruitModal(seatIndex);
         return;
       }
+      if (unsupportedAgentProviders.has(id)) return;
       if (agentRuntime.liveAgents.has(id)) {
         const alreadyFocused = terminalFocusedAgent === id && !minimized.has(id);
         if (alreadyFocused) minimizeAgentFromWindow(id);
@@ -3493,6 +4054,7 @@ export function App() {
     selectComposerTarget,
     shortcutAgentsOrdered,
     shortcutTargetAgents,
+    unsupportedAgentProviders,
     shortcutRecruitSeatIndex,
     spawnExistingProjectAgent,
     terminalFocusedAgent,
@@ -3750,9 +4312,12 @@ export function App() {
                     shortcutAgentsOrdered={shortcutAgentsOrdered}
                     agentsHydrating={agentsHydrating}
                     agentHydrationProgress={activeAgentHydrationProgress}
+                    agentHydrationFailed={!!activeAgentHydrationFailure}
+                    onRetryAgentHydration={retryAgentHydration}
                     tableSlots={agentLayout.tableSlots}
                     offTableAgents={[]}
                     agentMeta={agentMeta}
+                    unsupportedAgentProviders={unsupportedAgentProviders}
                     projectName={activeProjectName}
                     targetAgent={targetAgent}
                     chatFilterTargetAgents={chatFilterTargetAgents}
@@ -3766,6 +4331,7 @@ export function App() {
                     onDblClickAgent={handleSeatDblClick}
                     onOpenAgentTerminal={openAgentTerminalFromMenu}
                     onRetryComposerMessage={handleRetryComposerMessage}
+                    onQuoteMessage={insertComposerQuote}
                     onTogglePrivacyAgent={PRIVATE_CHAT_UI_ENABLED ? togglePrivacyAgent : undefined}
                     onToggleAllPrivacy={PRIVATE_CHAT_UI_ENABLED ? toggleAllPrivacy : undefined}
                     onAgentContextMenu={openAgentContextMenu}
@@ -3823,6 +4389,7 @@ export function App() {
                         broadcastPrivacyInfo={PRIVATE_CHAT_UI_ENABLED ? broadcastPrivacyInfo : undefined}
                         privacyMode={currentTargetPrivate}
                         privacyControlsEnabled={PRIVATE_CHAT_UI_ENABLED}
+                        quoteProjectRoot={violetProjectRoot}
                         onBroadcastToggle={openTargetPicker}
                         onPrivacyToggle={PRIVATE_CHAT_UI_ENABLED ? togglePrivacyMode : undefined}
                         onSend={handleSend}

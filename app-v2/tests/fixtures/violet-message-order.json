@@ -1,0 +1,63 @@
+[
+  {
+    "name": "sequence breaks an exact timestamp tie",
+    "messages": [
+      {
+        "id": "a-assistant-hash",
+        "timestamp": "2026-07-27T10:00:00Z",
+        "violetSeq": 42
+      },
+      {
+        "id": "z-user-hash",
+        "timestamp": "2026-07-27T10:00:00Z",
+        "violetSeq": 41
+      }
+    ],
+    "expectedIds": [
+      "z-user-hash",
+      "a-assistant-hash"
+    ]
+  },
+  {
+    "name": "timestamp remains authoritative outside a tie",
+    "messages": [
+      {
+        "id": "later",
+        "timestamp": "2026-07-27T10:00:00.200Z",
+        "violetSeq": 1
+      },
+      {
+        "id": "earlier",
+        "timestamp": "2026-07-27T10:00:00.100Z",
+        "violetSeq": 999
+      }
+    ],
+    "expectedIds": [
+      "earlier",
+      "later"
+    ]
+  },
+  {
+    "name": "legacy messages use sequence zero and stable id fallback",
+    "messages": [
+      {
+        "id": "z-new",
+        "timestamp": "2026-07-27T10:00:00Z",
+        "violetSeq": 1
+      },
+      {
+        "id": "z-legacy",
+        "timestamp": "2026-07-27T10:00:00Z"
+      },
+      {
+        "id": "a-legacy",
+        "timestamp": "2026-07-27T10:00:00Z"
+      }
+    ],
+    "expectedIds": [
+      "a-legacy",
+      "z-legacy",
+      "z-new"
+    ]
+  }
+]

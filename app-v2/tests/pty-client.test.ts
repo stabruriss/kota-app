@@ -16,6 +16,7 @@ import {
   bartenderSyncReceipt,
   clearSmartPty,
   closeSmartPty,
+  emberDeliverHumanReminder,
   initSmartPty,
   interruptSmartPty,
   listSmartPtys,
@@ -147,6 +148,32 @@ describe('pty-client', () => {
       request: {
         projectRoot: '/tmp/kota/proj',
         requestId: 'sync-123',
+      },
+    });
+  });
+
+  it('routes human Ember reminders through the shared delivery command', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      eventId: 'ember-reminder-human-one',
+      delivered: true,
+      roomStatus: 'delivered',
+      telegramStatus: 'skipped',
+      warnings: [],
+    });
+
+    const result = await emberDeliverHumanReminder({
+      projectRoot: '/tmp/kota/proj',
+      eventId: 'ember-reminder-human-one',
+      text: 'Take a break.',
+    });
+
+    expect(result.roomStatus).toBe('delivered');
+    expect(result.telegramStatus).toBe('skipped');
+    expect(invoke).toHaveBeenCalledWith('ember_deliver_human_reminder', {
+      request: {
+        projectRoot: '/tmp/kota/proj',
+        eventId: 'ember-reminder-human-one',
+        text: 'Take a break.',
       },
     });
   });

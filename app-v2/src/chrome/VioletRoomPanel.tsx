@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import {
   agentBusRetryDelivery,
   fileImageDataUrl,
+  loadAccountUserIdentity,
   readVioletRoomCache,
   onVioletRoomSynced,
   violetOpenFileRef,
@@ -19,8 +20,10 @@ import {
 import type { Agent, AgentId } from '../types/scene';
 import { splitProjectAgentName } from './ProjectAgentName';
 import {
+  VIOLET_COMPOSER_AGENT_EXIT_REASON,
   VIOLET_COMPOSER_DELIVERY_EVENT,
   VIOLET_COMPOSER_SENT_EVENT,
+  recordVioletComposerDelivery,
   violetComposerSentHistory,
   type VioletComposerDeliveryDetail,
   type VioletComposerSentDetail,
@@ -28,6 +31,28 @@ import {
 import { ProjectAgentName } from './ProjectAgentName';
 import { avatarClassForId, avatarImageStyleForId } from '../lib/hero-avatars';
 import { AgentCommendButton } from './AgentCommendButton';
+import { isHumanTelegramTarget } from '../ember-config';
+import {
+  normalizeForDedupe,
+  prepareDedupeText,
+  preparedDedupeTextsMatch,
+  timestampsWithinComposerConfirmationWindow,
+  type PreparedDedupeText,
+} from '../lib/violet-message-dedupe';
+import {
+  extractRoomQuoteAssets,
+  parseRoomQuotePrompt,
+  roomQuoteProjectKey,
+  truncateRoomQuoteExcerpt,
+  type RoomQuoteInsertResult,
+  type RoomQuoteReference,
+} from '../lib/room-quote';
+import { RoomQuoteMark } from '../lib/room-quote-mark';
+
+export {
+  normalizeAttachmentInsensitive,
+  normalizeForDedupe,
+} from '../lib/violet-message-dedupe';
 
 interface VioletRoomPanelProps {
   projectRoot?: string | null;
@@ -44,6 +69,7 @@ interface VioletRoomPanelProps {
   onCommendAgent?: (id: AgentId, source: ProjectAgentCommendSource) => void;
   onOpenAgentTerminal?: (id: AgentId) => void;
   onRetryComposerMessage?: (request: VioletComposerRetryRequest) => boolean | void | Promise<boolean | void>;
+  onQuoteMessage?: (quote: RoomQuoteReference) => RoomQuoteInsertResult;
   onClose?: () => void;
 }
 
@@ -65,10 +91,14 @@ type VioletRoomMessage = VioletChatMessage & {
   deliveryStatus?: VioletDeliveryStatus;
   deliveryReason?: string;
   deliveryRetryTargetAgentIds?: readonly string[];
+  // A cleared visual state is not enough: keep a tombstone so confirmed
+  // messages never re-enter reconciliation after a project/room remount.
+  deliveryTrackingComplete?: boolean;
   progressItems?: readonly string[];
   progressEntries?: readonly VioletProgressEntry[];
   ghostSasayaki?: boolean;
   ghostSasayakiSortTime?: number;
+  quoteRefId?: string;
 };
 
 type AgentBusDeliveryState = {
@@ -77,6 +107,21 @@ type AgentBusDeliveryState = {
   retryTargetAgentIds: readonly string[];
   attemptEventIds: readonly string[];
   lastAttemptAt: number;
+};
+
+type PreparedNativeUserMessage = {
+  timestampMs: number;
+  text: PreparedDedupeText;
+};
+
+type PreparedLocalComposerMessage = PreparedNativeUserMessage & {
+  id: string;
+  targetAgentIds: ReadonlySet<string>;
+};
+
+type ComposerDeliveryEvidence = {
+  nativeUsersByAgent: ReadonlyMap<string, readonly PreparedNativeUserMessage[]>;
+  latestAssistantAtByAgent: ReadonlyMap<string, number>;
 };
 
 type VioletProgressEntry = {
@@ -104,8 +149,12 @@ const VIOLET_ROOM_STATE_CACHE = new Map<string, VioletRoomState>();
 const VIOLET_ROOM_HISTORY_EXPANDED_CACHE_KEYS = new Set<string>();
 const BROADCAST_USER_GROUP_WINDOW_MS = 5000;
 const GHOST_SASAYAKI_WINDOW_MS = 8000;
-const DELIVERY_CONFIRM_TIMEOUT_MS = 90000;
+const DELIVERY_CONFIRM_TIMEOUT_MS = 180000;
 const DELIVERY_CONFIRM_OBSERVE_GRACE_MS = 15000;
+const EMPTY_COMPOSER_DELIVERY_EVIDENCE: ComposerDeliveryEvidence = {
+  nativeUsersByAgent: new Map(),
+  latestAssistantAtByAgent: new Map(),
+};
 // Agent Bus prompts can remain queued behind an active turn beyond the receipt timeout.
 // Keep delivery tracking and retry wiring intact while hiding the misleading UI affordance.
 const AGENT_BUS_RETRY_UI_ENABLED: boolean = false;
@@ -146,6 +195,7 @@ export function VioletRoomPanel({
   onCommendAgent,
   onOpenAgentTerminal,
   onRetryComposerMessage,
+  onQuoteMessage,
   onClose,
 }: VioletRoomPanelProps) {
   const agentIdsKey = agentIds.join('|');
@@ -160,6 +210,8 @@ export function VioletRoomPanel({
   const [hasOlder, setHasOlder] = useState(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [humanTargetName, setHumanTargetName] = useState('User');
+  const [quoteNotice, setQuoteNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
   const forceScrollBottomRef = useRef(false);
@@ -169,6 +221,7 @@ export function VioletRoomPanel({
   const scrollFrameRef = useRef<number | null>(null);
   const bottomSettleFrameRef = useRef<number | null>(null);
   const bottomSettleTimeoutRef = useRef<number | null>(null);
+  const quoteNoticeTimeoutRef = useRef<number | null>(null);
   const pendingScrollElRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const visibleAgentIds = useMemo(() => (
@@ -181,6 +234,44 @@ export function VioletRoomPanel({
   const chatFilterPageAgentIds = useMemo(() => (
     chatFilterActive ? normalizeAgentIds(chatFilterAgentIds) : []
   ), [chatFilterActive, chatFilterAgentIdsKey]);
+
+  const insertRoomQuote = useCallback((quote: RoomQuoteReference) => {
+    const result = onQuoteMessage?.(quote) ?? 'blocked';
+    if (result === 'inserted') return;
+    const notice = result === 'limit'
+      ? '4 quotes max'
+      : result === 'duplicate'
+        ? 'Already quoted'
+        : 'This quote cannot be used in the current project or recipient scope';
+    setQuoteNotice(notice);
+    if (quoteNoticeTimeoutRef.current !== null) {
+      window.clearTimeout(quoteNoticeTimeoutRef.current);
+    }
+    quoteNoticeTimeoutRef.current = window.setTimeout(() => {
+      quoteNoticeTimeoutRef.current = null;
+      setQuoteNotice(null);
+    }, 2200);
+  }, [onQuoteMessage]);
+
+  useEffect(() => () => {
+    if (quoteNoticeTimeoutRef.current !== null) {
+      window.clearTimeout(quoteNoticeTimeoutRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadAccountUserIdentity()
+      .then((identity) => {
+        if (cancelled) return;
+        const name = identity.name.trim();
+        if (name) setHumanTargetName(name);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const commitRoomState = useCallback((next: VioletRoomState) => {
     setState((prev) => {
@@ -350,7 +441,7 @@ export function VioletRoomPanel({
       ? detail.targetAgentIds.filter((agentId) => visibleAgentIds.has(agentId))
       : detail.targetAgentIds;
     if (targetAgentIds.length === 0) return null;
-    return {
+    const message: VioletRoomMessage = {
       id: detail.id,
       sessionId: 'composer',
       agentId: 'user',
@@ -367,6 +458,13 @@ export function VioletRoomPanel({
       privacy: detail.privacy,
       composerMentions: detail.mentions,
     };
+    if (!detail.delivery) return message;
+    if (detail.delivery.status === 'clear') return completeMessageDelivery(message);
+    return setMessageDelivery(message, {
+      status: detail.delivery.status,
+      reason: detail.delivery.reason,
+      retryTargetAgentIds: detail.delivery.retryTargetAgentIds,
+    });
   }, [projectRoot, visibleAgentIds]);
 
   useEffect(() => {
@@ -406,7 +504,7 @@ export function VioletRoomPanel({
       const next = prev.map((message) => {
         if (message.id !== detail.id) return message;
         const updated = detail.status === 'clear'
-          ? clearMessageDelivery(message)
+          ? completeMessageDelivery(message)
           : setMessageDelivery(message, {
               status: detail.status,
               reason: detail.reason,
@@ -427,16 +525,43 @@ export function VioletRoomPanel({
     return () => window.removeEventListener(VIOLET_COMPOSER_DELIVERY_EVENT, onComposerDelivery);
   }, [applyComposerDelivery]);
 
+  useEffect(() => {
+    for (const message of localMessages) {
+      if (!message.local) continue;
+      if (message.deliveryTrackingComplete) {
+        recordVioletComposerDelivery({ id: message.id, status: 'clear' });
+      } else if (message.deliveryStatus) {
+        recordVioletComposerDelivery({
+          id: message.id,
+          status: message.deliveryStatus,
+          reason: message.deliveryReason,
+          retryTargetAgentIds: uniqueAgentIds(message.deliveryRetryTargetAgentIds ?? []),
+        });
+      }
+    }
+  }, [localMessages]);
+
+  const hasComposerDeliveryEvidenceCandidates = useMemo(
+    () => localMessages.some((message) => (
+      shouldTrackComposerDelivery(message) &&
+      message.deliveryStatus !== 'failed' &&
+      message.deliveryStatus !== 'retrying'
+    )),
+    [localMessages],
+  );
+  const composerDeliveryEvidence = useMemo(
+    () => hasComposerDeliveryEvidenceCandidates
+      ? buildComposerDeliveryEvidence(state?.messages ?? [])
+      : EMPTY_COMPOSER_DELIVERY_EVIDENCE,
+    [hasComposerDeliveryEvidenceCandidates, state?.messages],
+  );
+
   const refreshComposerDelivery = useCallback(() => {
-    const nativeMessages = state?.messages ?? [];
     const now = Date.now();
     setLocalMessages((prev) => {
       let changed = false;
       const next = prev.map((message) => {
         if (!shouldTrackComposerDelivery(message)) return message;
-        const unconfirmedAgentIds = unconfirmedTargetAgentIds(message, nativeMessages);
-        const activeAgentIds = activeComposerTargetAgentIds(message, nativeMessages);
-        const retryTargetAgentIds = unconfirmedAgentIds.filter((agentId) => !activeAgentIds.includes(agentId));
         if (message.deliveryStatus === 'failed') {
           const failedTargetAgentIds = message.deliveryRetryTargetAgentIds?.length
             ? uniqueAgentIds(message.deliveryRetryTargetAgentIds)
@@ -449,12 +574,23 @@ export function VioletRoomPanel({
           if (updated !== message) changed = true;
           return updated;
         }
+        if (message.deliveryStatus === 'retrying') return message;
+        const unconfirmedAgentIds = unconfirmedTargetAgentIds(message, composerDeliveryEvidence);
+        // Assistant activity is only a grace signal while a prompt is still
+        // pending. Once exit reconciliation queues it, only a matching native
+        // user event may retire that retry affordance.
+        const activeAgentIds = (
+          message.deliveryStatus === 'unconfirmed' &&
+          message.deliveryReason === VIOLET_COMPOSER_AGENT_EXIT_REASON
+        )
+          ? []
+          : activeComposerTargetAgentIds(message, composerDeliveryEvidence);
+        const retryTargetAgentIds = unconfirmedAgentIds.filter((agentId) => !activeAgentIds.includes(agentId));
         if (retryTargetAgentIds.length === 0) {
-          const updated = clearMessageDelivery(message);
+          const updated = completeMessageDelivery(message);
           if (updated !== message) changed = true;
           return updated;
         }
-        if (message.deliveryStatus === 'retrying') return message;
         const sentAt = Date.parse(message.timestamp);
         if (!Number.isFinite(sentAt) || now - sentAt < DELIVERY_CONFIRM_TIMEOUT_MS) return message;
         const updated = setMessageDelivery(message, {
@@ -467,14 +603,24 @@ export function VioletRoomPanel({
       });
       return changed ? next : prev;
     });
-  }, [state?.messages]);
+  }, [composerDeliveryEvidence]);
 
   useEffect(() => {
     refreshComposerDelivery();
-    const hasTrackedLocalMessages = localMessages.some(shouldTrackComposerDelivery);
-    if (!hasTrackedLocalMessages) return undefined;
-    const timer = window.setInterval(refreshComposerDelivery, 1000);
-    return () => window.clearInterval(timer);
+    // Native room updates drive confirmation. Time contributes only one wakeup
+    // at the earliest unresolved deadline; never rescan the room every second.
+    const now = Date.now();
+    const nextDeadline = localMessages.reduce((earliest, message) => {
+      if (!shouldTrackComposerDelivery(message) || message.deliveryStatus) return earliest;
+      const sentAt = Date.parse(message.timestamp);
+      if (!Number.isFinite(sentAt)) return earliest;
+      const deadline = sentAt + DELIVERY_CONFIRM_TIMEOUT_MS;
+      if (deadline <= now) return earliest;
+      return Math.min(earliest, deadline);
+    }, Number.POSITIVE_INFINITY);
+    if (!Number.isFinite(nextDeadline)) return undefined;
+    const timer = window.setTimeout(refreshComposerDelivery, Math.max(0, nextDeadline - now));
+    return () => window.clearTimeout(timer);
   }, [localMessages, refreshComposerDelivery]);
 
   const retryComposerMessage = useCallback(async (message: VioletRoomMessage) => {
@@ -485,6 +631,12 @@ export function VioletRoomPanel({
         : message.targetAgentIds ?? [],
     );
     if (retryTargetAgentIds.length === 0) return;
+    recordVioletComposerDelivery({
+      id: message.id,
+      status: 'retrying',
+      reason: message.deliveryReason,
+      retryTargetAgentIds,
+    });
     setLocalMessages((prev) => prev.map((item) => (
       item.id === message.id
         ? setMessageDelivery(item, {
@@ -501,6 +653,14 @@ export function VioletRoomPanel({
         privacy: !!message.privacy,
         mentions: uniqueComposerMentions(message.composerMentions),
       });
+      recordVioletComposerDelivery(result === false
+        ? {
+            id: message.id,
+            status: 'failed',
+            reason: 'Prompt was not delivered.',
+            retryTargetAgentIds,
+          }
+        : { id: message.id, status: 'clear' });
       setLocalMessages((prev) => prev.map((item) => (
         item.id === message.id
           ? result === false
@@ -509,10 +669,16 @@ export function VioletRoomPanel({
                 reason: 'Prompt was not delivered.',
                 retryTargetAgentIds,
               })
-            : clearMessageDelivery(item)
+            : completeMessageDelivery(item)
           : item
       )));
     } catch {
+      recordVioletComposerDelivery({
+        id: message.id,
+        status: 'failed',
+        reason: 'Prompt was not delivered.',
+        retryTargetAgentIds,
+      });
       setLocalMessages((prev) => prev.map((item) => (
         item.id === message.id
           ? setMessageDelivery(item, {
@@ -991,12 +1157,14 @@ export function VioletRoomPanel({
               projectRoot={projectRoot ?? null}
               agent={agentMeta?.[message.agentId]}
               agentMeta={agentMeta}
+              humanTargetName={humanTargetName}
               record={agentRecords?.[message.agentId]}
               onAgentContextMenu={onAgentContextMenu}
               onCommendAgent={onCommendAgent}
               onOpenAgentTerminal={onOpenAgentTerminal}
               onRetryComposerMessage={retryComposerMessage}
               onRetryAgentBusMessage={retryAgentBusMessage}
+              onQuoteMessage={onQuoteMessage ? insertRoomQuote : undefined}
             />
           ))}
         </div>
@@ -1015,6 +1183,11 @@ export function VioletRoomPanel({
         <span aria-hidden="true">↓</span>
         <span>Latest</span>
       </button>
+      {quoteNotice && (
+        <div className="violet-room-quote-toast" role="status" aria-live="polite">
+          {quoteNotice}
+        </div>
+      )}
     </section>
   );
 }
@@ -1024,17 +1197,20 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
   projectRoot,
   agent,
   agentMeta,
+  humanTargetName,
   record,
   onAgentContextMenu,
   onCommendAgent,
   onOpenAgentTerminal,
   onRetryComposerMessage,
   onRetryAgentBusMessage,
+  onQuoteMessage,
 }: {
   message: VioletRoomMessage;
   projectRoot?: string | null;
   agent?: Agent;
   agentMeta?: Readonly<Record<AgentId, Agent>>;
+  humanTargetName: string;
   record?: ProjectAgentRecord;
   onAgentContextMenu?: (
     id: AgentId,
@@ -1045,6 +1221,7 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
   onOpenAgentTerminal?: (id: AgentId) => void;
   onRetryComposerMessage?: (message: VioletRoomMessage) => void;
   onRetryAgentBusMessage?: (message: VioletRoomMessage) => void;
+  onQuoteMessage?: (quote: RoomQuoteReference) => void;
 }) {
   if (message.kind === 'compaction') {
     return (
@@ -1124,6 +1301,14 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
     (message.deliveryStatus === 'failed' || message.deliveryStatus === 'unconfirmed')
   );
   const showRetry = showComposerRetry || (AGENT_BUS_RETRY_UI_ENABLED && showAgentBusRetry);
+  const parsedQuotePrompt = parseRoomQuotePrompt(message.text);
+  const canQuote = (
+    !!onQuoteMessage &&
+    !!(message.local ? message.quoteRefId : message.id) &&
+    !!roomQuoteProjectKey(projectRoot) &&
+    message.text.length > 0 &&
+    isQuoteableRoomMessage(message)
+  );
   return (
     <article
       className={[
@@ -1133,6 +1318,7 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
         showRetry ? 'delivery-issue' : '',
         isEmberDream ? 'ember-dream' : '',
         isBartenderConflict ? 'bartender-conflict' : '',
+        canQuote ? 'quoteable' : '',
         lifecycle ? 'inactive-agent' : '',
         lifecycle ? `inactive-${lifecycle}` : '',
       ].filter(Boolean).join(' ')}
@@ -1192,10 +1378,30 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
               onRetryAgentBusMessage?.(message);
             }
           }}
-          aria-label="Retry sending this message"
-          title="Retry"
+          aria-label="Queued message — try sending now"
+          title="Queued — try sending now"
         >
-          <RetrySendIcon />
+          <QueuedMessageIcon />
+        </button>
+      )}
+      {canQuote && (
+        <button
+          type="button"
+          className="violet-msg-quote"
+          onClick={() => {
+            const quote = roomQuoteReferenceForMessage(
+              message,
+              projectRoot,
+              agentMeta,
+              humanTargetName,
+              label,
+            );
+            if (quote) onQuoteMessage?.(quote);
+          }}
+          aria-label={`Quote ${label}'s message`}
+          title="Quote message"
+        >
+          <RoomQuoteMark />
         </button>
       )}
       <div className="violet-msg-content">
@@ -1206,8 +1412,8 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
               {lifecycleLabel && <em className="violet-agent-status-label">{lifecycleLabel}</em>}
             </span>
             {targetBadges.map((agentId) => (
-              <em key={agentId} className="violet-target-badge">
-                @{shortAgentLabel(agentId, agentMeta)}
+              <em key={agentId} className={`violet-target-badge ${isHumanTelegramTarget(agentId) ? 'human' : ''}`.trim()}>
+                @{targetBadgeLabel(agentId, agentMeta, humanTargetName)}
               </em>
             ))}
             {message.kind !== 'message' && !isCommentary && <b>{message.kind}</b>}
@@ -1217,8 +1423,8 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
         {isUser && targetBadges.length > 0 && (
           <div className="violet-msg-targets">
             {targetBadges.map((agentId) => (
-              <em key={agentId} className="violet-target-badge">
-                @{shortAgentLabel(agentId, agentMeta)}
+              <em key={agentId} className={`violet-target-badge ${isHumanTelegramTarget(agentId) ? 'human' : ''}`.trim()}>
+                @{targetBadgeLabel(agentId, agentMeta, humanTargetName)}
               </em>
             ))}
             {message.privacy && <em className="violet-target-badge private">private</em>}
@@ -1265,7 +1471,14 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
               <MarkdownText text={message.text} projectRoot={projectRoot} enableLocalFileRefs />
             </details>
           ) : (
-            <MarkdownText text={message.text} projectRoot={projectRoot} enableLocalFileRefs />
+            <>
+              {parsedQuotePrompt.quotes.length > 0 && (
+                <RoomQuoteCards quotes={parsedQuotePrompt.quotes} />
+              )}
+              {parsedQuotePrompt.body && (
+                <MarkdownText text={parsedQuotePrompt.body} projectRoot={projectRoot} enableLocalFileRefs />
+              )}
+            </>
           )}
           {canOpenTerminal && (
             <button
@@ -1282,10 +1495,144 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
   );
 });
 
-function RetrySendIcon() {
+const RoomQuoteCards = memo(function RoomQuoteCards({
+  quotes,
+}: {
+  quotes: readonly RoomQuoteReference[];
+}) {
+  return (
+    <div className="violet-room-quote-cards" data-testid="violet-room-quote-cards">
+      {quotes.map((quote, index) => {
+        const to = quote.to.map((party) => party.name).join(', ') || 'Room';
+        return (
+          <div
+            key={`${quote.ref}-${index}`}
+            className="violet-room-quote-card"
+            title={quote.excerpt}
+          >
+            <span className="violet-room-quote-mark">
+              <RoomQuoteMark />
+            </span>
+            <span className="violet-room-quote-card-copy">
+              <span className="violet-room-quote-card-meta">
+                {quote.from.name} → {to} · {formatTime(quote.at)}
+                {!!quote.assets?.length && ` · ${quote.assets.length} ${quote.assets.length === 1 ? 'ref' : 'refs'}`}
+              </span>
+              <span className="violet-room-quote-card-excerpt">
+                {quote.excerpt}
+              </span>
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+function roomQuoteReferenceForMessage(
+  message: VioletRoomMessage,
+  projectRoot: string | null | undefined,
+  agentMeta: Readonly<Record<AgentId, Agent>> | undefined,
+  humanTargetName: string,
+  senderLabel: string,
+): RoomQuoteReference | null {
+  const ref = message.local ? message.quoteRefId : message.id;
+  const project = roomQuoteProjectKey(projectRoot);
+  const sourceText = parseRoomQuotePrompt(message.text).body;
+  const excerpt = truncateRoomQuoteExcerpt(sourceText);
+  if (!ref || !project || !excerpt.excerpt || !isQuoteableRoomMessage(message)) return null;
+
+  const explicitTargets = message.targetAgentIds ?? [];
+  const targetIds = explicitTargets.length > 0
+    ? explicitTargets
+    : message.role === 'user' && message.agentId !== 'user'
+      ? [message.agentId]
+      : ['user'];
+  const to = uniqueStrings(targetIds).map((id) => ({
+    id,
+    name: id === 'user' || isHumanTelegramTarget(id)
+      ? humanTargetName
+      : shortAgentLabel(id, agentMeta),
+  }));
+  const assets = extractRoomQuoteAssets(sourceText);
+  return {
+    ref,
+    project,
+    projectRoot: projectRoot ?? undefined,
+    from: message.role === 'user'
+      ? { id: 'user', name: 'You' }
+      : { id: message.agentId, name: senderLabel },
+    to,
+    at: message.timestamp,
+    ...excerpt,
+    ...(assets.length ? { assets } : {}),
+    ...(message.privacy ? { private: true } : {}),
+    ...(message.privacy && targetIds.length ? { recipientIds: uniqueStrings(targetIds) } : {}),
+  };
+}
+
+function isQuoteableRoomMessage(message: VioletRoomMessage): boolean {
+  if (
+    message.deliveryStatus === 'failed' ||
+    message.kind === 'compaction' ||
+    message.kind === 'commentary' ||
+    message.kind === 'thinking' ||
+    message.kind === 'tool' ||
+    message.kind === 'control' ||
+    message.kind === 'interrupt' ||
+    message.ghostSasayaki ||
+    isTurnInterruptMessage(message) ||
+    isBbsThreadPromptMessage(message) ||
+    isBartenderConflictMessage(message) ||
+    isEmberDreamMessage(message)
+  ) {
+    return false;
+  }
+  if (message.kind === 'artifact') {
+    return !message.local && message.role === 'assistant';
+  }
+  if (message.kind !== 'message') return false;
+  if (message.role === 'user') {
+    // Native provider echoes of Agent Bus/system envelopes are plumbing, not
+    // human-authored user bubbles. The visible actor-side bubble is the stable
+    // quote target for handoffs, Telegram, and Ember reminders.
+    if (internalAgentBusEnvelopeEventId(message.text)) return false;
+    return message.local ? !!message.quoteRefId : true;
+  }
+  if (message.role !== 'assistant' || message.local) return false;
+  if (message.actorIntent === 'delivery-skipped' || message.nativeEventId?.includes(':skipped')) {
+    return false;
+  }
+  if (message.shell !== 'system') return true;
+
+  const systemActor = systemActorName(message.agentId);
+  if (!systemActor) {
+    return (
+      message.actorIntent === 'handoff' ||
+      message.actorIntent === 'message' ||
+      !!message.nativeEventId?.startsWith('agentbus-')
+    );
+  }
+  if (message.agentId === 'laughing-man') {
+    return (
+      message.actorIntent === 'telegram' ||
+      !!message.nativeEventId?.startsWith('lm-update-')
+    );
+  }
+  if (message.agentId === 'ember') {
+    return (
+      message.actorIntent === 'reminder' ||
+      !!message.nativeEventId?.startsWith('ember-reminder-')
+    );
+  }
+  return false;
+}
+
+function QueuedMessageIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM17.19 15.94C17.15 16.03 17.1 16.11 17.03 16.18L15.34 17.87C15.19 18.02 15 18.09 14.81 18.09C14.62 18.09 14.43 18.02 14.28 17.87C13.99 17.58 13.99 17.1 14.28 16.81L14.69 16.4H9.1C7.8 16.4 6.75 15.34 6.75 14.05V12.28C6.75 11.87 7.09 11.53 7.5 11.53C7.91 11.53 8.25 11.87 8.25 12.28V14.05C8.25 14.52 8.63 14.9 9.1 14.9H14.69L14.28 14.49C13.99 14.2 13.99 13.72 14.28 13.43C14.57 13.14 15.05 13.14 15.34 13.43L17.03 15.12C17.1 15.19 17.15 15.27 17.19 15.36C17.27 15.55 17.27 15.76 17.19 15.94ZM17.25 11.72C17.25 12.13 16.91 12.47 16.5 12.47C16.09 12.47 15.75 12.13 15.75 11.72V9.95C15.75 9.48 15.37 9.1 14.9 9.1H9.31L9.72 9.5C10.01 9.79 10.01 10.27 9.72 10.56C9.57 10.71 9.38 10.78 9.19 10.78C9 10.78 8.81 10.71 8.66 10.56L6.97 8.87C6.9 8.8 6.85 8.72 6.81 8.63C6.73 8.45 6.73 8.24 6.81 8.06C6.85 7.97 6.9 7.88 6.97 7.81L8.66 6.12C8.95 5.83 9.43 5.83 9.72 6.12C10.01 6.41 10.01 6.89 9.72 7.18L9.31 7.59H14.9C16.2 7.59 17.25 8.65 17.25 9.94V11.72Z" />
+      <circle cx="12" cy="12" r="9.5" />
+      <path d="M12 7.6v4.9l3.1 1.85" />
     </svg>
   );
 }
@@ -1986,16 +2333,46 @@ function parseMarkdownTableRow(line: string): string[] {
   return value.split('|').map((cell) => cell.trim());
 }
 
+const MARKDOWN_LINK_TOKEN_PATTERN = /(!?)\[([^\]]*)\]\((<[^>\r\n]+>|[^)\r\n]+)\)/;
+const INLINE_MARKDOWN_PATTERN = new RegExp(
+  '(`[^`]+`|\\*\\*[^*]+\\*\\*|' + MARKDOWN_LINK_TOKEN_PATTERN.source + ')',
+  'g',
+);
+const MARKDOWN_LINK_EXACT_PATTERN = new RegExp(`^${MARKDOWN_LINK_TOKEN_PATTERN.source}$`);
+
 function renderInlineMarkdown(
   text: string,
   options: MarkdownRenderOptions = DEFAULT_MARKDOWN_RENDER_OPTIONS,
 ): ReactNode {
   const nodes: ReactNode[] = [];
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\(([^)]+)\))/g;
   let lastIndex = 0;
-  for (const match of text.matchAll(pattern)) {
+  for (const match of text.matchAll(INLINE_MARKDOWN_PATTERN)) {
     const value = match[0];
     const index = match.index ?? 0;
+    const link = parseMarkdownLinkToken(value);
+    const escapePrefixLength = link ? markdownEscapePrefixLength(text, index) : 0;
+    if (escapePrefixLength > 0) {
+      const escapeStart = index - escapePrefixLength;
+      if (escapeStart > lastIndex) {
+        nodes.push(
+          <RichInline
+            key={`t-${escapeStart}`}
+            text={text.slice(lastIndex, escapeStart)}
+            options={options}
+          />,
+        );
+      }
+      const literalBackslashes = '\\'.repeat(Math.floor(escapePrefixLength / 2));
+      if (literalBackslashes) {
+        nodes.push(<span key={`e-${index}`}>{literalBackslashes}</span>);
+      }
+      lastIndex = index;
+      if (escapePrefixLength % 2 === 1) {
+        nodes.push(<span key={`l-${index}`}>{value}</span>);
+        lastIndex = index + value.length;
+        continue;
+      }
+    }
     if (index > lastIndex) nodes.push(<RichInline key={`t-${index}`} text={text.slice(lastIndex, index)} options={options} />);
     if (value.startsWith('`')) {
       const codeText = value.slice(1, -1);
@@ -2016,31 +2393,62 @@ function renderInlineMarkdown(
         : <code key={`c-${index}`} className="violet-md-inline-code">{codeText}</code>);
     } else if (value.startsWith('**')) {
       nodes.push(<strong key={`b-${index}`}>{renderInlineMarkdown(value.slice(2, -2), options)}</strong>);
-    } else {
-      const link = value.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      if (link && /^https?:\/\//i.test(link[2])) {
-        nodes.push(<a key={`a-${index}`} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a>);
-      } else if (link) {
+    } else if (link) {
+      if (/^https?:\/\//i.test(link.destination)) {
+        nodes.push(<a key={`a-${index}`} href={link.destination} target="_blank" rel="noreferrer">{link.label}</a>);
+      } else {
         nodes.push(
           <LocalFileRef
             key={`a-${index}`}
-            value={link[2]}
-            label={link[1]}
+            value={link.destination}
+            label={link.label}
             rawText={value}
-            kind={isImageFileRef(link[2]) ? 'image' : 'file'}
+            kind={link.image || isImageFileRef(link.destination) ? 'image' : 'file'}
             projectRoot={options.projectRoot}
             enableLocalFileRefs={options.enableLocalFileRefs}
-            previewImage={options.previewImageRefs.has(link[2])}
+            previewImage={options.previewImageRefs.has(link.destination)}
           />,
         );
-      } else {
-        nodes.push(<RichInline key={`x-${index}`} text={value} options={options} />);
       }
+    } else {
+      nodes.push(<RichInline key={`x-${index}`} text={value} options={options} />);
     }
     lastIndex = index + value.length;
   }
   if (lastIndex < text.length) nodes.push(<RichInline key="tail" text={text.slice(lastIndex)} options={options} />);
   return nodes;
+}
+
+type MarkdownLinkToken = {
+  destination: string;
+  image: boolean;
+  label: string;
+};
+
+function parseMarkdownLinkToken(value: string): MarkdownLinkToken | null {
+  const match = value.match(MARKDOWN_LINK_EXACT_PATTERN);
+  if (!match) return null;
+  return {
+    destination: normalizeMarkdownDestination(match[3] ?? ''),
+    image: match[1] === '!',
+    label: match[2] ?? '',
+  };
+}
+
+function normalizeMarkdownDestination(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function markdownEscapePrefixLength(text: string, index: number): number {
+  let length = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) {
+    length += 1;
+  }
+  return length;
 }
 
 function splitRichText(text: string): Array<{ kind: 'text' | 'file' | 'image'; value: string }> {
@@ -2071,16 +2479,27 @@ function localFileRefFromInlineCode(value: string): { kind: 'file' | 'image'; va
 
 function collectPreviewImageRefs(text: string): ReadonlySet<string> {
   const refs = new Set<string>();
-  for (const match of text.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
-    const ref = match[1] ?? '';
-    if (!isPreviewableImageRef(ref)) continue;
-    refs.add(ref);
+  const bareTextSegments: string[] = [];
+  let lastIndex = 0;
+  const markdownLinkPattern = new RegExp(MARKDOWN_LINK_TOKEN_PATTERN.source, 'g');
+  for (const match of text.matchAll(markdownLinkPattern)) {
+    const value = match[0];
+    const index = match.index ?? 0;
+    if (index > lastIndex) bareTextSegments.push(text.slice(lastIndex, index));
+    lastIndex = index + value.length;
+    const link = parseMarkdownLinkToken(value);
+    if (!link || markdownEscapePrefixLength(text, index) % 2 === 1) continue;
+    if (/^https?:\/\//i.test(link.destination) || !isPreviewableImageRef(link.destination)) continue;
+    refs.add(link.destination);
     if (refs.size >= VIOLET_INLINE_IMAGE_PREVIEW_LIMIT) return refs;
   }
-  for (const part of splitRichText(text)) {
-    if (part.kind !== 'image' || !isPreviewableImageRef(part.value)) continue;
-    refs.add(part.value);
-    if (refs.size >= VIOLET_INLINE_IMAGE_PREVIEW_LIMIT) break;
+  if (lastIndex < text.length) bareTextSegments.push(text.slice(lastIndex));
+  for (const segment of bareTextSegments) {
+    for (const part of splitRichText(segment)) {
+      if (part.kind !== 'image' || !isPreviewableImageRef(part.value)) continue;
+      refs.add(part.value);
+      if (refs.size >= VIOLET_INLINE_IMAGE_PREVIEW_LIMIT) return refs;
+    }
   }
   return refs;
 }
@@ -2300,7 +2719,7 @@ const LocalFileRef = memo(function LocalFileRef({
     <span className="violet-image-ref">
       <InlineLocalImagePreview
         path={resolved.path}
-        alt={basename(value)}
+        alt={label || basename(value)}
         onOpen={openRef}
         onContextMenu={handleImageContextMenu}
       />
@@ -2406,12 +2825,25 @@ export function mergeRoomMessages(
   nativeMessages: readonly VioletChatMessage[],
   localMessages: readonly VioletRoomMessage[],
 ): VioletRoomMessage[] {
-  const filteredNative = nativeMessages.filter((message) => !isDuplicateNativeUserMessage(message, localMessages));
+  const preparedLocalMessages = prepareLocalComposerMessages(localMessages);
+  const quoteRefByLocalId = new Map<string, string>();
+  const filteredNative = nativeMessages.filter((message) => {
+    const local = matchingLocalComposerMessage(message, preparedLocalMessages);
+    if (!local) return true;
+    if (!quoteRefByLocalId.has(local.id)) quoteRefByLocalId.set(local.id, message.id);
+    return false;
+  });
+  const materializedLocalMessages = localMessages.map((message) => {
+    const quoteRefId = quoteRefByLocalId.get(message.id);
+    return quoteRefId && message.quoteRefId !== quoteRefId
+      ? { ...message, quoteRefId }
+      : message;
+  });
   const markedNative = markGhostSasayakiMessages(
     collapseNativeBroadcastUserMessages(filteredNative),
-    localMessages,
+    materializedLocalMessages,
   );
-  return dedupeRoomMessages([...markedNative, ...localMessages])
+  return dedupeRoomMessages([...markedNative, ...materializedLocalMessages])
     .sort(compareRoomMessagesForDisplay);
 }
 
@@ -2430,7 +2862,7 @@ function normalizeAgentIds(ids: readonly AgentId[]): AgentId[] {
 }
 
 function collapseNativeBroadcastUserMessages(messages: readonly VioletChatMessage[]): VioletRoomMessage[] {
-  const sorted = [...messages].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id));
+  const sorted = [...messages].sort(compareVioletMessageOrder);
   const groups: Array<{
     textKey: string;
     time: number;
@@ -2598,13 +3030,6 @@ function trimTerminalEnvelopePadding(text: string): string {
   return text.replace(/^[\s\u0000-\u001f\u007f-\u009f]+|[\s\u0000-\u001f\u007f-\u009f]+$/gu, '');
 }
 
-function trimTerminalControlPadding(text: string): string {
-  return text.replace(
-    /^[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]+|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]+$/gu,
-    '',
-  );
-}
-
 function isProviderAttachmentMarker(marker: string): boolean {
   const hashIndex = marker.lastIndexOf('#');
   if (hashIndex <= 0) return false;
@@ -2617,7 +3042,18 @@ function compareRoomMessagesForDisplay(left: VioletRoomMessage, right: VioletRoo
   const leftTime = roomMessageDisplaySortTime(left);
   const rightTime = roomMessageDisplaySortTime(right);
   if (leftTime !== rightTime) return leftTime - rightTime;
-  return left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id);
+  return compareVioletMessageOrder(left, right);
+}
+
+export function compareVioletMessageOrder(
+  left: VioletChatMessage,
+  right: VioletChatMessage,
+): number {
+  return (
+    left.timestamp.localeCompare(right.timestamp) ||
+    (left.violetSeq ?? 0) - (right.violetSeq ?? 0) ||
+    left.id.localeCompare(right.id)
+  );
 }
 
 function roomMessageDisplaySortTime(message: VioletRoomMessage): number {
@@ -2690,6 +3126,7 @@ function shouldTrackComposerDelivery(message: VioletRoomMessage): boolean {
     message.role === 'user' &&
     message.kind === 'message' &&
     message.agentId === 'user' &&
+    !message.deliveryTrackingComplete &&
     !!message.targetAgentIds?.length
   );
 }
@@ -2728,30 +3165,63 @@ function applyAgentBusDeliveryStates(
   return changed ? next : messages as VioletRoomMessage[];
 }
 
+function buildComposerDeliveryEvidence(
+  nativeMessages: readonly VioletChatMessage[],
+): ComposerDeliveryEvidence {
+  const nativeUsersByAgent = new Map<string, PreparedNativeUserMessage[]>();
+  const latestAssistantAtByAgent = new Map<string, number>();
+  for (const message of nativeMessages) {
+    const timestampMs = Date.parse(message.timestamp);
+    if (message.role === 'user') {
+      const items = nativeUsersByAgent.get(message.agentId) ?? [];
+      items.push({
+        timestampMs,
+        text: prepareDedupeText(message.text),
+      });
+      nativeUsersByAgent.set(message.agentId, items);
+      continue;
+    }
+    if (message.role !== 'assistant' || !Number.isFinite(timestampMs)) continue;
+    const previous = latestAssistantAtByAgent.get(message.agentId) ?? Number.NEGATIVE_INFINITY;
+    if (timestampMs > previous) latestAssistantAtByAgent.set(message.agentId, timestampMs);
+  }
+  return { nativeUsersByAgent, latestAssistantAtByAgent };
+}
+
+function composerDeliveryTargetAgentIds(message: VioletRoomMessage): AgentId[] {
+  return uniqueAgentIds(
+    message.deliveryRetryTargetAgentIds?.length
+      ? message.deliveryRetryTargetAgentIds
+      : message.targetAgentIds ?? [],
+  );
+}
+
 function unconfirmedTargetAgentIds(
   message: VioletRoomMessage,
-  nativeMessages: readonly VioletChatMessage[],
+  evidence: ComposerDeliveryEvidence,
 ): string[] {
-  const targetAgentIds = uniqueAgentIds(message.targetAgentIds ?? []);
-  return targetAgentIds.filter((agentId) => {
-    const probe: VioletRoomMessage = { ...message, targetAgentIds: [agentId] };
-    return !nativeMessages.some((nativeMessage) => isDuplicateNativeUserMessage(nativeMessage, [probe]));
-  });
+  const targetAgentIds = composerDeliveryTargetAgentIds(message);
+  const localText = prepareDedupeText(message.text);
+  const localTime = Date.parse(message.timestamp);
+  return targetAgentIds.filter((agentId) => !(
+    evidence.nativeUsersByAgent.get(agentId)?.some((nativeMessage) => (
+      preparedDedupeTextsMatch(nativeMessage.text, localText) &&
+      timestampsWithinComposerConfirmationWindow(nativeMessage.timestampMs, localTime)
+    )) ?? false
+  ));
 }
 
 function activeComposerTargetAgentIds(
   message: VioletRoomMessage,
-  nativeMessages: readonly VioletChatMessage[],
+  evidence: ComposerDeliveryEvidence,
 ): string[] {
   const sentAt = Date.parse(message.timestamp);
   if (!Number.isFinite(sentAt)) return [];
-  const targetAgentIds = uniqueAgentIds(message.targetAgentIds ?? []);
+  const targetAgentIds = composerDeliveryTargetAgentIds(message);
   // Busy CLIs can queue composer input before emitting a native user event.
-  return targetAgentIds.filter((agentId) => nativeMessages.some((nativeMessage) => (
-    nativeMessage.agentId === agentId &&
-    nativeMessage.role === 'assistant' &&
-    Date.parse(nativeMessage.timestamp) >= sentAt
-  )));
+  return targetAgentIds.filter((agentId) => (
+    (evidence.latestAssistantAtByAgent.get(agentId) ?? Number.NEGATIVE_INFINITY) >= sentAt
+  ));
 }
 
 function unconfirmedAgentBusTargetAgentIds(
@@ -2814,8 +3284,9 @@ function sameAgentBusDeliveryState(left: AgentBusDeliveryState, right: AgentBusD
   );
 }
 
-function clearMessageDelivery(message: VioletRoomMessage): VioletRoomMessage {
+function completeMessageDelivery(message: VioletRoomMessage): VioletRoomMessage {
   if (
+    message.deliveryTrackingComplete &&
     !message.deliveryStatus &&
     !message.deliveryReason &&
     !message.deliveryRetryTargetAgentIds?.length
@@ -2828,7 +3299,10 @@ function clearMessageDelivery(message: VioletRoomMessage): VioletRoomMessage {
     deliveryRetryTargetAgentIds: _deliveryRetryTargetAgentIds,
     ...rest
   } = message;
-  return rest;
+  return {
+    ...rest,
+    deliveryTrackingComplete: true,
+  };
 }
 
 function setMessageDelivery(
@@ -2842,14 +3316,19 @@ function setMessageDelivery(
   const retryTargetAgentIds = uniqueAgentIds(delivery.retryTargetAgentIds ?? message.targetAgentIds ?? []);
   const reason = delivery.reason || undefined;
   if (
+    !message.deliveryTrackingComplete &&
     message.deliveryStatus === delivery.status &&
     message.deliveryReason === reason &&
     targetAgentIdsKey(message.deliveryRetryTargetAgentIds) === targetAgentIdsKey(retryTargetAgentIds)
   ) {
     return message;
   }
+  const {
+    deliveryTrackingComplete: _deliveryTrackingComplete,
+    ...rest
+  } = message;
   return {
-    ...message,
+    ...rest,
     deliveryStatus: delivery.status,
     deliveryReason: reason,
     deliveryRetryTargetAgentIds: retryTargetAgentIds,
@@ -2879,7 +3358,7 @@ function uniqueComposerMentions(
 }
 
 function dedupeRoomMessages(messages: VioletRoomMessage[]): VioletRoomMessage[] {
-  const sorted = [...messages].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id));
+  const sorted = [...messages].sort(compareVioletMessageOrder);
   const seen = new Set<string>();
   const out: VioletRoomMessage[] = [];
   for (const message of sorted) {
@@ -2950,7 +3429,7 @@ export function mergeSyncedNativeMessages(
   options: { preserveLoadedHistory?: boolean } = {},
 ): VioletChatMessage[] {
   const merged = dedupeRoomMessages([...(left as VioletRoomMessage[]), ...(right as VioletRoomMessage[])])
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id));
+    .sort(compareVioletMessageOrder);
   const bounded = options.preserveLoadedHistory
     ? merged
     : merged.slice(-VIOLET_ROOM_LIVE_LIMIT);
@@ -2962,7 +3441,7 @@ export function mergeOlderRoomMessages(
   right: readonly VioletChatMessage[],
 ): VioletChatMessage[] {
   const merged = dedupeRoomMessages([...(left as VioletRoomMessage[]), ...(right as VioletRoomMessage[])])
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id));
+    .sort(compareVioletMessageOrder);
   return reuseStableRoomMessages(left as readonly VioletRoomMessage[], merged);
 }
 
@@ -3056,8 +3535,10 @@ function sameRoomMessage(left: VioletChatMessage, right: VioletChatMessage): boo
     left.kind === right.kind &&
     left.timestamp === right.timestamp &&
     left.text === right.text &&
+    left.violetSeq === right.violetSeq &&
     nullishString(left.sourcePath) === nullishString(right.sourcePath) &&
     nullishString(left.nativeEventId) === nullishString(right.nativeEventId) &&
+    nullishString(left.actorIntent) === nullishString(right.actorIntent) &&
     nullishString(left.agentDisplayName) === nullishString(right.agentDisplayName) &&
     nullishString(left.agentAvatarId) === nullishString(right.agentAvatarId) &&
     nullishString(left.agentProvider) === nullishString(right.agentProvider) &&
@@ -3069,8 +3550,10 @@ function sameRoomMessage(left: VioletChatMessage, right: VioletChatMessage): boo
     nullishString(leftRoom.deliveryStatus) === nullishString(rightRoom.deliveryStatus) &&
     nullishString(leftRoom.deliveryReason) === nullishString(rightRoom.deliveryReason) &&
     targetAgentIdsKey(leftRoom.deliveryRetryTargetAgentIds) === targetAgentIdsKey(rightRoom.deliveryRetryTargetAgentIds) &&
+    Boolean(leftRoom.deliveryTrackingComplete) === Boolean(rightRoom.deliveryTrackingComplete) &&
     Boolean(leftRoom.ghostSasayaki) === Boolean(rightRoom.ghostSasayaki) &&
     leftRoom.ghostSasayakiSortTime === rightRoom.ghostSasayakiSortTime &&
+    nullishString(leftRoom.quoteRefId) === nullishString(rightRoom.quoteRefId) &&
     normalizeVioletProjectRoot(leftRoom.projectRoot) === normalizeVioletProjectRoot(rightRoom.projectRoot) &&
     progressItemsKey(leftRoom.progressItems) === progressItemsKey(rightRoom.progressItems) &&
     progressEntriesKey(leftRoom.progressEntries) === progressEntriesKey(rightRoom.progressEntries)
@@ -3133,59 +3616,34 @@ function isNativeUserPrompt(message: VioletChatMessage): boolean {
   return message.role === 'user' && message.kind === 'message' && message.agentId !== 'user';
 }
 
-function isDuplicateNativeUserMessage(
+function matchingLocalComposerMessage(
   nativeMessage: VioletChatMessage,
-  localMessages: readonly VioletRoomMessage[],
-): boolean {
-  if (nativeMessage.role !== 'user') return false;
-  const nativeText = normalizeForDedupe(nativeMessage.text);
-  if (!nativeText) return false;
-  const nativeAttachmentFree = normalizeAttachmentInsensitive(nativeMessage.text);
+  localMessages: readonly PreparedLocalComposerMessage[],
+): PreparedLocalComposerMessage | undefined {
+  if (nativeMessage.role !== 'user') return undefined;
+  const nativeText = prepareDedupeText(nativeMessage.text);
+  if (!nativeText.normalized) return undefined;
   const nativeTime = Date.parse(nativeMessage.timestamp);
-  return localMessages.some((local) => {
-    if (local.role !== 'user') return false;
-    if (!local.targetAgentIds?.includes(nativeMessage.agentId)) return false;
-    if (normalizeForDedupe(local.text) !== nativeText) {
-      // Attachment sends never match verbatim: the composer payload carries
-      // the attachment *path* inline while the CLI's native log rewrites it
-      // to a provider marker ("[Image #1]…"). Compare again with both kinds
-      // of attachment decoration stripped. If both sides strip down to empty,
-      // treat it as an attachment-only prompt and confirm by target + time.
-      const localAttachmentFree = normalizeAttachmentInsensitive(local.text);
-      if (localAttachmentFree !== nativeAttachmentFree) {
-        return false;
-      }
-    }
-    const localTime = Date.parse(local.timestamp);
-    if (!Number.isFinite(nativeTime) || !Number.isFinite(localTime)) return true;
-    return Math.abs(nativeTime - localTime) < 15 * 60 * 1000;
+  return localMessages.find((local) => {
+    if (!local.targetAgentIds.has(nativeMessage.agentId)) return false;
+    if (!preparedDedupeTextsMatch(nativeText, local.text)) return false;
+    return timestampsWithinComposerConfirmationWindow(nativeTime, local.timestampMs);
   });
 }
 
-/* Erase attachment decorations from both sides of the local/native compare:
-   provider markers ("[Image #1]"), provider source trailers
-   ("[Image: source: /path/to.png]"), and inline attachment paths the
-   composer serializes for chips. */
-export function normalizeAttachmentInsensitive(text: string): string {
-  return normalizeForDedupe(
-    text
-      .replace(/\[[^\]\n#]{1,40}#\d+\]/g, ' ')
-      .replace(/\[[^\]\n:]{1,20}: source: [^\]\n]+\]/g, ' ')
-      .replace(/(?:~\/|\/)?\S*project-memory\/attachments\/\S+/g, ' '),
-  );
-}
-
-export function normalizeForDedupe(text: string): string {
-  return normalizeSharedAttachmentPathsForDedupe(trimTerminalControlPadding(text))
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function normalizeSharedAttachmentPathsForDedupe(text: string): string {
-  return text.replace(
-    /(^|[\s([{"'`])(?:~|\/\S+)?\/project-memory\/attachments\//g,
-    '$1project-memory/attachments/',
-  );
+function prepareLocalComposerMessages(
+  localMessages: readonly VioletRoomMessage[],
+): PreparedLocalComposerMessage[] {
+  return localMessages.flatMap((message) => (
+    message.role === 'user'
+      ? [{
+          id: message.id,
+          timestampMs: Date.parse(message.timestamp),
+          text: prepareDedupeText(message.text),
+          targetAgentIds: new Set(message.targetAgentIds ?? []),
+        }]
+      : []
+  ));
 }
 
 function shortAgentLabel(agentId: string, agentMeta?: Readonly<Record<AgentId, Agent>>): string {
@@ -3196,6 +3654,14 @@ function shortAgentLabel(agentId: string, agentMeta?: Readonly<Record<AgentId, A
     parts.base,
     parts.bunshin,
   ].filter(Boolean).join(' ');
+}
+
+function targetBadgeLabel(
+  agentId: string,
+  agentMeta: Readonly<Record<AgentId, Agent>> | undefined,
+  humanTargetName: string,
+): string {
+  return isHumanTelegramTarget(agentId) ? humanTargetName : shortAgentLabel(agentId, agentMeta);
 }
 
 function formatAgentList(names: readonly string[]): string {
@@ -3256,6 +3722,7 @@ function providerAvatarClass(id: string): string {
   if (baseId === 'hero-dex') return 'provider-codex';
   if (baseId === 'hero-gem') return 'provider-antigravity';
   if (baseId === 'hero-op') return 'provider-opencode';
+  if (baseId === 'hero-kimi') return 'provider-kimi';
   if (baseId === 'claude') return 'provider-claude';
   if (baseId === 'codex') return 'provider-codex';
   if (baseId === 'alice') return 'provider-claude';

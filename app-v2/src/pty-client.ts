@@ -659,7 +659,7 @@ export async function onSmartTuiExit(listener: TuiExitListener): Promise<Unliste
 }
 
 function isFallbackCli(value: string): value is FallbackCli {
-  return /^(claude|codex|agy|opencode|pi)$/.test(value);
+  return /^(claude|codex|agy|opencode|pi|kimi)$/.test(value);
 }
 
 function resolveMockCwd(cwd: string, input: string): string | null {
@@ -712,6 +712,7 @@ export function __resetMockSmartPtyForTests() {
   mockState.exitListeners.clear();
   mockState.statusListeners.clear();
   agentWorkListeners.clear();
+  resetMockStorageMeasurement();
 }
 
 export async function terminalEnhancementStatus(): Promise<TerminalEnhancementStatus> {
@@ -985,9 +986,16 @@ export interface OAuthConfigStatus {
   appPath: string;
   googleDrivePath: string;
   localAccountFolder: string;
-  localAccountBytes: number;
   localProjectRoot: string;
-  localProjectRootBytes: number;
+}
+
+export interface StorageMeasurementStatus {
+  updating: boolean;
+  onDiskBytes: number | null;
+  availableBytes: number | null;
+  /** Unix timestamp in seconds for the last successful measurement. */
+  measuredAt: number | null;
+  error: string | null;
 }
 
 export interface SupportedShellStatus {
@@ -1020,7 +1028,6 @@ export interface GoogleDriveStatus {
   folderPath: string | null;
   folderUrl: string | null;
   localAccountFolder: string;
-  localAccountBytes: number;
   configMissing: boolean;
   error: string | null;
 }
@@ -1041,6 +1048,11 @@ export interface GithubCreateRepoRequest {
   autoInit: boolean;
 }
 
+export interface WorkspaceAgentSpec extends Omit<AgentSpawnRequest, 'cli'> {
+  /** Raw persisted provider. Future Kota versions may write values this build cannot launch. */
+  cli: string;
+}
+
 export interface WorkspaceProject {
   projectId: string;
   repoFullName: string;
@@ -1056,7 +1068,7 @@ export interface WorkspaceProject {
   sourceDirBytes: number;
   sharedDir: string;
   rulesDir: string;
-  agents: AgentSpawnRequest[];
+  agents: WorkspaceAgentSpec[];
   archived?: boolean;
   archivedAt?: string | null;
 }
@@ -1252,6 +1264,20 @@ export interface EmberSchedulerTickResult {
   failed: number;
 }
 
+export interface EmberHumanReminderRequest {
+  projectRoot?: string | null;
+  eventId: string;
+  text: string;
+}
+
+export interface EmberHumanReminderResult {
+  eventId: string;
+  delivered: boolean;
+  roomStatus: 'delivered' | 'duplicate' | 'failed';
+  telegramStatus: 'delivered' | 'skipped' | 'failed';
+  warnings: string[];
+}
+
 export interface EmberSchedulesChangedPayload {
   projectRoot: string;
 }
@@ -1266,6 +1292,7 @@ export interface EmberPrepareDreamsResult {
 
 export interface EmberDreamConsolidateRequest {
   projectRoot?: string | null;
+  projectRoots?: string[];
   provider?: string | null;
 }
 
@@ -1364,6 +1391,8 @@ export interface VioletChatMessage {
   text: string;
   sourcePath?: string | null;
   nativeEventId?: string | null;
+  violetSeq?: number | null;
+  actorIntent?: string | null;
   targetAgentIds?: string[];
   agentDisplayName?: string | null;
   agentAvatarId?: string | null;
@@ -1669,6 +1698,11 @@ export interface ProjectAgentIdentity {
   avatarId?: string | null;
 }
 
+export interface ProjectAgentIdentityListing {
+  identities: ProjectAgentIdentity[];
+  workspaceEntryCount: number;
+}
+
 export interface ProjectAgentSaveRequest extends ProjectAgentRequest {
   displayName: string;
   nameFields?: ProjectAgentNameFieldsPayload | null;
@@ -1712,6 +1746,10 @@ export interface ProjectAgentFreshSessionResult {
   request: AgentSpawnRequest;
 }
 
+export type ProjectAgentLaunchResolution =
+  | { status: 'ready'; request: AgentSpawnRequest }
+  | { status: 'sessionUnavailable' };
+
 export async function authConfigStatus(): Promise<OAuthConfigStatus> {
   if (!useTauriRuntime()) {
     return {
@@ -1721,12 +1759,62 @@ export async function authConfigStatus(): Promise<OAuthConfigStatus> {
       appPath: 'browser-dev',
       googleDrivePath: 'Kota Sync',
       localAccountFolder: '~/Kota',
-      localAccountBytes: 0,
       localProjectRoot: '~/Kota/Projects',
-      localProjectRootBytes: 0,
     };
   }
   return invoke<OAuthConfigStatus>('auth_config_status');
+}
+
+const EMPTY_STORAGE_MEASUREMENT: StorageMeasurementStatus = {
+  updating: false,
+  onDiskBytes: null,
+  availableBytes: null,
+  measuredAt: null,
+  error: null,
+};
+
+let mockStorageMeasurement: StorageMeasurementStatus = { ...EMPTY_STORAGE_MEASUREMENT };
+let mockStorageMeasurementFinishesAt: number | null = null;
+
+function resetMockStorageMeasurement() {
+  mockStorageMeasurement = { ...EMPTY_STORAGE_MEASUREMENT };
+  mockStorageMeasurementFinishesAt = null;
+}
+
+function mockStorageMeasurementSnapshot(): StorageMeasurementStatus {
+  if (
+    mockStorageMeasurement.updating
+    && mockStorageMeasurementFinishesAt != null
+    && Date.now() >= mockStorageMeasurementFinishesAt
+  ) {
+    mockStorageMeasurement = {
+      updating: false,
+      onDiskBytes: 46 * 1024 ** 3,
+      availableBytes: 161 * 1024 ** 3,
+      measuredAt: Math.floor(Date.now() / 1000),
+      error: null,
+    };
+    mockStorageMeasurementFinishesAt = null;
+  }
+  return { ...mockStorageMeasurement };
+}
+
+export async function storageMeasureStatus(): Promise<StorageMeasurementStatus> {
+  if (!useTauriRuntime()) return mockStorageMeasurementSnapshot();
+  return invoke<StorageMeasurementStatus>('storage_measure_status');
+}
+
+export async function storageMeasureStart(): Promise<StorageMeasurementStatus> {
+  if (!useTauriRuntime()) {
+    mockStorageMeasurement = {
+      ...mockStorageMeasurementSnapshot(),
+      updating: true,
+      error: null,
+    };
+    mockStorageMeasurementFinishesAt = Date.now() + 1200;
+    return { ...mockStorageMeasurement };
+  }
+  return invoke<StorageMeasurementStatus>('storage_measure_start');
 }
 
 export async function supportedShellsStatus(): Promise<SupportedShellStatus[]> {
@@ -1830,6 +1918,17 @@ export async function supportedShellsStatus(): Promise<SupportedShellStatus[]> {
           { value: 'xhigh', label: 'XHigh' },
         ],
       },
+      {
+        id: 'kimi',
+        name: 'Kimi Code',
+        bin: 'kimi',
+        installed: true,
+        resolvedBin: '~/.kimi-code/bin/kimi',
+        installUrl: 'https://code.kimi.com/',
+        summary: "Moonshot AI's local coding agent CLI.",
+        modelOptions: [{ id: 'default', label: 'Kimi CLI default', source: 'mock' }],
+        effortOptions: [],
+      },
     ];
   }
   return invoke<SupportedShellStatus[]>('supported_shells_status');
@@ -1859,7 +1958,6 @@ export async function googleDriveStatus(): Promise<GoogleDriveStatus> {
       folderPath: null,
       folderUrl: null,
       localAccountFolder: '~/Kota',
-      localAccountBytes: 0,
       configMissing: true,
       error: 'browser-dev mode',
     };
@@ -2092,6 +2190,21 @@ export async function emberSchedulerTick(
     return { checkedProjects: 0, fired: 0, failed: 0 };
   }
   return invoke<EmberSchedulerTickResult>('ember_scheduler_tick', { request });
+}
+
+export async function emberDeliverHumanReminder(
+  request: EmberHumanReminderRequest,
+): Promise<EmberHumanReminderResult> {
+  if (!useTauriRuntime()) {
+    return {
+      eventId: request.eventId,
+      delivered: true,
+      roomStatus: 'delivered',
+      telegramStatus: 'skipped',
+      warnings: [],
+    };
+  }
+  return invoke<EmberHumanReminderResult>('ember_deliver_human_reminder', { request });
 }
 
 export async function onEmberSchedulesChanged(
@@ -3371,24 +3484,27 @@ export async function commendProjectAgent(
 
 export async function resolveProjectAgentLaunch(
   request: ProjectAgentRequest,
-): Promise<AgentSpawnRequest> {
+): Promise<ProjectAgentLaunchResolution> {
   if (!useTauriRuntime()) {
     const detail = await mockProjectAgentDetail(request.agentId, request.projectRoot);
     const projectRoot = request.projectRoot || '/tmp/kota-dev';
     return {
-      agentId: detail.agentId,
-      cli: detail.cli,
-      cwd: `${projectRoot}/.agent-workspaces/${detail.agentId}`,
-      projectRoot,
-      worktreeRoot: `${projectRoot}/.agent-workspaces/${detail.agentId}/project-files`,
-      sharedDir: `${projectRoot}/project-memory`,
-      rulesDir: `${projectRoot}/project-rules`,
-      adapterPath: detail.adapterPath,
-      args: detail.args,
-      sessionId: detail.sessionId,
+      status: 'ready',
+      request: {
+        agentId: detail.agentId,
+        cli: detail.cli,
+        cwd: `${projectRoot}/.agent-workspaces/${detail.agentId}`,
+        projectRoot,
+        worktreeRoot: `${projectRoot}/.agent-workspaces/${detail.agentId}/project-files`,
+        sharedDir: `${projectRoot}/project-memory`,
+        rulesDir: `${projectRoot}/project-rules`,
+        adapterPath: detail.adapterPath,
+        args: detail.args,
+        sessionId: detail.sessionId,
+      },
     };
   }
-  return invoke<AgentSpawnRequest>('project_agent_resolve_launch', { request });
+  return invoke<ProjectAgentLaunchResolution>('project_agent_resolve_launch', { request });
 }
 
 export async function startFreshProjectAgentSession(
@@ -3466,8 +3582,16 @@ export async function listArchivedProjectAgents(
 export async function listProjectAgentIdentities(
   projectRoot?: string | null,
 ): Promise<ProjectAgentIdentity[]> {
-  if (!useTauriRuntime()) return [];
-  return invoke<ProjectAgentIdentity[]>('project_agent_list_identities', { projectRoot: projectRoot ?? null });
+  return (await inspectProjectAgentIdentities(projectRoot)).identities;
+}
+
+export async function inspectProjectAgentIdentities(
+  projectRoot?: string | null,
+): Promise<ProjectAgentIdentityListing> {
+  if (!useTauriRuntime()) return { identities: [], workspaceEntryCount: 0 };
+  return invoke<ProjectAgentIdentityListing>('project_agent_list_identities', {
+    projectRoot: projectRoot ?? null,
+  });
 }
 
 export interface ProjectAgentLayoutFile {

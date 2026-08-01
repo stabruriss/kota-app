@@ -1,6 +1,6 @@
 [package]
 name = "kota-v2"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 rust-version = "1.77"
 default-run = "kota-v2"
@@ -33,6 +33,7 @@ serde_yaml = "0.9"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+libc = "0.2"
 base64 = "0.22"
 sha2 = "0.10"
 ureq = { version = "2", features = ["json", "socks-proxy"] }

@@ -35,7 +35,17 @@ sponsorship, or affiliation without permission from Nan Wu.
 This file does not modify or restrict the Apache-2.0 license for source code
 that is released under Apache-2.0.
 
+## Kota-Created Asset Inventory
+
+- Kimi default avatar (`kimi.webp`) and provider icon (`kimi.svg`) — original
+  AI-generated and vector artwork created for Kota; covered by the Repository
+  Use Permission above.
+
 ## Third-Party Assets
 
 Any third-party assets included in this repository remain subject to their own
 licenses and notices.
+
+- Tavern interface icons (`commends.svg`, `ghost.svg`, `incarnation.svg`,
+  `shell.svg`, `skills.svg`, `token.svg`, `turns.svg`) — SVG Repo License —
+  https://www.svgrepo.com/page/licensing/

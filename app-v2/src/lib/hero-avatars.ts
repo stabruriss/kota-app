@@ -1,7 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import type { AgentCli } from '../types/agent-pty';
 
-export type HeroProviderId = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'pi';
+export type HeroProviderId = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'pi' | 'kimi';
 export type GeneratedHeroAvatarId =
   | 'claude'
   | 'claude-lantern'
@@ -12,6 +12,7 @@ export type GeneratedHeroAvatarId =
   | 'antigravity'
   | 'opencode'
   | 'pi'
+  | 'kimi'
   | 'magi'
   | 'violet'
   | 'ember'
@@ -49,6 +50,7 @@ export const HERO_AVATARS: readonly HeroAvatarSpec[] = [
   { id: 'antigravity', provider: 'antigravity', label: 'Antigravity', className: 'provider-antigravity' },
   { id: 'opencode', provider: 'opencode', label: 'OpenCode', className: 'provider-opencode' },
   { id: 'pi', provider: 'pi', label: 'Pi', className: 'provider-pi' },
+  { id: 'kimi', provider: 'kimi', label: 'Kimi', className: 'provider-kimi' },
   { id: 'magi', label: 'Magi', className: 'system-magi' },
   { id: 'violet', label: 'Violet', className: 'system-violet' },
   { id: 'ember', label: 'Ember', className: 'system-ember' },
@@ -68,6 +70,7 @@ const DEFAULT_AVATAR_BY_PROVIDER: Record<HeroProviderId, GeneratedHeroAvatarId> 
   antigravity: 'antigravity',
   opencode: 'opencode',
   pi: 'pi',
+  kimi: 'kimi',
 };
 const USER_AVATAR_STORAGE_KEY = 'kota-v2.user-hero-avatars';
 const TAVERN_PROFILE_STORAGE_KEY = 'kota-v2.tavern.hero-profiles';
@@ -75,12 +78,13 @@ const USER_AVATAR_CHANGED_EVENT = 'kota-v2:user-hero-avatars-changed';
 let userAvatarCache: UserHeroAvatar[] = [];
 
 export function isHeroProviderId(value: unknown): value is HeroProviderId {
-  return value === 'claude' || value === 'codex' || value === 'antigravity' || value === 'opencode' || value === 'pi';
+  return value === 'claude' || value === 'codex' || value === 'antigravity' || value === 'opencode' || value === 'pi' || value === 'kimi';
 }
 
 export function providerFromCli(cli: AgentCli | string | null | undefined): HeroProviderId {
-  if (cli === 'claude' || cli === 'codex' || cli === 'antigravity' || cli === 'opencode' || cli === 'pi') return cli;
+  if (cli === 'claude' || cli === 'codex' || cli === 'antigravity' || cli === 'opencode' || cli === 'pi' || cli === 'kimi') return cli;
   if (cli === 'agy') return 'antigravity';
+  if (cli === 'kimi-code') return 'kimi';
   return 'codex';
 }
 
@@ -268,6 +272,7 @@ export function avatarClassForAgentFallback(
   if (baseId === 'hero-gem') return avatarClassForId(null, 'antigravity');
   if (baseId === 'hero-op') return avatarClassForId(null, 'opencode');
   if (baseId === 'hero-pi') return avatarClassForId(null, 'pi');
+  if (baseId === 'hero-kimi') return avatarClassForId(null, 'kimi');
   if (baseId === 'claude') return avatarClassForId(null, 'claude');
   if (baseId === 'codex') return avatarClassForId(null, 'codex');
   if (baseId === 'alice') return avatarClassForId(null, 'claude');

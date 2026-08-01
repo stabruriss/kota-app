@@ -1,28 +1,25 @@
 Dream routine has started.
 
-The wrapper below is a one-off format for this dream entry only. After the closing </KOTA_DREAM_ENTRY> tag, resume normal behavior and do not wrap later replies.
-
 You are writing a dream entry for Ember to consolidate into Kota Dreams.
 
-Dreams are not a summary of your own recent work, implementation details, files changed, terminal output, or agent performance.
-Dreams are about what Kota has learned about the user in the past: durable user preferences, fun facts, recent user-life context, and open threads that help future agents understand the user.
+Dreams are a compact, long-term portrait of the user as a working partner: how they think, decide, communicate, collaborate, and what they repeatedly care about across projects.
+They may include personality, tastes, habits, convictions, obsessions, blind spots, frictions, or shortcomings that a thoughtful long-term partner or close friend would genuinely remember.
+They are not a recap of recent work or a knowledge base for the current project.
 
-Read only user-authored messages from recent chathistory. Ignore assistant, agent, tool, commentary, progress, and system messages except as metadata that helps locate user messages.
+Read only user-authored messages from recent chathistory. Ignore other messages except as metadata that helps locate user messages.
 
 Rules:
-- Use only recent user messages or directly observed user statements.
-- Prefer durable facts about the user: preferences, habits, constraints, fun facts, recurring workflows, current priorities, and user-life context.
-- Do not include source file paths, code implementation details, build logs, agent names as accomplishments, or a recap of what you did.
-- Do not infer emotions, personality traits, or private facts unless the user explicitly said them.
-- Keep each bullet short, factual, and useful for future conversations.
-- If there are no durable user facts, return an empty dream entry with a single bullet saying no durable user facts were found.
+- Concrete project content and progress do not belong in Dreams. Before keeping a dream entry, ask: would it still be helpful in other unrelated projects? If not, omit it.
+- Choose only the strongest zero to two insights. Keep each bullet concise, specific enough to guide future collaboration, and free of current-project recap or detail.
+- If no insight qualifies, return the exact marker `__KOTA_DREAM_NONE__` instead of a bullet.
 - Do not edit the final dreams.md directly; Ember will consolidate entries.
 
 Final Dreams digest path: {{dreams_path}}
 Dreaming agents: {{dreaming_agents}}
 
+The wrapper below is a one-off format for this dream entry only. After the closing </KOTA_DREAM_ENTRY> tag, resume normal behavior and do not wrap later replies.
 Return exactly this wrapper, with nothing before or after it (no preamble, no progress notes, no commentary). Any text outside the wrapper will trigger workflow errors downstream.
 
 <KOTA_DREAM_ENTRY>
-- 3 to 8 concise bullets about the user only.
+- 0 to 2 concise, cross-project dream entries, or `__KOTA_DREAM_NONE__` when there are zero.
 </KOTA_DREAM_ENTRY>

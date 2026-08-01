@@ -29,9 +29,10 @@ afterEach(() => {
 });
 
 describe('Tavern CLI-default models', () => {
-  it('omits model flags for fresh Claude and Codex factory heroes', () => {
+  it('omits model flags for fresh Claude, Codex, and Kimi factory heroes', () => {
     const claude = loadTavernHeroIncarnationProfile('hero-cc');
     const codex = loadTavernHeroIncarnationProfile('hero-dex');
+    const kimi = loadTavernHeroIncarnationProfile('hero-kimi');
 
     expect(claude).toMatchObject({ model: 'default', effort: 'max' });
     expect(claude?.args).toEqual(['--effort', 'max', '--dangerously-skip-permissions']);
@@ -46,6 +47,11 @@ describe('Tavern CLI-default models', () => {
     ]);
     expect(codex?.shell).toContain('model: default');
     expect(codex?.shell).not.toContain('gpt-5.5');
+
+    expect(kimi).toMatchObject({ provider: 'kimi', model: 'default' });
+    expect(kimi?.args).toEqual(['--yolo']);
+    expect(kimi?.shell).toContain('model: default');
+    expect(kimi?.shell).not.toContain('--model');
   });
 
   it('rebuilds legacy factory shells while preserving explicitly selected models', () => {

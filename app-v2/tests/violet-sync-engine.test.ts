@@ -25,6 +25,7 @@ vi.mock('../src/pty-client', () => ({
 import {
   connectVioletProjectSyncEngine,
   requestVioletProjectAgentSync,
+  syncVioletProjectAgentsNow,
   type VioletProjectSyncHandle,
 } from '../src/lib/violet-sync-engine';
 
@@ -126,6 +127,41 @@ describe('violet sync engine', () => {
       limit: 100,
       agentIds: [roomAgentIds[0]],
       watchAgentIds: roomAgentIds,
+    });
+  });
+
+  it('awaits an exit sync without shrinking the project watcher roster', async () => {
+    const projectRoot = '/tmp/kota/project-exit';
+    const roomAgentIds = ['agent-a1b2c3d4e5', 'agent-f6g7h8i9j0'];
+    const handle = connectVioletProjectSyncEngine({
+      projectRoot,
+      roomAgentIds,
+      workingAgentIds: [],
+    });
+    handles.push(handle);
+    await vi.advanceTimersByTimeAsync(1);
+    mocks.syncVioletRoom.mockClear();
+
+    await syncVioletProjectAgentsNow(projectRoot, [roomAgentIds[0]]);
+
+    expect(mocks.syncVioletRoom).toHaveBeenCalledWith({
+      projectRoot,
+      limit: 100,
+      agentIds: [roomAgentIds[0]],
+      watchAgentIds: roomAgentIds,
+    });
+  });
+
+  it('falls back to backend roster discovery when no sync engine is active', async () => {
+    const projectRoot = '/tmp/kota/project-exit-no-engine';
+
+    await syncVioletProjectAgentsNow(projectRoot, ['agent-a1b2c3d4e5']);
+
+    expect(mocks.syncVioletRoom).toHaveBeenCalledWith({
+      projectRoot,
+      limit: 100,
+      agentIds: null,
+      watchAgentIds: null,
     });
   });
 });

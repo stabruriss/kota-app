@@ -4,6 +4,7 @@ import {
   mergeOlderRoomMessages,
   mergeRoomMessages,
   mergeSyncedNativeMessages,
+  normalizeAttachmentInsensitive,
   normalizeForDedupe,
 } from '../src/chrome/VioletRoomPanel';
 import type { VioletChatMessage } from '../src/pty-client';
@@ -22,6 +23,23 @@ describe('Violet room message dedupe', () => {
 
   it('ignores terminal control padding when deduping provider echoes', () => {
     expect(normalizeForDedupe('\x15same prompt\x0b')).toBe('same prompt');
+  });
+
+  it('normalizes a very long non-attachment token without attachment regex backtracking', () => {
+    const prompt = `https://example.test/${'x'.repeat(154_000)} final instruction`;
+
+    expect(normalizeAttachmentInsensitive(prompt)).toBe(prompt);
+  });
+
+  it('strips attachment paths and provider markers without stripping user text', () => {
+    expect(normalizeAttachmentInsensitive(
+      '/Users/example/Kota/project-memory/attachments/composer/att_1/original.png explain this',
+    )).toBe('explain this');
+    expect(normalizeAttachmentInsensitive('[Image #12]explain this')).toBe('explain this');
+    expect(normalizeAttachmentInsensitive('[Image: source: /tmp/input.png] explain this')).toBe('explain this');
+    expect(normalizeAttachmentInsensitive('a user literally wrote project-memory/attachment')).toBe(
+      'a user literally wrote project-memory/attachment',
+    );
   });
 
   it('collapses broadcast user echoes from native and raw cache into one bubble', () => {

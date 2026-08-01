@@ -209,13 +209,16 @@ function trimScrollback(lines: ScrollbackLine[]): ScrollbackLine[] {
 }
 /** Map a key event from the smart-terminal input to terminal bytes for
  *  TUI passthrough. Same translation table as InputBar.keyEventToBytes. */
-function inputKeyToBytes(e: ReactKeyboardEvent<HTMLInputElement>): string | null {
+function inputKeyToBytes(
+  e: ReactKeyboardEvent<HTMLInputElement>,
+  activeCli: FallbackCli | null,
+): string | null {
   if (['Shift', 'Meta', 'Control', 'Alt', 'CapsLock'].includes(e.key)) return null;
   if (e.key === 'ArrowUp') return '\x1b[A';
   if (e.key === 'ArrowDown') return '\x1b[B';
   if (e.key === 'ArrowRight') return '\x1b[C';
   if (e.key === 'ArrowLeft') return '\x1b[D';
-  if (e.key === 'Enter') return '\r';
+  if (e.key === 'Enter') return activeCli === 'kimi' ? '\x1b[13;1u' : '\r';
   if (e.key === 'Tab') return '\t';
   if (e.key === 'Backspace') return '\x7f';
   if (e.key === 'Delete') return '\x1b[3~';
@@ -257,6 +260,7 @@ function tuiDisplayName(cli: FallbackCli): string {
   if (cli === 'agy') return 'Antigravity';
   if (cli === 'opencode') return 'OpenCode';
   if (cli === 'pi') return 'Pi';
+  if (cli === 'kimi') return 'Kimi Code';
   return cli;
 }
 function nextShellDraftAfterText(draft: string, text: string): string {
@@ -774,7 +778,7 @@ export function SmartTerminal() {
       updateTab(tabId, () => ({ scrollback: [] }));
       return;
     }
-    const cliMatch = trimmed.match(/^(claude|cc|codex|agy|opencode|pi)(\s.*)?$/);
+    const cliMatch = trimmed.match(/^(claude|cc|codex|agy|opencode|pi|kimi)(\s.*)?$/);
     if (cliMatch) {
       const cliName = (cliMatch[1] === 'cc' ? 'claude' : cliMatch[1]) as FallbackCli;
       const restArgs = cliMatch[2] ?? '';
@@ -847,7 +851,7 @@ export function SmartTerminal() {
       // keyboard layouts, Option symbols, dead keys, and IME commits are
       // preserved exactly.
       if (e.key.length === 1 && !(e.ctrlKey && !e.metaKey)) return;
-      const bytes = inputKeyToBytes(e);
+      const bytes = inputKeyToBytes(e, activeTab.tuiRunning);
       if (bytes != null && !e.metaKey) {
         e.preventDefault();
         if (!activeTab.tuiRunning) {

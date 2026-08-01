@@ -18,7 +18,7 @@ describe('project agent name fields', () => {
 
   it('replaces the surname with v. project only at incarnation creation time', () => {
     expect(nameWithProjectSurname('CC', 'valencia')).toBe('CC v. valencia');
-    expect(nameWithProjectSurname('CC', 'stabruriss/Kotatest1')).toBe('CC v. Kotatest1');
+    expect(nameWithProjectSurname('CC', 'sample-co/HarborLab')).toBe('CC v. HarborLab');
     expect(nameWithProjectSurname('CC Smith', 'valencia')).toBe('CC v. valencia');
     expect(nameWithProjectSurname('CC-Bunshin Smith', 'valencia')).toBe('CC-Bunshin v. valencia');
     expect(nameWithProjectSurname('CC v. old-project', 'valencia')).toBe('CC v. valencia');

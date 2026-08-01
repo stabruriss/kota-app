@@ -91,7 +91,7 @@ export type ShellStatus = 'quiet' | 'live' | 'dead';
  *  controls priority; if the primary translator fails, the other is tried. */
 export type MagiProvider = 'claude' | 'codex';
 
-export type FallbackCli = MagiProvider | 'agy' | 'opencode' | 'pi';
+export type FallbackCli = MagiProvider | 'agy' | 'opencode' | 'pi' | 'kimi';
 
 export interface TranslateResult {
   kind: 'command' | 'escape';

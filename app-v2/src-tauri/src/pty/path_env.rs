@@ -12,7 +12,14 @@ const FALLBACK_PATH_DIRS: &[&str] = &[
     "/sbin",
 ];
 
-const HOME_REL_PATH_DIRS: &[&str] = &["Kota/bin", ".local/bin", ".cargo/bin", ".bun/bin", "bin"];
+const HOME_REL_PATH_DIRS: &[&str] = &[
+    "Kota/bin",
+    ".local/bin",
+    ".cargo/bin",
+    ".bun/bin",
+    ".kimi-code/bin",
+    "bin",
+];
 
 pub fn augmented_path(home: Option<&Path>) -> String {
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -98,6 +105,13 @@ mod tests {
         let dirs: Vec<_> = env::split_paths(&path).collect();
         assert!(dirs.iter().any(|dir| dir == Path::new("/opt/homebrew/bin")));
         assert!(dirs.iter().any(|dir| dir == Path::new("/usr/local/bin")));
+    }
+
+    #[test]
+    fn augmented_path_includes_kimi_code_home_bin() {
+        let home = Path::new("/Users/kota-test");
+        let dirs: Vec<_> = env::split_paths(&augmented_path(Some(home))).collect();
+        assert!(dirs.iter().any(|dir| dir == &home.join(".kimi-code/bin")));
     }
 
     #[test]
