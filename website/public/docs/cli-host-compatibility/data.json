@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "title": "CLI Host Compatibility",
+  "description": "Version-pinned evidence for six agent CLIs hosted by Kota over PTY.",
+  "snapshot": {
+    "observed_at": "2026-08-02",
+    "timezone": "PDT",
+    "platform": "macOS 26.5.2 arm64",
+    "kota_version": "0.1.8",
+    "kota_snapshot_commit": "156835c",
+    "public_evidence_commit": "e7105fa96a750a1e8ec03909152fb1d8992cc238",
+    "caveat": "CLI versions describe this snapshot, not every historical fixture."
+  },
+  "providers": [
+    {
+      "id": "claude",
+      "label": "Claude Code",
+      "binary": "claude",
+      "version": "2.1.220"
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "binary": "codex",
+      "version": "0.146.0"
+    },
+    {
+      "id": "antigravity",
+      "label": "Antigravity CLI",
+      "binary": "agy",
+      "version": "1.1.9",
+      "note": "Legacy `gemini` and `gemini-cli` config names resolve to Antigravity, not Gemini CLI."
+    },
+    {
+      "id": "opencode",
+      "label": "OpenCode",
+      "binary": "opencode",
+      "version": "1.17.9",
+      "note": "Launch adapts between `run --interactive` and `--mini` from installed CLI help."
+    },
+    {
+      "id": "pi",
+      "label": "Pi",
+      "binary": "pi",
+      "version": "0.80.10"
+    },
+    {
+      "id": "kimi",
+      "label": "Kimi Code",
+      "binary": "kimi",
+      "version": "0.31.0",
+      "note": "Provider alias: `kimi-code`."
+    }
+  ],
+  "anchors": {
+    "launch": {
+      "label": "PTY launch and argument construction",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/pty/agent.rs#L59-L285"
+    },
+    "launch_tests": {
+      "label": "Launch argument fixtures",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/pty/agent.rs#L3070-L3688"
+    },
+    "adapter": {
+      "label": "Workspace adapter selection",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/integrations/mod.rs#L1665-L1673"
+    },
+    "native_sources": {
+      "label": "Native session source locators",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/violet/mod.rs#L1925-L2695"
+    },
+    "watchers": {
+      "label": "Native-source watch plan",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/violet/mod.rs#L1144-L1498"
+    },
+    "working": {
+      "label": "Native work-state mapping",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/violet/mod.rs#L5685-L5750"
+    },
+    "runtime": {
+      "label": "Agent runtime reconciliation",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src/hooks/useAgentRuntime.ts#L21-L75"
+    },
+    "runtime_tests": {
+      "label": "Working-lifecycle tests",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/tests/agent-runtime.test.tsx#L108"
+    },
+    "kimi_lifecycle": {
+      "label": "Kimi step lifecycle parser",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/violet/mod.rs#L2923-L3018"
+    },
+    "kimi_submit": {
+      "label": "Kimi prompt submit sequence",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/pty/agent.rs#L1111-L1118"
+    },
+    "claude_retention": {
+      "label": "Claude expired-session handling",
+      "href": "https://github.com/stabruriss/kota-app/blob/e7105fa96a750a1e8ec03909152fb1d8992cc238/app-v2/src-tauri/src/lib.rs#L5931-L5982"
+    },
+    "claude_instructions": {
+      "label": "Claude Code memory",
+      "href": "https://code.claude.com/docs/en/memory"
+    },
+    "claude_sessions": {
+      "label": "Claude Code sessions",
+      "href": "https://code.claude.com/docs/en/sessions"
+    },
+    "codex_instructions": {
+      "label": "Codex AGENTS.md",
+      "href": "https://learn.chatgpt.com/docs/agent-configuration/agents-md"
+    },
+    "antigravity_instructions": {
+      "label": "Antigravity context files",
+      "href": "https://antigravity.google/docs/gcli-migration"
+    },
+    "opencode_instructions": {
+      "label": "OpenCode rules",
+      "href": "https://opencode.ai/docs/rules/"
+    },
+    "pi_instructions": {
+      "label": "Pi context files",
+      "href": "https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/README.md#context-files"
+    },
+    "kimi_instructions": {
+      "label": "Kimi Code instruction files",
+      "href": "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/agents#instruction-files"
+    }
+  },
+  "fields": [
+    {
+      "id": "workspace",
+      "label": "Workspace selection",
+      "question": "How is the worktree selected?",
+      "cells": {
+        "claude": { "status": "VERIFIED", "value": "Process cwd = incarnation worktree.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "codex": { "status": "VERIFIED", "value": "Process cwd = incarnation worktree.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "antigravity": { "status": "VERIFIED", "value": "Process cwd, plus `--add-dir <cwd>`.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "opencode": { "status": "VERIFIED", "value": "`--dir <cwd>`, or a positional project in mini mode.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "pi": { "status": "VERIFIED", "value": "Process cwd = incarnation worktree.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "kimi": { "status": "VERIFIED", "value": "Process cwd = incarnation worktree.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] }
+      }
+    },
+    {
+      "id": "instructions",
+      "label": "Workspace instruction files",
+      "question": "Which project files are read?",
+      "cells": {
+        "claude": { "status": "VERIFIED", "value": "Kota writes `CLAUDE.md`. `AGENTS.md` is not read automatically.", "evidence": ["CODE_PATH"], "anchors": ["adapter", "claude_instructions"] },
+        "codex": { "status": "VERIFIED", "value": "Kota writes `AGENTS.md`; Codex layers files from repo root to cwd.", "evidence": ["CODE_PATH"], "anchors": ["adapter", "codex_instructions"] },
+        "antigravity": { "status": "VERIFIED", "value": "Kota writes `AGENTS.md`; the CLI also reads `GEMINI.md`.", "caveat": "Conflict resolution was not tested separately.", "evidence": ["CODE_PATH"], "anchors": ["adapter", "antigravity_instructions"] },
+        "opencode": { "status": "VERIFIED", "value": "Kota writes `AGENTS.md`; it wins over same-scope `CLAUDE.md`.", "evidence": ["CODE_PATH"], "anchors": ["adapter", "opencode_instructions"] },
+        "pi": { "status": "VERIFIED", "value": "Kota writes `AGENTS.md`; Pi gathers it or `CLAUDE.md` toward cwd.", "caveat": "Same-directory tie-break is undocumented.", "evidence": ["CODE_PATH"], "anchors": ["adapter", "pi_instructions"] },
+        "kimi": { "status": "VERIFIED", "value": "Kota writes `AGENTS.md`; Kimi also reads `.kimi-code/AGENTS.md`.", "evidence": ["CODE_PATH"], "anchors": ["adapter", "kimi_instructions"] }
+      }
+    },
+    {
+      "id": "approval",
+      "label": "Approval / unrestricted launch",
+      "question": "Which launch flag changes approval?",
+      "cells": {
+        "claude": { "status": "PARTIAL", "value": "Default: `--dangerously-skip-permissions`.", "caveat": "Flag emission is verified; full bypass scope is not.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "codex": { "status": "PARTIAL", "value": "Default: `--dangerously-bypass-approvals-and-sandbox`.", "caveat": "Flag emission is verified; full bypass scope is not.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "antigravity": { "status": "PARTIAL", "value": "Default: `--dangerously-skip-permissions`.", "caveat": "Flag emission is verified; full bypass scope is not.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "opencode": { "status": "PARTIAL", "value": "Conditional: `--dangerously-skip-permissions`.", "caveat": "Mini mode drops unsupported flags; scope stays version-dependent.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "pi": { "status": "PARTIAL", "value": "Default: `--approve`.", "caveat": "Flag emission is verified; full bypass scope is not.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "kimi": { "status": "PARTIAL", "value": "Default: `--yolo`.", "caveat": "Flag emission is verified; full bypass scope is not.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] }
+      }
+    },
+    {
+      "id": "resume",
+      "label": "Session resume",
+      "question": "How is a native session resumed?",
+      "cells": {
+        "claude": { "status": "PARTIAL", "value": "`--resume <session-id>`.", "caveat": "Launch shape verified; cross-version resume is CLI-owned.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "codex": { "status": "PARTIAL", "value": "`resume <session-id>`.", "caveat": "Launch shape verified; cross-version resume is CLI-owned.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "antigravity": { "status": "PARTIAL", "value": "`--conversation <conversation-id>`.", "caveat": "The backend revalidates the conversation.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "opencode": { "status": "PARTIAL", "value": "`--session <session-id>`, when supported.", "caveat": "Mini-mode support depends on installed help.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "pi": { "status": "PARTIAL", "value": "`--session-id <session-id>`.", "caveat": "Launch shape verified; cross-version resume is CLI-owned.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "kimi": { "status": "PARTIAL", "value": "`--session <session-id>`.", "caveat": "Launch shape verified; cross-version resume is CLI-owned.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] }
+      }
+    },
+    {
+      "id": "retention",
+      "label": "Session lifetime / retention",
+      "question": "Who owns retention, and for how long?",
+      "cells": {
+        "claude": { "status": "VERIFIED", "value": "Default: 30 days; configurable with `cleanupPeriodDays`.", "caveat": "Kota observed expiry and offers Start Fresh on exact transcript NotFound.", "evidence": ["CODE_PATH", "LIVE_OBSERVATION"], "anchors": ["claude_retention", "claude_sessions"] },
+        "codex": { "status": "UNKNOWN", "value": "No published TTL; no automatic expiry observed.", "caveat": "History limits do not establish resume TTL.", "evidence": [], "anchors": [] },
+        "antigravity": { "status": "UNKNOWN", "value": "No published backend TTL; resume revalidates the conversation.", "caveat": "Local cache does not imply permanent retention.", "evidence": [], "anchors": [] },
+        "opencode": { "status": "UNKNOWN", "value": "No published TTL; no automatic expiry observed.", "evidence": [], "anchors": [] },
+        "pi": { "status": "UNKNOWN", "value": "No published TTL; no automatic expiry observed.", "evidence": [], "anchors": [] },
+        "kimi": { "status": "UNKNOWN", "value": "No published TTL; no automatic expiry observed.", "evidence": [], "anchors": [] }
+      }
+    },
+    {
+      "id": "model",
+      "label": "Model selection at launch",
+      "question": "How is the model chosen?",
+      "cells": {
+        "claude": { "status": "PARTIAL", "value": "Non-default: `--model <id>`. Default defers to the CLI.", "caveat": "Not every listed model is end-to-end verified.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] },
+        "codex": { "status": "PARTIAL", "value": "Non-default: `--model <id>`. Default defers to the CLI.", "caveat": "Not every listed model is end-to-end verified.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] },
+        "antigravity": { "status": "PARTIAL", "value": "Non-default: `--model <id>`. Default defers to the CLI.", "caveat": "Not every listed model is end-to-end verified.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] },
+        "opencode": { "status": "PARTIAL", "value": "Non-default: `--model <id>` in the detected launch shape.", "caveat": "Not every listed model is end-to-end verified.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] },
+        "pi": { "status": "PARTIAL", "value": "Non-default: `--model <id>`. Default defers to the CLI.", "caveat": "Not every listed model is end-to-end verified.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] },
+        "kimi": { "status": "PARTIAL", "value": "Non-default: `--model <id>`. Default defers to the CLI.", "caveat": "Not every listed model is end-to-end verified.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] }
+      }
+    },
+    {
+      "id": "effort",
+      "label": "Reasoning / effort level",
+      "question": "Can Kota set effort at launch?",
+      "cells": {
+        "claude": { "status": "PARTIAL", "value": "Launch flag: `--effort`.", "caveat": "Values vary by version and model.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] },
+        "codex": { "status": "PARTIAL", "value": "Launch config: `model_reasoning_effort=<value>`.", "caveat": "Values vary by version and model.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] },
+        "antigravity": { "status": "NOT_EXPOSED", "value": "Not exposed by Kota.", "evidence": ["CODE_PATH"], "anchors": ["launch_tests"] },
+        "opencode": { "status": "NOT_EXPOSED", "value": "Not exposed by Kota.", "evidence": ["CODE_PATH"], "anchors": ["launch_tests"] },
+        "pi": { "status": "PARTIAL", "value": "Launch flag: `--thinking`.", "caveat": "Values vary by version and model.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch_tests"] },
+        "kimi": { "status": "NOT_EXPOSED", "value": "Not exposed by Kota.", "evidence": ["CODE_PATH"], "anchors": ["launch_tests"] }
+      }
+    },
+    {
+      "id": "records",
+      "label": "Local chat / session records",
+      "question": "Which native records does Kota read?",
+      "cells": {
+        "claude": { "status": "VERIFIED", "value": "`~/.claude/projects/.../*.jsonl` · JSONL.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["native_sources"] },
+        "codex": { "status": "VERIFIED", "value": "`~/.codex/sessions/**/*.jsonl` · JSONL.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["native_sources"] },
+        "antigravity": { "status": "VERIFIED", "value": "`~/.gemini/antigravity-cli/brain/<conversation>/.../transcript[_full].jsonl` · JSONL.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["native_sources"] },
+        "opencode": { "status": "VERIFIED", "value": "`~/.local/share/opencode/opencode.db` · SQLite + WAL/SHM.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["native_sources", "watchers"] },
+        "pi": { "status": "VERIFIED", "value": "`~/.pi/agent/sessions/.../*.jsonl` · JSONL.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["native_sources"] },
+        "kimi": { "status": "VERIFIED", "value": "`${KIMI_CODE_HOME:-~/.kimi-code}` · JSON + main-agent JSONL.", "caveat": "Kota reads `agents/main/wire.jsonl` only.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["native_sources"] }
+      }
+    },
+    {
+      "id": "refresh",
+      "label": "Record refresh / flush cadence",
+      "question": "When does new state become visible?",
+      "cells": {
+        "claude": { "status": "PARTIAL", "value": "500 ms Kota watch throttle; CLI flush timing is not guaranteed.", "evidence": ["CODE_PATH"], "anchors": ["watchers"] },
+        "codex": { "status": "PARTIAL", "value": "500 ms Kota watch throttle; turn IDs improve correlation.", "evidence": ["CODE_PATH"], "anchors": ["watchers", "working"] },
+        "antigravity": { "status": "PARTIAL", "value": "500 ms Kota watch throttle; backend flush timing is not guaranteed.", "evidence": ["CODE_PATH"], "anchors": ["watchers"] },
+        "opencode": { "status": "PARTIAL", "value": "2 s SQLite monitor; CLI commit timing is not guaranteed.", "evidence": ["CODE_PATH"], "anchors": ["watchers"] },
+        "pi": { "status": "PARTIAL", "value": "500 ms Kota watch throttle; CLI flush timing is not guaranteed.", "evidence": ["CODE_PATH"], "anchors": ["watchers"] },
+        "kimi": { "status": "PARTIAL", "value": "500 ms Kota watch throttle; step events improve correlation.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["watchers", "kimi_lifecycle"] }
+      }
+    },
+    {
+      "id": "working",
+      "label": "Working-state detection",
+      "question": "How does Kota infer working state?",
+      "cells": {
+        "claude": { "status": "PARTIAL", "value": "Process, delivery, native activity, and a 5-minute fallback.", "caveat": "Alive, working, and visible remain separate states.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["working", "runtime", "runtime_tests"] },
+        "codex": { "status": "PARTIAL", "value": "Turn IDs, reconciled with process and delivery state.", "caveat": "No signal is universal readiness.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["working", "runtime", "runtime_tests"] },
+        "antigravity": { "status": "PARTIAL", "value": "Process, delivery, transcript activity, and a 5-minute fallback.", "caveat": "Backend state is not a readiness API.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["working", "runtime", "runtime_tests"] },
+        "opencode": { "status": "PARTIAL", "value": "Process, delivery, SQLite activity, and a 5-minute fallback.", "caveat": "Database visibility may lag the PTY.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["working", "runtime", "runtime_tests"] },
+        "pi": { "status": "PARTIAL", "value": "Process, delivery, native activity, and a 5-minute fallback.", "caveat": "No signal is universal readiness.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["working", "runtime", "runtime_tests"] },
+        "kimi": { "status": "PARTIAL", "value": "`step.begin` / `step.end` + turn ID, with runtime fallback.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["kimi_lifecycle", "runtime", "runtime_tests"] }
+      }
+    },
+    {
+      "id": "transport",
+      "label": "Host transport",
+      "question": "PTY or structured transport?",
+      "cells": {
+        "claude": { "status": "VERIFIED", "value": "Interactive child process on a real PTY; no SDK transport.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "codex": { "status": "VERIFIED", "value": "Interactive child process on a real PTY; no SDK transport.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "antigravity": { "status": "VERIFIED", "value": "Interactive child process on a real PTY; no SDK transport.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "opencode": { "status": "VERIFIED", "value": "Real PTY; launch adapts between interactive and mini modes.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "pi": { "status": "VERIFIED", "value": "Interactive child process on a real PTY; no SDK transport.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "launch_tests"] },
+        "kimi": { "status": "VERIFIED", "value": "Real PTY; CSI-u Enter submits prompts.", "evidence": ["CODE_PATH", "UNIT_FIXTURE"], "anchors": ["launch", "kimi_submit"] }
+      }
+    }
+  ],
+  "cross_cutting": [
+    {
+      "label": "Evidence layer",
+      "status": "VERIFIED",
+      "value": "Code, fixtures, live observations, and end-to-end results stay distinct."
+    },
+    {
+      "label": "Fresh-session binding",
+      "status": "PARTIAL",
+      "value": "Kota finds native session IDs from provider-specific indexes and cwd metadata."
+    },
+    {
+      "label": "Source isolation",
+      "status": "VERIFIED",
+      "value": "Provider policies suppress duplicate and child-agent streams. Kimi uses main wire only."
+    },
+    {
+      "label": "Prompt delivery",
+      "status": "PARTIAL",
+      "value": "Submission and native-log confirmation are separate. Kimi requires CSI-u Enter."
+    },
+    {
+      "label": "Environment isolation",
+      "status": "VERIFIED",
+      "value": "Inherited provider session variables are cleared before spawn."
+    },
+    {
+      "label": "Four-state model",
+      "status": "PARTIAL",
+      "value": "Process alive, terminal ready, turn working, and message visible remain distinct."
+    },
+    {
+      "label": "Kota observation cadence",
+      "status": "VERIFIED",
+      "value": "500 ms watch, 180 ms debounce, 10 s working reconcile, 90 s idle reconcile, 2 s OpenCode monitor."
+    },
+    {
+      "label": "Authentication readiness",
+      "status": "NOT_TESTED",
+      "value": "A resolved binary does not prove the provider account is authenticated."
+    }
+  ]
+}
