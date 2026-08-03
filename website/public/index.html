@@ -97,14 +97,14 @@
         <section id="whats-new" style="flex:0 0 auto; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.025),rgba(255,255,255,0)); padding:16px 20px; display:flex; flex-direction:column; gap:12px;">
           <div>
             <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:{{ accent }}; margin-bottom:7px;">What's new</div>
-            <div data-scramble style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">v{{ version }} — {{ title }}</div>
-            <div data-scramble style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7e7870;">{{ date }}</div>
+            <div style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">v{{ version }} — {{ title }}</div>
+            <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7e7870;">{{ date }}</div>
           </div>
           <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:11px; min-width:0;">
             <sc-for list="{{ news }}" as="n" hint-placeholder-count="4">
               <li style="display:flex; gap:10px; align-items:baseline; font-size:13px; color:#c8c1b7; line-height:1.35;">
                 <span style="flex:0 0 auto; width:5px; height:5px; border-radius:2px; background:{{ accent }}; transform:translateY(-1px);"></span>
-                <span data-scramble style="min-width:0;">{{ n }}</span>
+                <span style="min-width:0;">{{ n }}</span>
               </li>
             </sc-for>
           </ul>
@@ -511,11 +511,24 @@ class Component extends DCLogic {
   _bindCard(el) {
     if (!el || el._kotaBound) return;
     el._kotaBound = true;
-    el.addEventListener('mouseenter', () => this._openCard(el, true));
-    el.addEventListener('mouseleave', () => this._openCard(el, false));
-    el.addEventListener('focusin', () => this._openCard(el, true));
-    el.addEventListener('focusout', (e) => { if (!el.contains(e.relatedTarget)) this._openCard(el, false); });
+    el.style.cursor = 'pointer';
+    el.setAttribute('aria-expanded', 'false');
+    el.addEventListener('click', () => this._toggleCard(el));
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleCard(el); }
+    });
     if (this._sweep) requestAnimationFrame(this._sweep);
+  }
+
+  _toggleCard(el) {
+    const opening = this._openedCard !== el;
+    if (this._openedCard && this._openedCard !== el) {
+      this._openedCard.setAttribute('aria-expanded', 'false');
+      this._openCard(this._openedCard, false);
+    }
+    this._openedCard = opening ? el : null;
+    el.setAttribute('aria-expanded', String(opening));
+    this._openCard(el, opening);
   }
 
   _openCard(el, open) {
