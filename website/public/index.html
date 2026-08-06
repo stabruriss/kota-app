@@ -37,6 +37,31 @@
   .star-cta.sticky-star{ border-radius:16px; }
   .star-cta.sticky-star .star-inner{ border-radius:14.5px; }
   @media (max-width:520px){ .star-cta.sticky-star{ display:none; } }
+  .vid-head{ display:flex; align-items:flex-end; gap:24px; flex-wrap:wrap; margin-bottom:26px; }
+  .vid-langs{ display:flex; gap:8px; padding-bottom:6px; }
+  .vid-lang{ font-family:'JetBrains Mono',monospace; font-weight:600; font-size:12.5px; letter-spacing:0.1em; padding:8px 18px; border-radius:999px; border:1px solid rgba(255,255,255,0.14); color:#8a847a; cursor:pointer; background:none; transition:color .15s ease, border-color .15s ease, background .15s ease; }
+  .vid-lang:hover{ color:#e6dfd4; border-color:rgba(227,212,182,0.4); }
+  .vid-lang.on{ background:#e3d4b6; border-color:#e3d4b6; color:#16110e; }
+  .vid-grid{ display:grid; grid-template-columns:1fr 1fr; gap:26px; }
+  @media (max-width:860px){ .vid-grid{ grid-template-columns:1fr; } }
+  .vid-card{ border:1px solid rgba(255,255,255,0.08); background:linear-gradient(180deg, rgba(255,255,255,0.028) 0%, rgba(255,255,255,0.012) 100%); border-radius:16px; padding:14px 14px 16px; }
+  .vid-card:hover{ border-color:rgba(227,212,182,0.28); }
+  .vid-frame{ position:relative; aspect-ratio:16/9; border-radius:11px; overflow:hidden; border:1px solid rgba(255,255,255,0.09); cursor:pointer; background:#0f0d0b; }
+  .vid-frame img{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; transition:transform .5s ease; }
+  .vid-frame:hover img{ transform:scale(1.025); }
+  .vid-frame::after{ content:""; position:absolute; inset:0; background:linear-gradient(180deg, rgba(12,11,10,0) 55%, rgba(12,11,10,0.5) 100%); pointer-events:none; }
+  .vid-frame.playing::after{ display:none; }
+  .vid-frame.playing{ cursor:default; }
+  .vid-play{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:64px; height:64px; border-radius:999px; z-index:2; display:flex; align-items:center; justify-content:center; background:rgba(12,11,10,0.62); backdrop-filter:blur(6px); border:1px solid rgba(233,225,208,0.35); transition:background .2s ease, transform .2s ease, border-color .2s ease; }
+  .vid-frame:hover .vid-play{ background:#d98a4f; border-color:#d98a4f; transform:translate(-50%,-50%) scale(1.06); }
+  .vid-frame.playing .vid-play{ display:none; }
+  .vid-play svg{ width:20px; height:20px; margin-left:3px; display:block; color:#f4ede3; }
+  .vid-dur{ position:absolute; right:10px; bottom:10px; z-index:2; font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:0.06em; color:#ece1c8; background:rgba(12,11,10,0.7); backdrop-filter:blur(4px); border:1px solid rgba(255,255,255,0.14); border-radius:7px; padding:3px 8px; }
+  .vid-frame.playing .vid-dur{ display:none; }
+  .vid-frame iframe{ position:absolute; inset:0; width:100%; height:100%; border:0; z-index:3; }
+  .vid-title{ font-weight:700; font-size:16.5px; letter-spacing:-0.01em; color:#f1ece5; }
+  .vid-sub{ margin-top:3px; font-size:13px; color:#8a847a; }
+  .vid-meta{ padding:13px 6px 0; }
   @media (prefers-reduced-motion: reduce){ *{ transition-duration:0.001ms !important; animation:none !important; scroll-behavior:auto !important; } }
 </style>
 </helmet>
@@ -145,6 +170,49 @@
           </sc-for>
         </div>
       </div>
+      </div>
+    </section>
+
+    <section style="padding:40px 0 8px;">
+      <div class="vid-head">
+        <div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:#8a847a; margin-bottom:12px;">See it in action</div>
+          <h2 style="font-size:clamp(30px,4vw,46px); line-height:1.02; letter-spacing:-0.03em; font-weight:800; margin:0;">Watch Kota Work</h2>
+        </div>
+        <div class="vid-langs" role="group" aria-label="Voiceover language">
+          <button class="vid-lang" type="button" data-vid-lang="zh">中文</button>
+          <button class="vid-lang" type="button" data-vid-lang="en">EN</button>
+        </div>
+      </div>
+      <div class="vid-grid">
+        <div class="vid-card" data-vid data-zh="EovL1IoY1IY" data-en="ZaMBv_L9Ivs" data-dur-zh="5:44" data-dur-en="5:44"
+             data-title-zh="5分钟功能扫描" data-title-en="5 Min Feature Scan"
+             data-sub-zh="受够了在几个 AI 之间复制粘贴, 我给它们盖了间办公室" data-sub-en="I made a home for my AI agents"
+             data-vtitle="Kota feature tour">
+          <div class="vid-frame" data-vid-frame>
+            <img src="/assets/videos/poster.jpg" alt="Kota feature tour video" loading="lazy" decoding="async" width="1280" height="720">
+            <span class="vid-play" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.14v13.72L19 12 8 5.14z"/></svg></span>
+            <span class="vid-dur" data-vid-dur>5:44</span>
+          </div>
+          <div class="vid-meta">
+            <div class="vid-title" data-vid-title>5 Min Feature Scan</div>
+            <div class="vid-sub" data-vid-sub>I made a home for my AI agents</div>
+          </div>
+        </div>
+        <div class="vid-card" data-vid data-zh="DP6suhJSPw4" data-en="uq92bdxNiKM" data-dur-zh="22:29" data-dur-en="15:19"
+             data-title-zh="20 分钟开发实战" data-title-en="15 Min Dev Task"
+             data-sub-zh="多AI并行开发实战，和四个顶级AI上线新版本，中途他们翻车了几次" data-sub-en="Real World Development with 4 SOTA AI agents"
+             data-vtitle="Building with Kota — live dev session">
+          <div class="vid-frame" data-vid-frame>
+            <img src="/assets/videos/poster.jpg" alt="Building with Kota video" loading="lazy" decoding="async" width="1280" height="720">
+            <span class="vid-play" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.14v13.72L19 12 8 5.14z"/></svg></span>
+            <span class="vid-dur" data-vid-dur>22:29</span>
+          </div>
+          <div class="vid-meta">
+            <div class="vid-title" data-vid-title>15 Min Dev Task</div>
+            <div class="vid-sub" data-vid-sub>Real World Development with 4 SOTA AI agents</div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -330,6 +398,48 @@ class Component extends DCLogic {
           renderStars(d.stargazers_count);
         })
         .catch(() => {});
+    }
+
+    const vidCards = document.querySelectorAll('[data-vid]');
+    if (vidCards.length) {
+      const vidChips = document.querySelectorAll('[data-vid-lang]');
+      const embedUrl = (id) => 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0&playsinline=1';
+      let vidLang = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
+      const applyVidLang = (l) => {
+        vidLang = l;
+        const cap = l === 'zh' ? 'Zh' : 'En';
+        vidChips.forEach((c) => c.classList.toggle('on', c.dataset.vidLang === l));
+        vidCards.forEach((card) => {
+          const dur = card.querySelector('[data-vid-dur]');
+          if (dur) dur.textContent = card.dataset['dur' + cap];
+          const title = card.querySelector('[data-vid-title]');
+          if (title) title.textContent = card.dataset['title' + cap];
+          const sub = card.querySelector('[data-vid-sub]');
+          if (sub) sub.textContent = card.dataset['sub' + cap];
+          const fr = card.querySelector('iframe');
+          if (fr) {
+            fr.remove();
+            const frame = card.querySelector('[data-vid-frame]');
+            if (frame) frame.classList.remove('playing');
+          }
+        });
+      };
+      applyVidLang(vidLang);
+      vidChips.forEach((c) => c.addEventListener('click', () => applyVidLang(c.dataset.vidLang)));
+      vidCards.forEach((card) => {
+        const frame = card.querySelector('[data-vid-frame]');
+        if (!frame) return;
+        frame.addEventListener('click', () => {
+          if (frame.classList.contains('playing')) return;
+          frame.classList.add('playing');
+          const f = document.createElement('iframe');
+          f.src = embedUrl(card.dataset[vidLang]);
+          f.title = card.dataset.vtitle;
+          f.setAttribute('allow', 'autoplay; fullscreen; picture-in-picture; encrypted-media');
+          f.setAttribute('allowfullscreen', '');
+          frame.appendChild(f);
+        });
+      });
     }
 
     this._startFlame();

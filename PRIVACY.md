@@ -56,6 +56,10 @@ aggregated, cookieless measurement of page views, referrers, and coarse
 device/browser information. No analytics cookies are set, and no user-level
 profiles are built.
 
+Embedded product videos on the website are served from YouTube's
+privacy-enhanced domain (`youtube-nocookie.com`) and load only after you
+press play; before that interaction, no request is made to YouTube.
+
 ## Security Reports
 
 Please do not include secrets, API keys, private project data, or vulnerability
