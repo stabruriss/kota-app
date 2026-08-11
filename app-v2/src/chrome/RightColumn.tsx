@@ -139,6 +139,16 @@ const ROCKER_COVER_CLOSE_MS = 1700;
 const DREAM_AGENT_OVERLAY_TTL_MS = 30 * 60 * 1000;
 const DREAM_MIN_CONSOLIDATE_DELAY_MS = 120_000;
 const DREAM_DIGEST_WAIT_MESSAGE = 'Last dreams is still being digested, waiting...';
+const MONTH_DAY_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+});
+const CLOCK_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  hour: 'numeric',
+  minute: '2-digit',
+});
 let emberWorkSessionStartedAt = Date.now();
 type DreamOverlayState = 'off' | 'wrapping' | 'countdown' | 'dreaming' | 'finished';
 type DreamVideoPhase = Exclude<DreamOverlayState, 'off'>;
@@ -320,12 +330,7 @@ function emberScheduleAttribution(schedule: EmberSchedule): string {
 function formatBbsTime(value: string): string {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(date);
+  return MONTH_DAY_TIME_FORMATTER.format(date);
 }
 
 function formatLmQueueTime(value: string | null | undefined): string {
@@ -336,37 +341,21 @@ function formatLmQueueTime(value: string | null | undefined): string {
   const sameDay = date.getFullYear() === now.getFullYear()
     && date.getMonth() === now.getMonth()
     && date.getDate() === now.getDate();
-  return new Intl.DateTimeFormat(undefined, sameDay ? {
-    hour: 'numeric',
-    minute: '2-digit',
-  } : {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(date);
+  return (sameDay ? CLOCK_TIME_FORMATTER : MONTH_DAY_TIME_FORMATTER).format(date);
 }
 
 function formatSummaryTime(value: string | null | undefined, emptyLabel = 'Never'): string {
   if (!value) return emptyLabel;
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(date);
+  return MONTH_DAY_TIME_FORMATTER.format(date);
 }
 
 function formatSummaryClock(value: string | null | undefined): string {
   if (!value) return '';
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(date);
+  return CLOCK_TIME_FORMATTER.format(date);
 }
 
 function sameSummaryDate(left: string | null | undefined, right: string | null | undefined): boolean {
@@ -751,6 +740,179 @@ function formatDreamElapsed(ms: number): string {
   if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
   if (minutes > 0) return `${minutes}m ${seconds}s`;
   return `${seconds}s`;
+}
+
+function useSecondClockNow(): number {
+  const [now, setNow] = useState(Date.now);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return now;
+}
+
+function EmberWorkedMeter({
+  workStartedAt,
+  onReset,
+}: {
+  workStartedAt: number;
+  onReset: () => void;
+}) {
+  const now = useSecondClockNow();
+  const workedDurationParts = formatWorkedDurationParts(now - workStartedAt);
+  const daybarWinRef = useRef<HTMLSpanElement | null>(null);
+  const daybarOffsetRef = useRef(0);
+  const daybarVelRef = useRef(0);
+  const daybarDragRef = useRef<{ startX: number; startOffset: number } | null>(null);
+  const daybarRafRef = useRef<number | null>(null);
+  const resetWorkedRef = useRef<HTMLButtonElement | null>(null);
+
+  const stepDaybar = useCallback(() => {
+    if (!daybarDragRef.current) {
+      daybarVelRef.current += -daybarOffsetRef.current * 0.16;
+      daybarVelRef.current *= 0.74;
+      daybarOffsetRef.current += daybarVelRef.current;
+      if (Math.abs(daybarOffsetRef.current) < 0.3 && Math.abs(daybarVelRef.current) < 0.3) {
+        daybarOffsetRef.current = 0;
+        daybarVelRef.current = 0;
+        daybarWinRef.current?.style.setProperty('--daybar-drag', '0px');
+        daybarRafRef.current = null;
+        return;
+      }
+    }
+    daybarWinRef.current?.style.setProperty('--daybar-drag', `${daybarOffsetRef.current.toFixed(2)}px`);
+    daybarRafRef.current = requestAnimationFrame(stepDaybar);
+  }, []);
+
+  const onDaybarPointerDown = useCallback((event: ReactPointerEvent<HTMLSpanElement>) => {
+    daybarDragRef.current = { startX: event.clientX, startOffset: daybarOffsetRef.current };
+    daybarVelRef.current = 0;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    if (daybarRafRef.current == null) daybarRafRef.current = requestAnimationFrame(stepDaybar);
+    event.preventDefault();
+  }, [stepDaybar]);
+
+  const onDaybarPointerMove = useCallback((event: ReactPointerEvent<HTMLSpanElement>) => {
+    const drag = daybarDragRef.current;
+    if (!drag) return;
+    daybarOffsetRef.current = drag.startOffset + (event.clientX - drag.startX);
+  }, []);
+
+  const endDaybarDrag = useCallback(() => {
+    if (!daybarDragRef.current) return;
+    daybarDragRef.current = null;
+    if (daybarRafRef.current == null) daybarRafRef.current = requestAnimationFrame(stepDaybar);
+  }, [stepDaybar]);
+
+  useEffect(() => () => {
+    if (daybarRafRef.current != null) cancelAnimationFrame(daybarRafRef.current);
+  }, []);
+
+  const resetWorked = useCallback(() => {
+    onReset();
+    const el = resetWorkedRef.current;
+    if (el) {
+      el.classList.remove('spring');
+      void el.offsetWidth;
+      el.classList.add('spring');
+    }
+  }, [onReset]);
+
+  const daybarStyle = {
+    '--ember-daybar-x': `${daybarPositionX(now)}px`,
+  } as CSSProperties;
+
+  return (
+    <div className="ember-worked-meter" aria-label={workedDurationParts.label}>
+      <span
+        className="ember-worked-window"
+        aria-hidden="true"
+        ref={daybarWinRef}
+        style={daybarStyle}
+        onPointerDown={onDaybarPointerDown}
+        onPointerMove={onDaybarPointerMove}
+        onPointerUp={endDaybarDrag}
+        onPointerCancel={endDaybarDrag}
+        onLostPointerCapture={endDaybarDrag}
+      >
+        <span className="ember-worked-window-track" />
+        <span className="ember-worked-window-glass" />
+      </span>
+      <span className="ember-worked-flip" aria-hidden="true">
+        <span className="ember-worked-flip-group">
+          <span className="ember-worked-flip-cards">
+            <span className="ember-worked-flip-card"><span>{workedDurationParts.hours[0]}</span></span>
+            <span className="ember-worked-flip-card"><span>{workedDurationParts.hours[1]}</span></span>
+          </span>
+          <span className="ember-worked-flip-label">HRS</span>
+        </span>
+        <span className="ember-worked-flip-group">
+          <span className="ember-worked-flip-cards">
+            <span className="ember-worked-flip-card"><span>{workedDurationParts.minutes[0]}</span></span>
+            <span className="ember-worked-flip-card"><span>{workedDurationParts.minutes[1]}</span></span>
+          </span>
+          <span className="ember-worked-flip-label">MIN</span>
+        </span>
+        <span className="ember-worked-flip-group">
+          <span className="ember-worked-flip-cards">
+            <span className="ember-worked-flip-card"><span>{workedDurationParts.seconds[0]}</span></span>
+            <span className="ember-worked-flip-card"><span>{workedDurationParts.seconds[1]}</span></span>
+          </span>
+          <span className="ember-worked-flip-label">SEC</span>
+        </span>
+        <button
+          type="button"
+          className="ember-worked-reset"
+          ref={resetWorkedRef}
+          tabIndex={-1}
+          aria-label="Reset worked timer"
+          title="Reset worked timer"
+          onClick={resetWorked}
+          onAnimationEnd={() => resetWorkedRef.current?.classList.remove('spring')}
+        >
+          <span className="ember-worked-reset-stud">
+            <svg viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.9">
+              <path d="M18.6 7.6 A7.2 7.2 0 1 0 19.3 12.4" />
+              <path d="M18.7 3.4 L18.7 7.9 L14.2 7.9" />
+            </svg>
+          </span>
+        </button>
+      </span>
+    </div>
+  );
+}
+
+function DreamCountdownClock({
+  dueAt,
+  pausedRemainingSeconds,
+  expired,
+}: {
+  dueAt: number | null;
+  pausedRemainingSeconds: number | null;
+  expired: boolean;
+}) {
+  const now = useSecondClockNow();
+  const remainingSeconds = expired
+    ? 0
+    : pausedRemainingSeconds == null
+      ? dueAt == null
+        ? 0
+        : Math.max(0, Math.ceil((dueAt - now) / 1000))
+      : Math.max(0, pausedRemainingSeconds);
+  const label = `${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, '0')}`;
+  return <b>{label}</b>;
+}
+
+function DreamElapsedClock({ startedAt }: { startedAt: number }) {
+  const now = useSecondClockNow();
+  return <small>{startedAt > 0 ? formatDreamElapsed(now - startedAt) : '0s'}</small>;
+}
+
+function EmberScheduleCountdown({ schedule }: { schedule: EmberSchedule }) {
+  const now = useSecondClockNow();
+  return <>{emberCountdownLabel(schedule, now)}</>;
 }
 
 function localDateInput(ms: number): string {
@@ -1159,7 +1321,6 @@ export function RightColumn({
   const [emberEndTime, setEmberEndTime] = useState(() => localTimeInput(Date.now() + 24 * 60 * 60 * 1000));
   const [emberBusy, setEmberBusy] = useState<string | null>(null);
   const [emberMessage, setEmberMessage] = useState<string | null>(null);
-  const [emberNow, setEmberNow] = useState(Date.now());
   const emberStateLoadedRef = useRef(false);
   const emberPersistedSignatureRef = useRef<string | null>(null);
   const emberSaveTimerRef = useRef<number | null>(null);
@@ -1418,13 +1579,6 @@ export function RightColumn({
       return valid.length === current.length ? current : valid;
     });
   }, [emberTargetOptions]);
-
-  useEffect(() => {
-    const tick = () => setEmberNow(Date.now());
-    tick();
-    const timer = window.setInterval(tick, 1000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   const sendEmberBusMessage = useCallback(async (
     targetProjectRoot: string | null | undefined,
@@ -1978,14 +2132,17 @@ export function RightColumn({
     }
   }, [dreamConsolidationPending, dreamConsolidationProjectRoots, emberProjectRoot, violetSummaryConfig.provider]);
 
+  // The old shared second tick also woke consolidation. Keep that deadline
+  // anchored to the Dream start rather than adding 120 seconds after delivery.
   useEffect(() => {
     if (!dreamConsolidationPending) return;
-    const elapsed = Date.now() - dreamStartedAtRef.current;
-    if (elapsed < DREAM_MIN_CONSOLIDATE_DELAY_MS) return;
-    void finishDreamConsolidation();
+    const dueAt = dreamStartedAtRef.current + DREAM_MIN_CONSOLIDATE_DELAY_MS;
+    const timer = window.setTimeout(() => {
+      void finishDreamConsolidation();
+    }, Math.max(0, dueAt - Date.now()));
+    return () => window.clearTimeout(timer);
   }, [
     dreamConsolidationPending,
-    emberNow,
     finishDreamConsolidation,
   ]);
 
@@ -2048,7 +2205,38 @@ export function RightColumn({
       return changed ? next : current;
     });
     previousWorkingAgentsRef.current = new Set(currentWorkingAgents);
-  }, [emberNow, workingAgents, workingAgentsKey, workingStartedAt, workingStartedAtKey]);
+  }, [dreamAgentOverlay, workingAgents, workingAgentsKey, workingStartedAt, workingStartedAtKey]);
+
+  const nextDreamAgentOverlayExpiryAt = useMemo(() => {
+    let next: number | null = null;
+    for (const entry of dreamAgentOverlay.values()) {
+      if (entry.phase !== 'pending') continue;
+      const expiresAt = entry.assignedAt + DREAM_AGENT_OVERLAY_TTL_MS + 1;
+      if (next == null || expiresAt < next) next = expiresAt;
+    }
+    return next;
+  }, [dreamAgentOverlay]);
+
+  // Agent work changes reconcile immediately above; this one-shot preserves
+  // the old clock-driven cleanup when a pending agent never changes state.
+  useEffect(() => {
+    if (nextDreamAgentOverlayExpiryAt == null) return;
+    const timer = window.setTimeout(() => {
+      const now = Date.now();
+      setDreamAgentOverlay((current) => {
+        const next = new Map(current);
+        let changed = false;
+        for (const [agentId, entry] of current) {
+          if (entry.phase === 'pending' && now - entry.assignedAt > DREAM_AGENT_OVERLAY_TTL_MS) {
+            next.delete(agentId);
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
+    }, Math.max(0, nextDreamAgentOverlayExpiryAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [nextDreamAgentOverlayExpiryAt]);
 
   const dreamAgentOverlayKey = useMemo(() => (
     dreamOverlayMapKey(dreamAgentOverlay)
@@ -2069,16 +2257,20 @@ export function RightColumn({
     onDreamingStatusAgentsChange?.([]);
   }, [onDreamingStatusAgentsChange]);
 
+  // Business timing stays in RightColumn, but it now wakes only at the actual
+  // deadline. Visual seconds are owned by the small clock component below.
   useEffect(() => {
     if (dreamOverlay !== 'countdown' || !dreamDueAt) return;
     if (dreamCountdownPaused) return;
-    if (emberNow < dreamDueAt) return;
-    if (dreamRunningRef.current || dreamConsolidationPending || dreamConsolidatingRef.current) {
-      if (!dreamDigestWaitActive) setDreamDigestWaitActive(true);
-      return;
-    }
-    void runDreamNow();
-  }, [dreamConsolidationPending, dreamCountdownPaused, dreamDigestWaitActive, dreamDueAt, dreamOverlay, emberNow, runDreamNow]);
+    const timer = window.setTimeout(() => {
+      if (dreamRunningRef.current || dreamConsolidationPending || dreamConsolidatingRef.current) {
+        setDreamDigestWaitActive(true);
+        return;
+      }
+      void runDreamNow();
+    }, Math.max(0, dreamDueAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [dreamConsolidationPending, dreamCountdownPaused, dreamDueAt, dreamOverlay, runDreamNow]);
 
   // While agents are still working we hold on the "wrapping up" scene; once the room
   // goes idle, begin the normal 10-minute countdown automatically.
@@ -2909,86 +3101,18 @@ export function RightColumn({
     ? emberHistory.find((record) => record.id === emberHistoryDetailId) ?? null
     : null;
   const emberEditing = emberEditorTarget !== null;
-  const workedDurationParts = formatWorkedDurationParts(emberNow - workStartedAt);
-  // Daybar scrub: drag the day window horizontally to nudge the background.
-  // The real time-driven position (--ember-daybar-x) stays put; only the scrub
-  // offset (--daybar-drag) changes, and it springs back to 0 on release.
-  const daybarWinRef = useRef<HTMLSpanElement | null>(null);
-  const daybarOffsetRef = useRef(0);
-  const daybarVelRef = useRef(0);
-  const daybarDragRef = useRef<{ startX: number; startOffset: number } | null>(null);
-  const daybarRafRef = useRef<number | null>(null);
-
-  const stepDaybar = useCallback(() => {
-    if (!daybarDragRef.current) {
-      daybarVelRef.current += -daybarOffsetRef.current * 0.16;
-      daybarVelRef.current *= 0.74;
-      daybarOffsetRef.current += daybarVelRef.current;
-      if (Math.abs(daybarOffsetRef.current) < 0.3 && Math.abs(daybarVelRef.current) < 0.3) {
-        daybarOffsetRef.current = 0;
-        daybarVelRef.current = 0;
-        daybarWinRef.current?.style.setProperty('--daybar-drag', '0px');
-        daybarRafRef.current = null;
-        return;
-      }
-    }
-    daybarWinRef.current?.style.setProperty('--daybar-drag', `${daybarOffsetRef.current.toFixed(2)}px`);
-    daybarRafRef.current = requestAnimationFrame(stepDaybar);
-  }, []);
-
-  const onDaybarPointerDown = useCallback((event: ReactPointerEvent<HTMLSpanElement>) => {
-    daybarDragRef.current = { startX: event.clientX, startOffset: daybarOffsetRef.current };
-    daybarVelRef.current = 0;
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    if (daybarRafRef.current == null) daybarRafRef.current = requestAnimationFrame(stepDaybar);
-    event.preventDefault();
-  }, [stepDaybar]);
-
-  const onDaybarPointerMove = useCallback((event: ReactPointerEvent<HTMLSpanElement>) => {
-    const drag = daybarDragRef.current;
-    if (!drag) return;
-    daybarOffsetRef.current = drag.startOffset + (event.clientX - drag.startX);
-  }, []);
-
-  const endDaybarDrag = useCallback(() => {
-    if (!daybarDragRef.current) return;
-    daybarDragRef.current = null;
-    if (daybarRafRef.current == null) daybarRafRef.current = requestAnimationFrame(stepDaybar);
-  }, [stepDaybar]);
-
-  useEffect(() => () => {
-    if (daybarRafRef.current != null) cancelAnimationFrame(daybarRafRef.current);
-  }, []);
-
   // Reset key (right of SECONDS): zero the worked session, then keep counting.
   // Reuses the same reset Good Night uses, so launch auto-start is unaffected.
-  const resetWorkedRef = useRef<HTMLButtonElement | null>(null);
   const onResetWorked = useCallback(() => {
     setWorkStartedAt(resetEmberWorkSessionStartedAt());
-    const el = resetWorkedRef.current;
-    if (el) { el.classList.remove('spring'); void el.offsetWidth; el.classList.add('spring'); }
   }, []);
 
-  const workedDaybarStyle = {
-    '--ember-daybar-x': `${daybarPositionX(emberNow)}px`,
-  } as CSSProperties;
-  const dreamRemainingSeconds = dreamOverlay === 'countdown'
-    ? dreamCountdownPaused
-      ? Math.max(0, dreamPausedRemainingSeconds ?? 0)
-      : dreamDueAt
-        ? Math.max(0, Math.ceil((dreamDueAt - emberNow) / 1000))
-        : 0
-    : 0;
-  const dreamCountdownLabel = `${Math.floor(dreamRemainingSeconds / 60)}:${String(dreamRemainingSeconds % 60).padStart(2, '0')}`;
   const dreamCountdownInfoLabel = dreamDigestWaitActive ? DREAM_DIGEST_WAIT_MESSAGE : null;
   const dreamStatusLabel = dreamScope
     ? `${dreamScope} dreaming`
     : dreamingAgents.length > 0
       ? `${dreamAgentList(dreamingAgents)} ${dreamingAgents.length === 1 ? 'is' : 'are'} dreaming`
       : 'Ember is dreaming';
-  const dreamElapsedLabel = dreamOverlay === 'dreaming' && dreamStartedAtRef.current > 0
-    ? formatDreamElapsed(emberNow - dreamStartedAtRef.current)
-    : '0s';
   const dreamFinishedLabel = dreamScope
     ? `${dreamScope} had dreams`
     : dreamingAgents.length > 0
@@ -3444,62 +3568,7 @@ export function RightColumn({
     <>
       <aside className={`sidebar-right ${dreamOverlay !== 'off' ? 'night-active' : ''}`}>
       <div className="sr-head ember-room-head">
-        <div className="ember-worked-meter" aria-label={workedDurationParts.label}>
-          <span
-            className="ember-worked-window"
-            aria-hidden="true"
-            ref={daybarWinRef}
-            style={workedDaybarStyle}
-            onPointerDown={onDaybarPointerDown}
-            onPointerMove={onDaybarPointerMove}
-            onPointerUp={endDaybarDrag}
-            onPointerCancel={endDaybarDrag}
-            onLostPointerCapture={endDaybarDrag}
-          >
-            <span className="ember-worked-window-track" />
-            <span className="ember-worked-window-glass" />
-          </span>
-          <span className="ember-worked-flip" aria-hidden="true">
-            <span className="ember-worked-flip-group">
-              <span className="ember-worked-flip-cards">
-                <span className="ember-worked-flip-card"><span>{workedDurationParts.hours[0]}</span></span>
-                <span className="ember-worked-flip-card"><span>{workedDurationParts.hours[1]}</span></span>
-              </span>
-              <span className="ember-worked-flip-label">HRS</span>
-            </span>
-            <span className="ember-worked-flip-group">
-              <span className="ember-worked-flip-cards">
-                <span className="ember-worked-flip-card"><span>{workedDurationParts.minutes[0]}</span></span>
-                <span className="ember-worked-flip-card"><span>{workedDurationParts.minutes[1]}</span></span>
-              </span>
-              <span className="ember-worked-flip-label">MIN</span>
-            </span>
-            <span className="ember-worked-flip-group">
-              <span className="ember-worked-flip-cards">
-                <span className="ember-worked-flip-card"><span>{workedDurationParts.seconds[0]}</span></span>
-                <span className="ember-worked-flip-card"><span>{workedDurationParts.seconds[1]}</span></span>
-              </span>
-              <span className="ember-worked-flip-label">SEC</span>
-            </span>
-            <button
-              type="button"
-              className="ember-worked-reset"
-              ref={resetWorkedRef}
-              tabIndex={-1}
-              aria-label="Reset worked timer"
-              title="Reset worked timer"
-              onClick={onResetWorked}
-              onAnimationEnd={() => resetWorkedRef.current?.classList.remove('spring')}
-            >
-              <span className="ember-worked-reset-stud">
-                <svg viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.9">
-                  <path d="M18.6 7.6 A7.2 7.2 0 1 0 19.3 12.4" />
-                  <path d="M18.7 3.4 L18.7 7.9 L14.2 7.9" />
-                </svg>
-              </span>
-            </button>
-          </span>
-        </div>
+        <EmberWorkedMeter workStartedAt={workStartedAt} onReset={onResetWorked} />
         <RockerSwitch
           checked={dreamOverlay === 'off'}
           label={dreamOverlay === 'off' ? 'Good Night' : 'Back to Kota'}
@@ -4259,7 +4328,7 @@ export function RightColumn({
                             {repeating ? 'Repeat schedule' : 'One-time schedule'}
                           </span>
                           <span className={`ember-card-status ${schedule.status}`}>
-                            {emberCountdownLabel(schedule, emberNow)}
+                            <EmberScheduleCountdown schedule={schedule} />
                           </span>
                           <b>{emberScheduleSummary(schedule)} · {emberScheduleTargetLabel(schedule)}</b>
                           <small>{emberScheduleAttribution(schedule)}</small>
@@ -4375,7 +4444,11 @@ export function RightColumn({
         ) : dreamOverlay === 'countdown' ? (
           <div className="ember-dream-state ember-dream-countdown">
             <span>Start dreaming in</span>
-            <b>{dreamCountdownLabel}</b>
+            <DreamCountdownClock
+              dueAt={dreamDueAt}
+              pausedRemainingSeconds={dreamPausedRemainingSeconds}
+              expired={dreamDigestWaitActive}
+            />
             {dreamCountdownInfoLabel && (
               <div className="ember-dreaming-label">{dreamCountdownInfoLabel}</div>
             )}
@@ -4397,7 +4470,7 @@ export function RightColumn({
           <div className="ember-dream-state ember-dreaming-state">
             <span>Dreaming</span>
             <div className="ember-dreaming-label">{dreamStatusLabel}</div>
-            <small>{dreamElapsedLabel}</small>
+            <DreamElapsedClock startedAt={dreamStartedAtRef.current} />
             {dreamVigilReady && (
               <div className="ember-dream-action-row">
                 <button type="button" className="ember-dream-inline-action primary" onClick={() => setDreamOverlay('finished')}>

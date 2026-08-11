@@ -43,6 +43,7 @@ import {
   violetComposerSentHistory,
 } from '../src/chrome/violet-room-events';
 import type { AgentId } from '../src/types/scene';
+import { createAgentGridStore } from '../src/lib/agent-grid-store';
 import type { WorkspaceTreeListing, WorkspaceTreePathRequest } from '../src/types/tree';
 import violetMessageOrderCases from './fixtures/violet-message-order.json';
 import {
@@ -863,6 +864,251 @@ describe('M1 · canvas shell landmarks', () => {
         provider: 'codex',
       });
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('pauses the Dream deadline and resumes from the same rounded-up remainder', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
+    const workspace = hydrationWorkspace('dream-pause-resume', []);
+    const send = vi.spyOn(ptyClient, 'agentBusSend').mockImplementation(async (request) => ({
+      eventId: request.eventId || `event-${request.target}`,
+      targetAgentId: request.target,
+      submitted: true,
+      duplicate: false,
+      skippedReason: null,
+    }));
+    vi.spyOn(ptyClient, 'emberPrepareDreams').mockResolvedValue({
+      accountDreamsPath: '/tmp/Kota/dreams/dreams.md',
+      entriesDir: '/tmp/Kota/dreams/entries',
+      archiveDir: '/tmp/Kota/dreams/archive',
+      projectDreamsPath: `${workspace.localRoot}/project-memory/dreams.md`,
+      projected: false,
+    });
+    const view = render(
+      <RightColumn
+        sceneKey="conversation"
+        workspace={workspace}
+        workingAgents={new Set()}
+        onOpenHotMem={vi.fn()}
+        dreamProjects={[{
+          projectId: workspace.projectId,
+          projectRoot: workspace.localRoot,
+          projectName: workspace.projectId,
+          agents: [{ id: 'alice', name: 'Alice' }],
+        }]}
+      />,
+    );
+
+    try {
+      const switchButton = screen.getByRole('switch', { name: 'Good Night' });
+      fireEvent.click(switchButton);
+      fireEvent.click(switchButton);
+      const countdown = screen.getByText('Start dreaming in').closest('.ember-dream-countdown') as HTMLElement;
+
+      expect(within(countdown).getByText('10:00')).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(90_000));
+      expect(within(countdown).getByText('8:30')).toBeInTheDocument();
+
+      fireEvent.click(within(countdown).getByRole('button', { name: 'Pause' }));
+      act(() => vi.advanceTimersByTime(600_000));
+      expect(within(countdown).getByText('8:30')).toBeInTheDocument();
+      expect(send).not.toHaveBeenCalled();
+
+      fireEvent.click(within(countdown).getByRole('button', { name: 'Resume' }));
+      act(() => vi.advanceTimersByTime(509_000));
+      expect(within(countdown).getByText('0:01')).toBeInTheDocument();
+      expect(send).not.toHaveBeenCalled();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits at zero for an in-flight Dream digest, then starts exactly once when it clears', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
+    const workspace = hydrationWorkspace('dream-digest-wait', []);
+    const send = vi.spyOn(ptyClient, 'agentBusSend').mockImplementation(async (request) => ({
+      eventId: request.eventId || `event-${request.target}`,
+      targetAgentId: request.target,
+      submitted: true,
+      duplicate: false,
+      skippedReason: null,
+    }));
+    vi.spyOn(ptyClient, 'emberPrepareDreams').mockResolvedValue({
+      accountDreamsPath: '/tmp/Kota/dreams/dreams.md',
+      entriesDir: '/tmp/Kota/dreams/entries',
+      archiveDir: '/tmp/Kota/dreams/archive',
+      projectDreamsPath: `${workspace.localRoot}/project-memory/dreams.md`,
+      projected: false,
+    });
+    const consolidationResolvers: Array<() => void> = [];
+    const consolidate = vi.spyOn(ptyClient, 'emberConsolidateDreams').mockImplementation(() => (
+      new Promise((resolve) => {
+        consolidationResolvers.push(() => resolve({
+          accountDreamsPath: '/tmp/Kota/dreams/dreams.md',
+          entriesDir: '/tmp/Kota/dreams/entries',
+          oldDreamsPath: '/tmp/Kota/dreams/old_dreams.md',
+          promptPath: '$KOTA_HOME/heroes/system-ember/ember-dream-consolidate.md',
+          processedEntryCount: 1,
+          activeEntryCount: 1,
+          archivedEntryCount: 0,
+          updatedAt: new Date().toISOString(),
+          error: null,
+        }));
+      })
+    ));
+    const view = render(
+      <RightColumn
+        sceneKey="conversation"
+        workspace={workspace}
+        workingAgents={new Set()}
+        onOpenHotMem={vi.fn()}
+        dreamProjects={[{
+          projectId: workspace.projectId,
+          projectRoot: workspace.localRoot,
+          projectName: workspace.projectId,
+          agents: [{ id: 'alice', name: 'Alice' }],
+        }]}
+      />,
+    );
+
+    try {
+      let switchButton = screen.getByRole('switch', { name: 'Good Night' });
+      fireEvent.click(switchButton);
+      fireEvent.click(switchButton);
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(send).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(120_000);
+        await Promise.resolve();
+      });
+      expect(consolidate).toHaveBeenCalledTimes(1);
+
+      switchButton = screen.getByRole('switch', { name: 'Back to Kota' });
+      fireEvent.click(switchButton);
+      fireEvent.click(switchButton);
+      act(() => vi.advanceTimersByTime(1700));
+      switchButton = screen.getByRole('switch', { name: 'Good Night' });
+      fireEvent.click(switchButton);
+      fireEvent.click(switchButton);
+
+      await act(async () => {
+        vi.advanceTimersByTime(600_000);
+        await Promise.resolve();
+      });
+      const countdown = screen.getByText('Start dreaming in').closest('.ember-dream-countdown') as HTMLElement;
+      expect(within(countdown).getByText('0:00')).toBeInTheDocument();
+      expect(within(countdown).getByText('Last dreams is still being digested, waiting...')).toBeInTheDocument();
+      expect(send).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        consolidationResolvers[0]?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconciles a Dream overlay when the working update arrives before delivery completes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
+    const workspace = hydrationWorkspace('dream-working-race', []);
+    let finishDelivery: (() => void) | null = null;
+    const delivery = new Promise<void>((resolve) => {
+      finishDelivery = resolve;
+    });
+    const send = vi.spyOn(ptyClient, 'agentBusSend').mockImplementation(async (request) => {
+      await delivery;
+      return {
+        eventId: request.eventId || `event-${request.target}`,
+        targetAgentId: request.target,
+        submitted: true,
+        duplicate: false,
+        skippedReason: null,
+      };
+    });
+    vi.spyOn(ptyClient, 'emberPrepareDreams').mockResolvedValue({
+      accountDreamsPath: '/tmp/Kota/dreams/dreams.md',
+      entriesDir: '/tmp/Kota/dreams/entries',
+      archiveDir: '/tmp/Kota/dreams/archive',
+      projectDreamsPath: `${workspace.localRoot}/project-memory/dreams.md`,
+      projected: false,
+    });
+    const onDreamingStatusAgentsChange = vi.fn();
+    const dreamProjects = [{
+      projectId: workspace.projectId,
+      projectRoot: workspace.localRoot,
+      projectName: workspace.projectId,
+      agents: [{ id: 'alice', name: 'Alice' }],
+    }];
+    const renderColumn = (
+      workingAgents: ReadonlySet<AgentId>,
+      workingStartedAt: ReadonlyMap<AgentId, string>,
+    ) => (
+      <RightColumn
+        sceneKey="conversation"
+        workspace={workspace}
+        workingAgents={workingAgents}
+        workingStartedAt={workingStartedAt}
+        onOpenHotMem={vi.fn()}
+        dreamProjects={dreamProjects}
+        onDreamingStatusAgentsChange={onDreamingStatusAgentsChange}
+      />
+    );
+    const view = render(renderColumn(new Set(), new Map()));
+
+    try {
+      const switchButton = screen.getByRole('switch', { name: 'Good Night' });
+      fireEvent.click(switchButton);
+      fireEvent.click(switchButton);
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(send).toHaveBeenCalledTimes(1);
+
+      view.rerender(renderColumn(
+        new Set<AgentId>(['alice']),
+        new Map<AgentId, string>([['alice', new Date().toISOString()]]),
+      ));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        finishDelivery?.();
+        await delivery;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(onDreamingStatusAgentsChange).toHaveBeenLastCalledWith(['alice']);
+    } finally {
+      view.unmount();
       vi.useRealTimers();
     }
   });
@@ -3434,6 +3680,17 @@ describe('AWL · agent terminal input', () => {
     };
   }
 
+  async function publishGrid(
+    gridStore: ReturnType<typeof createAgentGridStore>,
+    agentId: AgentId,
+    grid: GridSnapshot,
+  ) {
+    await act(async () => {
+      gridStore.setSnapshot(agentId, grid);
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+  }
+
   function renderAgentInput({
     onKey = vi.fn(),
     grid,
@@ -3449,12 +3706,14 @@ describe('AWL · agent terminal input', () => {
     onFocusAgent?: ReturnType<typeof vi.fn>;
     focusInput?: boolean;
   } = {}) {
+    const gridStore = createAgentGridStore();
+    if (grid) gridStore.setSnapshot('alice', grid);
     const result = render(
       <>
         <button type="button">focus sink</button>
         <AgentWindowsLayer
           liveAgents={['alice']}
-          grids={grid ? new Map([['alice', grid]]) : new Map()}
+          gridStore={gridStore}
           status={new Map([
             ['alice', { agentId: 'alice', running: true, cli, cwd: '/tmp/alice' }],
           ])}
@@ -3469,8 +3728,153 @@ describe('AWL · agent terminal input', () => {
     );
     const input = screen.getByLabelText('CC terminal input') as HTMLTextAreaElement;
     if (focusInput) input.focus();
-    return { input, onKey, container: result.container, onFocusAgent };
+    return { input, onKey, container: result.container, onFocusAgent, gridStore };
   }
+
+  it('keeps a minimized terminal unsubscribed and restores on the latest hidden frame', async () => {
+    const gridStore = createAgentGridStore();
+    const first = snapWithCursor(1, 5, 0, 0, false);
+    first.cells = ['f', 'i', 'r', 's', 't'].map((ch) => ({ ch }));
+    const latest = snapWithCursor(1, 6, 0, 0, false);
+    latest.cells = ['l', 'a', 't', 'e', 's', 't'].map((ch) => ({ ch }));
+    gridStore.setSnapshot('alice', first);
+    const subscribe = vi.spyOn(gridStore, 'subscribe');
+    const props = (minimized: ReadonlySet<AgentId>) => (
+      <AgentWindowsLayer
+        liveAgents={['alice']}
+        gridStore={gridStore}
+        status={new Map([
+          ['alice', { agentId: 'alice', running: true, cli: 'claude' as const, cwd: '/tmp/alice' }],
+        ])}
+        focusedAgent={null}
+        minimized={minimized}
+        onFocusAgent={() => {}}
+        onMinimizeAgent={() => {}}
+        onAgentKey={() => {}}
+        projectId="hidden-terminal"
+      />
+    );
+    const view = render(props(new Set<AgentId>(['alice'])));
+
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('term-grid')).not.toBeInTheDocument();
+    gridStore.setSnapshot('alice', latest);
+    expect(subscribe).not.toHaveBeenCalled();
+
+    view.rerender(props(new Set()));
+    await waitFor(() => expect(screen.getByTestId('term-grid')).toHaveTextContent('latest'));
+    expect(subscribe).toHaveBeenCalledTimes(1);
+
+    view.rerender(props(new Set<AgentId>(['alice'])));
+    await waitFor(() => expect(screen.queryByTestId('term-grid')).not.toBeInTheDocument());
+  });
+
+  it('reattaches resize observation to the new terminal body after restore', () => {
+    vi.useFakeTimers();
+    const resize = vi.spyOn(ptyClient, 'resizeAgentPty').mockResolvedValue();
+    const observers: Array<{
+      callback: ResizeObserverCallback;
+      observe: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+    }> = [];
+    class TestResizeObserver {
+      callback: ResizeObserverCallback;
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+        observers.push(this);
+      }
+    }
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    const gridStore = createAgentGridStore();
+    gridStore.setSnapshot('alice', snapWithCursor(20, 80, 0, 0, false));
+    const props = (minimized: ReadonlySet<AgentId>) => (
+      <AgentWindowsLayer
+        liveAgents={['alice']}
+        gridStore={gridStore}
+        status={new Map([
+          ['alice', { agentId: 'alice', running: true, cli: 'claude' as const, cwd: '/tmp/alice' }],
+        ])}
+        focusedAgent={null}
+        minimized={minimized}
+        onFocusAgent={() => {}}
+        onMinimizeAgent={() => {}}
+        onAgentKey={() => {}}
+        projectId="resize-after-restore"
+      />
+    );
+
+    try {
+      const view = render(props(new Set()));
+      expect(observers).toHaveLength(1);
+      const firstBody = observers[0]!.observe.mock.calls[0]?.[0];
+      act(() => {
+        observers[0]!.callback([{
+          contentRect: { width: 770, height: 300 },
+        } as ResizeObserverEntry], observers[0] as unknown as ResizeObserver);
+        vi.advanceTimersByTime(50);
+      });
+      expect(resize).toHaveBeenCalledTimes(1);
+
+      view.rerender(props(new Set<AgentId>(['alice'])));
+      expect(observers[0]!.disconnect).toHaveBeenCalledTimes(1);
+      view.rerender(props(new Set()));
+      expect(observers).toHaveLength(2);
+      const restoredBody = observers[1]!.observe.mock.calls[0]?.[0];
+      expect(restoredBody).not.toBe(firstBody);
+      act(() => {
+        observers[1]!.callback([{
+          contentRect: { width: 616, height: 240 },
+        } as ResizeObserverEntry], observers[1] as unknown as ResizeObserver);
+        vi.advanceTimersByTime(50);
+      });
+      expect(resize).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps project and agent grid subscriptions isolated while sessions stay live', async () => {
+    const gridStore = createAgentGridStore();
+    const frame = (text: string) => {
+      const snap = snapWithCursor(1, text.length, 0, 0, false);
+      snap.cells = Array.from(text, (ch) => ({ ch }));
+      return snap;
+    };
+    gridStore.setSnapshot('alice', frame('alice-1'));
+    gridStore.setSnapshot('bob', frame('bob-1'));
+    const props = (agentId: AgentId, projectId: string) => (
+      <AgentWindowsLayer
+        liveAgents={[agentId]}
+        gridStore={gridStore}
+        status={new Map([
+          [agentId, { agentId, running: true, cli: 'claude' as const, cwd: `/tmp/${agentId}` }],
+        ])}
+        focusedAgent={null}
+        minimized={new Set()}
+        onFocusAgent={() => {}}
+        onMinimizeAgent={() => {}}
+        onAgentKey={() => {}}
+        projectId={projectId}
+      />
+    );
+    const view = render(props('alice', 'project-a'));
+    expect(screen.getByTestId('term-grid')).toHaveTextContent('alice-1');
+
+    view.rerender(props('bob', 'project-b'));
+    await waitFor(() => expect(screen.getByTestId('term-grid')).toHaveTextContent('bob-1'));
+    gridStore.setSnapshot('alice', frame('alice-2'));
+    await publishGrid(gridStore, 'bob', frame('bob-2'));
+    expect(screen.getByTestId('term-grid')).toHaveTextContent('bob-2');
+    expect(screen.getByTestId('term-grid')).not.toHaveTextContent('alice-2');
+
+    view.rerender(props('alice', 'project-a'));
+    await waitFor(() => expect(screen.getByTestId('term-grid')).toHaveTextContent('alice-2'));
+  });
 
   it('sends inserted symbol text via the browser text-input path', () => {
     const { input, onKey } = renderAgentInput();
@@ -3481,13 +3885,14 @@ describe('AWL · agent terminal input', () => {
 
   it('focuses terminal input when raised through the imperative handle', async () => {
     const ref = createRef<AgentWindowsLayerHandle>();
+    const gridStore = createAgentGridStore();
     render(
       <>
         <button type="button">focus sink</button>
         <AgentWindowsLayer
           ref={ref}
           liveAgents={['alice']}
-          grids={new Map()}
+          gridStore={gridStore}
           status={new Map([
             ['alice', { agentId: 'alice', running: true, cli: 'claude', cwd: '/tmp/alice' }],
           ])}
@@ -3548,6 +3953,73 @@ describe('AWL · agent terminal input', () => {
     fireEvent.keyDown(input, { key: 'Backspace' });
     expect(onKey).toHaveBeenNthCalledWith(1, '\r');
     expect(onKey).toHaveBeenNthCalledWith(2, '\x7f');
+  });
+
+  it('keeps ordinary wheel scrolling on the backend display-offset path', () => {
+    const scroll = vi.spyOn(ptyClient, 'scrollAgentPty').mockResolvedValue();
+    const { container, onKey } = renderAgentInput({
+      grid: snapWithCursor(20, 80, 0, 0, false),
+      focusedAgent: null,
+      focusInput: false,
+    });
+    const body = container.querySelector('.win-terminal-body') as HTMLElement;
+
+    fireEvent.wheel(body, { deltaY: -30, deltaMode: 0 });
+    fireEvent.wheel(body, { deltaY: 15, deltaMode: 0 });
+
+    expect(scroll).toHaveBeenNthCalledWith(1, 'alice', 3);
+    expect(scroll).toHaveBeenNthCalledWith(2, 'alice', -2);
+    expect(onKey).not.toHaveBeenCalled();
+  });
+
+  it('uses the latest mouse mode snapshot for SGR wheel bytes instead of scroll IPC', async () => {
+    const scroll = vi.spyOn(ptyClient, 'scrollAgentPty').mockResolvedValue();
+    const initial = snapWithCursor(20, 80, 0, 0, false);
+    const { container, onKey, gridStore } = renderAgentInput({
+      grid: initial,
+      focusedAgent: null,
+      focusInput: false,
+    });
+    const mouseGrid = { ...initial, mouseMode: true, sgrMouse: true };
+    await publishGrid(gridStore, 'alice', mouseGrid);
+    const body = container.querySelector('.win-terminal-body') as HTMLElement;
+
+    const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -80 });
+    Object.defineProperties(wheel, {
+      clientX: { value: 14 },
+      clientY: { value: 30 },
+    });
+    fireEvent(body, wheel);
+
+    expect(onKey).toHaveBeenCalledWith('\x1b[<64;2;3M');
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it('preserves legacy X10 wheel encoding when SGR mouse is disabled', () => {
+    const scroll = vi.spyOn(ptyClient, 'scrollAgentPty').mockResolvedValue();
+    const grid = {
+      ...snapWithCursor(20, 80, 0, 0, false),
+      mouseMode: true,
+      sgrMouse: false,
+    };
+    const { container, onKey } = renderAgentInput({
+      grid,
+      focusedAgent: null,
+      focusInput: false,
+    });
+    const body = container.querySelector('.win-terminal-body') as HTMLElement;
+
+    const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -80 });
+    Object.defineProperties(wheel, {
+      clientX: { value: 14 },
+      clientY: { value: 30 },
+    });
+    fireEvent(body, wheel);
+
+    expect(onKey).toHaveBeenCalledWith(
+      `\x1b[M${String.fromCharCode(32 + 64)}${String.fromCharCode(32 + 2)}${String.fromCharCode(32 + 3)}`,
+    );
+    expect(scroll).not.toHaveBeenCalled();
   });
 
   it('drops file paths into the terminal input using terminal-style escaping', () => {
@@ -3660,6 +4132,16 @@ describe('AWL · agent terminal input', () => {
     });
     expect(input.style.top).toBe(`${6 * TERMINAL_LINE_HEIGHT}px`);
     expect(input.style.left).toBe(`${2 * TERMINAL_CELL_WIDTH}px`);
+  });
+
+  it('moves the IME anchor with the latest leaf snapshot', async () => {
+    const initial = snapWithCursor(20, 80, 1, 1, true);
+    const { input, gridStore } = renderAgentInput({ cli: 'claude', grid: initial });
+
+    await publishGrid(gridStore, 'alice', snapWithCursor(20, 80, 7, 4, true));
+
+    expect(input.style.top).toBe(`${7 * TERMINAL_LINE_HEIGHT}px`);
+    expect(input.style.left).toBe(`${4 * TERMINAL_CELL_WIDTH}px`);
   });
 });
 
