@@ -1,0 +1,10 @@
+# Kota
+
+> Desktop app that runs agent CLIs in project-scoped rooms and presents their history in one shared view. macOS, Apple Silicon.
+
+- Product: https://www.kota.place/
+- Download: https://github.com/stabruriss/kota-app/releases/latest
+- Source: https://github.com/stabruriss/kota-app
+- Docs: https://www.kota.place/docs/
+- Whitepaper: https://www.kota.place/docs/research/long-term-teammates/v1/
+- CLI host compatibility: https://www.kota.place/docs/cli-host-compatibility/

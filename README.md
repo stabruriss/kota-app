@@ -3,6 +3,8 @@
 Kota is a desktop workspace for working with multiple agents inside
 project-scoped rooms.
 
+[Download for macOS](https://github.com/stabruriss/kota-app/releases/latest) · [kota.place](https://www.kota.place) · [5-min demo](https://www.youtube.com/watch?v=ZaMBv_L9Ivs) · [CLI compatibility](https://www.kota.place/docs/cli-host-compatibility/) · [Whitepaper](https://www.kota.place/docs/research/long-term-teammates/v1/)
+
 This public repository is the release home for Kota source, downloads, public
 documentation, legal notices, citation metadata, and the `kota.place` website.
 

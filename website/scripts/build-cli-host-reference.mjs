@@ -158,6 +158,13 @@ const page = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="${esc(data.description)}">
 <title>${esc(data.title)} — Kota Docs</title>
+<link rel="canonical" href="https://www.kota.place/docs/cli-host-compatibility/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Kota">
+<meta property="og:title" content="${esc(data.title)} — Kota Docs">
+<meta property="og:description" content="${esc(data.description)}">
+<meta property="og:url" content="https://www.kota.place/docs/cli-host-compatibility/">
+<meta name="twitter:card" content="summary">
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/kota/app-icons/32x32.png">
 <link rel="apple-touch-icon" href="/assets/kota/app-icons/icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
