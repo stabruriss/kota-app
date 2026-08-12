@@ -2,7 +2,7 @@
  *
  *  Maintains:
  *    - `liveAgents`: which agentIds have a running PTY
- *    - `grids`: per-agent latest GridSnapshot (passed to Stage → TerminalGrid)
+ *    - `gridStore`: per-agent latest GridSnapshot (subscribed by visible terminal leaves)
  *    - `recruit(req)`: spawn a CLI in `pty/agent.rs`, subscribe to events
  *    - `send(agentId, input)`: write to that agent's stdin
  *    - `dismiss(agentId)`: kill the PTY
@@ -32,6 +32,10 @@ import {
   type GridSnapshot,
 } from '../types/agent-pty';
 import type { AgentId } from '../types/scene';
+import {
+  createAgentGridStore,
+  type AgentGridStore,
+} from '../lib/agent-grid-store';
 
 const AGENT_WORK_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 const AGENT_WORK_PRUNE_INTERVAL_MS = 30 * 1000;
@@ -112,19 +116,13 @@ function spawningPlaceholderGrid(
 
 interface AgentRuntimeState {
   liveAgents: Set<AgentId>;
-  grids: Map<AgentId, GridSnapshot>;
   status: Map<AgentId, AgentStatusEvent>;
   workState: Map<AgentId, AgentWorkStateEvent>;
-  /** agentIds that have produced at least one snapshot with non-blank
-   *  content. Until then we keep the "spawning…" placeholder visible —
-   *  Codex specifically emits a screen-clear snapshot before the banner
-   *  arrives 3 s later, which would otherwise wipe the placeholder. */
-  seenContent: Set<AgentId>;
 }
 
 export interface AgentRuntime {
   liveAgents: Set<AgentId>;
-  grids: Map<AgentId, GridSnapshot>;
+  gridStore: AgentGridStore;
   status: Map<AgentId, AgentStatusEvent>;
   workState: Map<AgentId, AgentWorkStateEvent>;
   recruit: (req: AgentSpawnRequest) => Promise<void>;
@@ -145,17 +143,21 @@ export interface AgentRuntimeOptions {
 export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime {
   const [state, setState] = useState<AgentRuntimeState>(() => ({
     liveAgents: new Set(),
-    grids: new Map(),
     status: new Map(),
     workState: new Map(),
-    seenContent: new Set(),
   }));
+  const [gridStore] = useState(createAgentGridStore);
 
   // unlisten functions, keyed by agentId, so re-recruiting an agent
   // tears down the old subscriptions cleanly.
-  const unlistenRefs = useRef<Map<AgentId, Array<() => void | Promise<void>>>>(
-    new Map(),
-  );
+  const unlistenRefs = useRef<Map<AgentId, {
+    generation: number;
+    fns: Array<() => void | Promise<void>>;
+  }>>(new Map());
+  const generationRefs = useRef<Map<AgentId, number>>(new Map());
+  /** Keep the spawning placeholder until the first non-blank real frame.
+   *  This is intentionally not React state: output frames must not wake App. */
+  const seenContentRef = useRef<Set<AgentId>>(new Set());
   const workTimeoutRefs = useRef<Map<AgentId, number>>(new Map());
   const onExitRef = useRef(options.onExit);
   onExitRef.current = options.onExit;
@@ -313,46 +315,53 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
   // On unmount, drop all subscriptions.
   useEffect(() => {
     return () => {
-      for (const [, fns] of unlistenRefs.current) {
-        for (const fn of fns) Promise.resolve(fn()).catch(() => {});
+      for (const [, subscription] of unlistenRefs.current) {
+        for (const fn of subscription.fns) Promise.resolve(fn()).catch(() => {});
       }
       unlistenRefs.current.clear();
+      generationRefs.current.clear();
+      seenContentRef.current.clear();
       for (const [, timer] of workTimeoutRefs.current) window.clearTimeout(timer);
       workTimeoutRefs.current.clear();
+      gridStore.dispose();
     };
-  }, [applyWorkEvent, clearWorkTimer]);
+  }, [gridStore]);
 
   const recruit = useCallback(async (req: AgentSpawnRequest) => {
     const agentId = req.agentId as AgentId;
+    const generation = (generationRefs.current.get(agentId) ?? 0) + 1;
+    generationRefs.current.set(agentId, generation);
+    const isCurrentGeneration = () => generationRefs.current.get(agentId) === generation;
 
     // Tear down any prior subscriptions for this agentId.
     const prior = unlistenRefs.current.get(agentId);
     if (prior) {
-      for (const fn of prior) Promise.resolve(fn()).catch(() => {});
       unlistenRefs.current.delete(agentId);
+      await Promise.allSettled(
+        prior.fns.map((fn) => Promise.resolve().then(() => fn())),
+      );
     }
+    if (!isCurrentGeneration()) return;
 
     // Reset accumulated state + show "spawning {cli}…" placeholder so
     // the seat doesn't look stuck during the 1-3 s CC/Codex cold start.
+    seenContentRef.current.delete(agentId);
+    gridStore.setSnapshot(
+      agentId,
+      spawningPlaceholderGrid(req.cli, {
+        cwd: req.cwd,
+        detail: 'output/status/exit listeners armed',
+      }),
+    );
     setState((s) => {
       const live = new Set(s.liveAgents);
-      const grids = new Map(s.grids);
       const st = new Map(s.status);
       const workState = new Map(s.workState);
-      const seen = new Set(s.seenContent);
-      grids.set(
-        agentId,
-        spawningPlaceholderGrid(req.cli, {
-          cwd: req.cwd,
-          detail: 'output/status/exit listeners armed',
-        }),
-      );
       live.add(agentId);
       st.delete(agentId);
       workState.delete(agentId);
       clearWorkTimer(agentId);
-      seen.delete(agentId);
-      return { liveAgents: live, grids, status: st, workState, seenContent: seen };
+      return { liveAgents: live, status: st, workState };
     });
 
     // ── Subscribe BEFORE spawn ──
@@ -360,39 +369,44 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
     // before the reader thread first emits, or the welcome banner is
     // lost. Spawn returns the AgentRoute synchronously, so we set up
     // listeners against the predictable topic names first, then spawn.
+    const newUnlistenFns: Array<() => void | Promise<void>> = [];
     const offOutput = await onAgentOutput(req.agentId, (evt) => {
+      if (!isCurrentGeneration()) return;
       const snap = evt.snapshot;
-      // Cheap existence check (short-circuits) — only used to suppress
-      // blank snapshots until we've seen real content.
-      const hasContent = snap.cells.some((c) => c.ch !== ' ' && c.ch !== '');
-      setState((s) => {
-        // Suppress blank snapshots until we've seen real content. Codex
-        // emits ~3 s of clear-screen escapes before its banner; without
-        // this the placeholder gets wiped to blackness immediately.
-        if (!s.seenContent.has(agentId) && !hasContent) {
-          return s;
-        }
-        const grids = new Map(s.grids);
-        const seen = new Set(s.seenContent);
-        if (hasContent) seen.add(agentId);
-        grids.set(agentId, snap);
-        return { ...s, grids, seenContent: seen };
-      });
+      // Suppress blank snapshots until real content appears. After that
+      // first frame we neither scan the grid nor touch React root state.
+      if (!seenContentRef.current.has(agentId)) {
+        const hasContent = snap.cells.some((cell) => cell.ch !== ' ' && cell.ch !== '');
+        if (!hasContent) return;
+        seenContentRef.current.add(agentId);
+      }
+      gridStore.setSnapshot(agentId, snap);
     });
+    newUnlistenFns.push(offOutput);
     const offStatus = await onAgentStatus(req.agentId, (evt) => {
+      if (!isCurrentGeneration()) return;
       console.log(`[agent:${agentId}] status evt`, evt);
+      if (!seenContentRef.current.has(agentId)) {
+        gridStore.setSnapshot(agentId, spawningPlaceholderGrid(evt.cli, evt));
+      }
       setState((s) => {
         const st = new Map(s.status);
-        const grids = new Map(s.grids);
         st.set(agentId, evt);
-        if (!s.seenContent.has(agentId)) {
-          grids.set(agentId, spawningPlaceholderGrid(evt.cli, evt));
-        }
-        return { ...s, grids, status: st };
+        return { ...s, status: st };
       });
     });
+    newUnlistenFns.push(offStatus);
     const offExit = await subscribeAgentExit(req.agentId, (evt) => {
+      if (!isCurrentGeneration()) return;
       console.warn(`[agent:${agentId}] exit evt`, evt);
+      generationRefs.current.set(agentId, generation + 1);
+      seenContentRef.current.delete(agentId);
+      gridStore.deleteSnapshot(agentId);
+      const subscription = unlistenRefs.current.get(agentId);
+      if (subscription?.generation === generation) {
+        unlistenRefs.current.delete(agentId);
+        for (const fn of subscription.fns) Promise.resolve(fn()).catch(() => {});
+      }
       setState((s) => {
         const live = new Set(s.liveAgents);
         const workState = new Map(s.workState);
@@ -408,38 +422,49 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
         });
       }
     });
-    const offWork = await onAgentWorkState(req.agentId, applyWorkEvent);
+    newUnlistenFns.push(offExit);
+    const offWork = await onAgentWorkState(req.agentId, (evt) => {
+      if (isCurrentGeneration()) applyWorkEvent(evt);
+    });
+    newUnlistenFns.push(offWork);
 
-    unlistenRefs.current.set(agentId, [offOutput, offStatus, offExit, offWork]);
+    if (!isCurrentGeneration()) {
+      await Promise.allSettled(
+        newUnlistenFns.map((fn) => Promise.resolve().then(() => fn())),
+      );
+      return;
+    }
+    unlistenRefs.current.set(agentId, { generation, fns: newUnlistenFns });
 
     // Backend kills any existing PTY for this agent_id and starts fresh.
     console.log(`[agent:${agentId}] calling pty_agent_spawn…`);
     try {
       await spawnAgentPty(req);
     } catch (err) {
-      const fns = unlistenRefs.current.get(agentId);
-      if (fns) {
-        for (const fn of fns) Promise.resolve(fn()).catch(() => {});
+      const subscription = unlistenRefs.current.get(agentId);
+      if (subscription?.generation === generation) {
+        for (const fn of subscription.fns) Promise.resolve(fn()).catch(() => {});
         unlistenRefs.current.delete(agentId);
       }
-      setState((s) => {
-        const live = new Set(s.liveAgents);
-        const grids = new Map(s.grids);
-        const st = new Map(s.status);
-        const workState = new Map(s.workState);
-        const seen = new Set(s.seenContent);
-        live.delete(agentId);
-        grids.delete(agentId);
-        st.delete(agentId);
-        workState.delete(agentId);
-        seen.delete(agentId);
-        clearWorkTimer(agentId);
-        return { liveAgents: live, grids, status: st, workState, seenContent: seen };
-      });
+      if (isCurrentGeneration()) {
+        generationRefs.current.set(agentId, generation + 1);
+        seenContentRef.current.delete(agentId);
+        gridStore.deleteSnapshot(agentId);
+        setState((s) => {
+          const live = new Set(s.liveAgents);
+          const st = new Map(s.status);
+          const workState = new Map(s.workState);
+          live.delete(agentId);
+          st.delete(agentId);
+          workState.delete(agentId);
+          clearWorkTimer(agentId);
+          return { liveAgents: live, status: st, workState };
+        });
+      }
       throw err;
     }
     console.log(`[agent:${agentId}] pty_agent_spawn returned`);
-  }, []);
+  }, [applyWorkEvent, clearWorkTimer, gridStore]);
 
   const send = useCallback(async (agentId: AgentId, input: string) => {
     await writeAgentPty(agentId, input);
@@ -450,12 +475,17 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
   }, []);
 
   const dismiss = useCallback(async (agentId: AgentId) => {
+    const generation = generationRefs.current.get(agentId);
     await closeAgentPty(agentId);
-    const fns = unlistenRefs.current.get(agentId);
-    if (fns) {
-      for (const fn of fns) Promise.resolve(fn()).catch(() => {});
+    if (generation != null && generationRefs.current.get(agentId) !== generation) return;
+    generationRefs.current.set(agentId, (generation ?? 0) + 1);
+    const subscription = unlistenRefs.current.get(agentId);
+    if (subscription && (generation == null || subscription.generation === generation)) {
+      for (const fn of subscription.fns) Promise.resolve(fn()).catch(() => {});
       unlistenRefs.current.delete(agentId);
     }
+    seenContentRef.current.delete(agentId);
+    gridStore.deleteSnapshot(agentId);
     setState((s) => {
       const live = new Set(s.liveAgents);
       const workState = new Map(s.workState);
@@ -464,11 +494,11 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
       clearWorkTimer(agentId);
       return { ...s, liveAgents: live, workState };
     });
-  }, [clearWorkTimer]);
+  }, [clearWorkTimer, gridStore]);
 
   return {
     liveAgents: state.liveAgents,
-    grids: state.grids,
+    gridStore,
     status: state.status,
     workState: state.workState,
     recruit,

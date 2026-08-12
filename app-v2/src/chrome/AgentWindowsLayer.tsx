@@ -11,7 +11,7 @@
  *    - When all windows are minimized, parent falls target back to
  *      Captain (handled at the App layer, not here)                    */
 
-import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef, type KeyboardEvent, type CompositionEvent, type FormEvent, type ClipboardEvent, type WheelEvent, type DragEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore, forwardRef, type KeyboardEvent, type CompositionEvent, type FormEvent, type ClipboardEvent, type WheelEvent, type DragEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { WindowFrame } from './WindowFrame';
 import { AgentCommendButton } from './AgentCommendButton';
 import { ProjectAgentName } from './ProjectAgentName';
@@ -33,6 +33,7 @@ import type { WindowGeometry } from '../hooks/useWindowGeometry';
 import { AGENTS } from '../mock/fixtures';
 import type { Agent, AgentId } from '../types/scene';
 import type { GridSnapshot, AgentStatusEvent } from '../types/agent-pty';
+import type { AgentGridStore } from '../lib/agent-grid-store';
 import { resizeAgentPty, scrollAgentPty } from '../pty-client';
 import type { ProjectAgentCommendSource, ProjectAgentRecord } from '../pty-client';
 import iconCommends from '../assets/tavern/icons/commends.svg';
@@ -57,7 +58,7 @@ const TERMINAL_BODY_SELECTOR = '[data-agent-terminal-body="true"]';
 export interface AgentWindowsLayerProps {
   /** Stable order so cascade indexing is consistent across renders. */
   liveAgents: AgentId[];
-  grids: Map<AgentId, GridSnapshot>;
+  gridStore: AgentGridStore;
   status?: Map<AgentId, AgentStatusEvent>;
   agentMeta?: Readonly<Record<AgentId, Agent>>;
   /** Currently focused agent (= targetAgent at App layer). */
@@ -101,7 +102,7 @@ export const AgentWindowsLayer = forwardRef<AgentWindowsLayerHandle, AgentWindow
   function AgentWindowsLayer(
     {
       liveAgents,
-      grids,
+      gridStore,
       status,
       agentMeta,
       focusedAgent,
@@ -258,7 +259,7 @@ export const AgentWindowsLayer = forwardRef<AgentWindowsLayerHandle, AgentWindow
             key={id}
             agentId={id}
             projectId={projectId}
-            grid={grids.get(id)}
+            gridStore={gridStore}
             statusEvent={status?.get(id)}
             agentMeta={agentMeta}
             focused={focusedAgent === id}
@@ -292,7 +293,7 @@ export const AgentWindowsLayer = forwardRef<AgentWindowsLayerHandle, AgentWindow
 interface SingleAgentWindowProps {
   agentId: AgentId;
   projectId: string;
-  grid: GridSnapshot | undefined;
+  gridStore: AgentGridStore;
   statusEvent: AgentStatusEvent | undefined;
   agentMeta?: Readonly<Record<AgentId, Agent>>;
   focused: boolean;
@@ -430,6 +431,281 @@ function formatDroppedTerminalPaths(paths: string[]): string {
   return unique.map(escapeDroppedPath).join(' ');
 }
 
+function useAgentGridSnapshot(
+  gridStore: AgentGridStore,
+  agentId: AgentId,
+): GridSnapshot | undefined {
+  const subscribe = useCallback(
+    (listener: () => void) => gridStore.subscribe(agentId, listener),
+    [agentId, gridStore],
+  );
+  const getSnapshot = useCallback(
+    () => gridStore.getSnapshot(agentId),
+    [agentId, gridStore],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+function AgentTerminalSurface({
+  agentId,
+  agentName,
+  gridStore,
+  statusEvent,
+  focused,
+  onFocus,
+  onKey,
+  onRegisterTerminalBody,
+  ghosttyTerminalEnhancement,
+  onRaise,
+}: {
+  agentId: AgentId;
+  agentName: string;
+  gridStore: AgentGridStore;
+  statusEvent: AgentStatusEvent | undefined;
+  focused: boolean;
+  onFocus: () => void;
+  onKey: (bytes: string) => void;
+  onRegisterTerminalBody: (registration: RegisteredTerminalBody) => () => void;
+  ghosttyTerminalEnhancement: boolean;
+  onRaise: () => void;
+}) {
+  const grid = useAgentGridSnapshot(gridStore, agentId);
+  const bodyMeasureRef = useRef<HTMLDivElement | null>(null);
+  const lastSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  const liveRef = useRef(false);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
+  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  const suppressTerminalAutoFocusRef = useRef(false);
+
+  useEffect(() => { liveRef.current = !!statusEvent?.running; }, [statusEvent]);
+  useEffect(() => {
+    const el = bodyMeasureRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let timer: number | null = null;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const innerW = entry.contentRect.width;
+      const innerH = entry.contentRect.height;
+      if (innerW < 40 || innerH < 40) return;
+      const cols = Math.max(20, Math.floor(innerW / CELL_W_RESIZE));
+      const rows = Math.max(5, Math.floor(innerH / CELL_H_RESIZE));
+      const last = lastSizeRef.current;
+      if (last && last.cols === cols && last.rows === rows) return;
+      if (timer != null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (!liveRef.current) return;
+        lastSizeRef.current = { cols, rows };
+        void resizeAgentPty(agentId, cols, rows).catch(() => {});
+      }, 50);
+    });
+    ro.observe(el);
+    return () => {
+      if (timer != null) window.clearTimeout(timer);
+      ro.disconnect();
+    };
+  }, [agentId]);
+
+  const focusInputSoon = useCallback(() => {
+    const focusInput = () => {
+      inputRef.current?.focus({ preventScroll: true });
+    };
+    window.requestAnimationFrame(focusInput);
+    window.setTimeout(focusInput, 0);
+  }, []);
+
+  useEffect(() => {
+    const el = bodyMeasureRef.current;
+    if (!el) return;
+    return onRegisterTerminalBody({ el, focusInput: focusInputSoon });
+  }, [focusInputSoon, onRegisterTerminalBody]);
+
+  useEffect(() => {
+    if (focused) {
+      if (suppressTerminalAutoFocusRef.current) return;
+      focusInputSoon();
+    } else {
+      composingRef.current = false;
+      if (inputRef.current) inputRef.current.value = '';
+    }
+  }, [focused, focusInputSoon]);
+
+  useEffect(() => {
+    if (!focused) return;
+    const onWindowFocus = () => focusInputSoon();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') focusInputSoon();
+    };
+    window.addEventListener('focus', onWindowFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onWindowFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [focused, focusInputSoon]);
+
+  const sendText = useCallback(
+    (text: string) => {
+      if (!text) return;
+      onKey(normalizeTerminalText(text));
+    },
+    [onKey],
+  );
+
+  const onInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) return;
+    const bytes = keyToPtyBytes(event, statusEvent?.cli);
+    if (bytes != null) {
+      event.preventDefault();
+      event.stopPropagation();
+      onKey(bytes);
+    }
+  };
+  const onInputBeforeInput = (event: FormEvent<HTMLTextAreaElement>) => {
+    if (composingRef.current) return;
+    const native = event.nativeEvent as InputEvent;
+    const inputType = native.inputType ?? '';
+    const data = native.data ?? '';
+    if (inputType === 'insertText' && data) {
+      event.preventDefault();
+      sendText(data);
+      if (inputRef.current) inputRef.current.value = '';
+    }
+  };
+  const onInputInput = (event: FormEvent<HTMLTextAreaElement>) => {
+    if (composingRef.current) return;
+    const el = event.currentTarget;
+    const text = el.value;
+    if (!text) return;
+    sendText(text);
+    el.value = '';
+  };
+  const onInputPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const text = event.clipboardData.getData('text');
+    if (!text) return;
+    event.preventDefault();
+    sendText(text);
+    if (inputRef.current) inputRef.current.value = '';
+  };
+  const onInputCompositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
+    const text = event.data || inputRef.current?.value || '';
+    composingRef.current = false;
+    sendText(text);
+    if (inputRef.current) inputRef.current.value = '';
+  };
+  const onTerminalWheel = (event: WheelEvent<HTMLDivElement>) => {
+    if (!grid) return;
+    event.preventDefault();
+    event.stopPropagation();
+    focusInputSoon();
+    if (grid.mouseMode) {
+      onKey(wheelMouseBytes(event, grid, event.currentTarget));
+      return;
+    }
+    void scrollAgentPty(agentId, wheelScrollLines(event)).catch(() => {});
+  };
+  const onTerminalPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    suppressTerminalAutoFocusRef.current = true;
+    onRaise();
+    pointerDownRef.current = { x: event.clientX, y: event.clientY };
+  };
+  const onTerminalPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    const start = pointerDownRef.current;
+    pointerDownRef.current = null;
+    const moved =
+      !start ||
+      Math.abs(event.clientX - start.x) > 4 ||
+      Math.abs(event.clientY - start.y) > 4;
+    suppressTerminalAutoFocusRef.current = false;
+    if (moved || window.getSelection()?.toString()) return;
+    focusInputSoon();
+  };
+  const onTerminalDragOver = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+  };
+  const onTerminalDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const paths = droppedTerminalPaths(event);
+    if (paths.length === 0) return;
+    onFocus();
+    sendText(paths.map(escapeDroppedPath).join(' '));
+    focusInputSoon();
+  };
+
+  const anchor = imeAnchor(grid, statusEvent?.cli);
+  return (
+    <div
+      ref={bodyMeasureRef}
+      className={`win-terminal-body ${ghosttyTerminalEnhancement ? 'ghostty-enhanced-terminal' : ''}`}
+      data-agent-terminal-body="true"
+      data-agent-id={agentId}
+      style={{
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        padding: `0 ${BODY_HPAD}px`,
+        boxSizing: 'border-box',
+        overflow: 'hidden',
+      }}
+      onPointerDown={onTerminalPointerDown}
+      onPointerUp={onTerminalPointerUp}
+      onWheel={onTerminalWheel}
+      onDragOver={onTerminalDragOver}
+      onDrop={onTerminalDrop}
+    >
+      <TerminalGrid snapshot={grid} enhanced={ghosttyTerminalEnhancement} />
+      <textarea
+        ref={inputRef}
+        className="win-ime-capture"
+        aria-label={`${agentName} terminal input`}
+        spellCheck={false}
+        autoCorrect="off"
+        autoCapitalize="off"
+        rows={1}
+        wrap="off"
+        onKeyDown={onInputKeyDown}
+        onBeforeInput={onInputBeforeInput}
+        onInput={onInputInput}
+        onPaste={onInputPaste}
+        onCompositionStart={() => { composingRef.current = true; }}
+        onCompositionEnd={onInputCompositionEnd}
+        style={{
+          position: 'absolute',
+          top: anchor.top,
+          left: anchor.left,
+          right: 0,
+          bottom: 0,
+          minWidth: TERMINAL_CELL_WIDTH * 32,
+          minHeight: TERMINAL_LINE_HEIGHT,
+          opacity: 0,
+          border: 'none',
+          outline: 'none',
+          resize: 'none',
+          background: 'transparent',
+          color: 'transparent',
+          caretColor: 'transparent',
+          padding: 0,
+          margin: 0,
+          fontFamily: TERMINAL_FONT_FAMILY,
+          fontSize: TERMINAL_FONT_SIZE,
+          lineHeight: `${TERMINAL_LINE_HEIGHT}px`,
+          whiteSpace: 'pre',
+          overflow: 'hidden',
+          pointerEvents: 'none',
+        }}
+      />
+    </div>
+  );
+}
+
 function closestTerminalBody(el: Element | null): HTMLElement | null {
   return el?.closest<HTMLElement>(TERMINAL_BODY_SELECTOR) ?? null;
 }
@@ -500,7 +776,7 @@ export function terminalDropTargetAtPosition(
 function SingleAgentWindow({
   agentId,
   projectId,
-  grid,
+  gridStore,
   statusEvent,
   agentMeta,
   focused,
@@ -540,210 +816,7 @@ function SingleAgentWindow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMinimized]);
 
-  // Reflow the PTY whenever the window body's actual rendered size
-  // changes — driven by ResizeObserver so we catch both pointerup-
-  // committed geom updates AND inline-style mutations during drag
-  // (the previous geom-driven effect only fired on commit, which
-  // felt non-responsive while dragging a corner). Short 50ms debounce
-  // keeps the IPC call rate sane while still feeling live.
-  const bodyMeasureRef = useRef<HTMLDivElement | null>(null);
-  const lastSizeRef = useRef<{ cols: number; rows: number } | null>(null);
-  const liveRef = useRef(false);
-  useEffect(() => { liveRef.current = !!statusEvent?.running; }, [statusEvent]);
-  useEffect(() => {
-    const el = bodyMeasureRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    let timer: number | null = null;
-    const ro = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      const innerW = entry.contentRect.width;
-      const innerH = entry.contentRect.height;
-      if (innerW < 40 || innerH < 40) return;
-      const cols = Math.max(20, Math.floor(innerW / CELL_W_RESIZE));
-      const rows = Math.max(5, Math.floor(innerH / CELL_H_RESIZE));
-      const last = lastSizeRef.current;
-      if (last && last.cols === cols && last.rows === rows) return;
-      if (timer != null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        timer = null;
-        // Skip if PTY isn't running yet — backend would return Err
-        // and the IPC roundtrip is wasted. We'll catch up on the
-        // next observed size delta after spawn completes.
-        if (!liveRef.current) return;
-        lastSizeRef.current = { cols, rows };
-        void resizeAgentPty(agentId, cols, rows).catch(() => {});
-      }, 50);
-    });
-    ro.observe(el);
-    return () => {
-      if (timer != null) window.clearTimeout(timer);
-      ro.disconnect();
-    };
-  }, [agentId]);
-
-  // Body input — a hidden textarea overlays the grid so we capture
-  // both raw keydowns AND IME composition events (Chinese / Japanese
-  // input pipelines emit nothing useful via keydown alone — the real
-  // text arrives via compositionend). The grid below stays read-only.
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const composingRef = useRef(false);
-  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
-  const suppressTerminalAutoFocusRef = useRef(false);
-  const focusInputSoon = useCallback(() => {
-    if (geom.minimized) return;
-    const focusInput = () => {
-      inputRef.current?.focus({ preventScroll: true });
-    };
-    window.requestAnimationFrame(focusInput);
-    window.setTimeout(focusInput, 0);
-  }, [geom.minimized]);
-  const focusWindowAndInput = useCallback(() => {
-    onFocus();
-    focusInputSoon();
-  }, [focusInputSoon, onFocus]);
-
-  useEffect(() => {
-    const el = bodyMeasureRef.current;
-    if (!el) return;
-    return onRegisterTerminalBody({ el, focusInput: focusInputSoon });
-  }, [focusInputSoon, onRegisterTerminalBody]);
-
-  useEffect(() => {
-    if (focused && !geom.minimized) {
-      if (suppressTerminalAutoFocusRef.current) return;
-      focusInputSoon();
-    } else if (!focused) {
-      // Reset stale composition state on blur — without this, an
-      // orphaned composition (focus stolen mid-IME) leaves
-      // composingRef stuck at true, which blocks onChange from
-      // clearing the textarea on subsequent input. Codex hit this
-      // when toggling focus between agent windows.
-      composingRef.current = false;
-      if (inputRef.current) inputRef.current.value = '';
-    }
-  }, [focused, geom.minimized, focusInputSoon]);
-
-  useEffect(() => {
-    if (!focused || geom.minimized) return;
-    const onWindowFocus = () => focusInputSoon();
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') focusInputSoon();
-    };
-    window.addEventListener('focus', onWindowFocus);
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      window.removeEventListener('focus', onWindowFocus);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [focused, geom.minimized, focusInputSoon]);
-
-  const sendText = useCallback(
-    (text: string) => {
-      if (!text) return;
-      onKey(normalizeTerminalText(text));
-    },
-    [onKey],
-  );
-
-  const onInputKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    // IME composition: defer to compositionend.
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    // Text is handled by beforeinput/input below. keydown is only for
-    // controls that do not insert text: arrows, Enter, Backspace, Ctrl-C,
-    // etc. This keeps keyboard layout / Option-symbol / dead-key output
-    // on the browser's text-input path instead of guessing from e.key.
-    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) return;
-    const bytes = keyToPtyBytes(e, statusEvent?.cli);
-    if (bytes != null) {
-      e.preventDefault();
-      e.stopPropagation();
-      onKey(bytes);
-    }
-  };
-  const onInputBeforeInput = (e: FormEvent<HTMLTextAreaElement>) => {
-    if (composingRef.current) return;
-    const native = e.nativeEvent as InputEvent;
-    const inputType = native.inputType ?? '';
-    const data = native.data ?? '';
-    if (inputType === 'insertText' && data) {
-      e.preventDefault();
-      sendText(data);
-      if (inputRef.current) inputRef.current.value = '';
-    }
-  };
-  const onInputInput = (e: FormEvent<HTMLTextAreaElement>) => {
-    if (composingRef.current) return;
-    const el = e.currentTarget;
-    const text = el.value;
-    if (!text) return;
-    sendText(text);
-    el.value = '';
-  };
-  const onInputPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const text = e.clipboardData.getData('text');
-    if (!text) return;
-    e.preventDefault();
-    sendText(text);
-    if (inputRef.current) inputRef.current.value = '';
-  };
-  const onInputCompositionEnd = (e: CompositionEvent<HTMLTextAreaElement>) => {
-    const text = e.data || inputRef.current?.value || '';
-    composingRef.current = false;
-    sendText(text);
-    if (inputRef.current) inputRef.current.value = '';
-  };
-  const onInputCompositionStart = () => {
-    composingRef.current = true;
-  };
-  const onTerminalWheel = (e: WheelEvent<HTMLDivElement>) => {
-    if (!grid) return;
-    e.preventDefault();
-    e.stopPropagation();
-    focusInputSoon();
-
-    if (grid.mouseMode) {
-      onKey(wheelMouseBytes(e, grid, e.currentTarget));
-      return;
-    }
-
-    void scrollAgentPty(agentId, wheelScrollLines(e)).catch(() => {});
-  };
-  const onTerminalPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    e.stopPropagation();
-    suppressTerminalAutoFocusRef.current = true;
-    onRaise();
-    pointerDownRef.current = { x: e.clientX, y: e.clientY };
-  };
-  const onTerminalPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
-    e.stopPropagation();
-    const start = pointerDownRef.current;
-    pointerDownRef.current = null;
-    const moved =
-      !start ||
-      Math.abs(e.clientX - start.x) > 4 ||
-      Math.abs(e.clientY - start.y) > 4;
-    suppressTerminalAutoFocusRef.current = false;
-    if (moved || window.getSelection()?.toString()) return;
-    focusInputSoon();
-  };
-  const onTerminalDragOver = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = 'copy';
-  };
-  const onTerminalDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const paths = droppedTerminalPaths(e);
-    if (paths.length === 0) return;
-    onFocus();
-    sendText(paths.map(escapeDroppedPath).join(' '));
-    focusInputSoon();
-  };
-
   const agent = agentMeta?.[agentId] ?? AGENTS[agentId];
-  const anchor = imeAnchor(grid, statusEvent?.cli);
 
   return (
     <div style={{ pointerEvents: 'auto' }}>
@@ -811,76 +884,24 @@ function SingleAgentWindow({
           </>
         }
         onGeomChange={(patch) => setGeom(patch)}
-        onFocus={focusWindowAndInput}
+        onFocus={onFocus}
         onMinimize={onMinimize}
         className={ghosttyTerminalEnhancement ? 'ghostty-enhanced-frame' : undefined}
       >
-        <div
-          ref={bodyMeasureRef}
-          className={`win-terminal-body ${ghosttyTerminalEnhancement ? 'ghostty-enhanced-terminal' : ''}`}
-          data-agent-terminal-body="true"
-          data-agent-id={agentId}
-          style={{
-            position: 'relative',
-            width: '100%',
-            height: '100%',
-            padding: `0 ${BODY_HPAD}px`,
-            boxSizing: 'border-box',
-            overflow: 'hidden',
-          }}
-          onPointerDown={onTerminalPointerDown}
-          onPointerUp={onTerminalPointerUp}
-          onWheel={onTerminalWheel}
-          onDragOver={onTerminalDragOver}
-          onDrop={onTerminalDrop}
-        >
-          <TerminalGrid snapshot={grid} enhanced={ghosttyTerminalEnhancement} />
-          <textarea
-            ref={inputRef}
-            className="win-ime-capture"
-            aria-label={`${agent?.name ?? agentId} terminal input`}
-            spellCheck={false}
-            autoCorrect="off"
-            autoCapitalize="off"
-            rows={1}
-            wrap="off"
-            onKeyDown={onInputKeyDown}
-            onBeforeInput={onInputBeforeInput}
-            onInput={onInputInput}
-            onPaste={onInputPaste}
-            onCompositionStart={onInputCompositionStart}
-            onCompositionEnd={onInputCompositionEnd}
-            // The OS anchors the IME candidate window to the focused
-            // textarea's caret. Start this transparent capture surface at
-            // the terminal anchor, but let it extend to the window edge so
-            // real pinyin/marked-text composition does not immediately
-            // scroll inside a tiny 1-line textarea.
-            style={{
-              position: 'absolute',
-              top: anchor.top,
-              left: anchor.left,
-              right: 0,
-              bottom: 0,
-              minWidth: TERMINAL_CELL_WIDTH * 32,
-              minHeight: TERMINAL_LINE_HEIGHT,
-              opacity: 0,
-              border: 'none',
-              outline: 'none',
-              resize: 'none',
-              background: 'transparent',
-              color: 'transparent',
-              caretColor: 'transparent',
-              padding: 0,
-              margin: 0,
-              fontFamily: TERMINAL_FONT_FAMILY,
-              fontSize: TERMINAL_FONT_SIZE,
-              lineHeight: `${TERMINAL_LINE_HEIGHT}px`,
-              whiteSpace: 'pre',
-              overflow: 'hidden',
-              pointerEvents: 'none',
-            }}
+        {!isMinimized && (
+          <AgentTerminalSurface
+            agentId={agentId}
+            agentName={agent?.name ?? agentId}
+            gridStore={gridStore}
+            statusEvent={statusEvent}
+            focused={focused}
+            onFocus={onFocus}
+            onKey={onKey}
+            onRegisterTerminalBody={onRegisterTerminalBody}
+            ghosttyTerminalEnhancement={ghosttyTerminalEnhancement}
+            onRaise={onRaise}
           />
-        </div>
+        )}
       </WindowFrame>
     </div>
   );

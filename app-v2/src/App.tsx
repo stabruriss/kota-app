@@ -8,7 +8,8 @@ import {
   type RoomTheme,
 } from './chrome/ColorPicker';
 import { RightColumn, type DreamProjectTarget } from './chrome/RightColumn';
-import { InputBar, type ComposerAttachment, type InputBarHandle } from './chrome/InputBar';
+import type { ComposerAttachment, InputBarHandle } from './chrome/InputBar';
+import { RoomComposer } from './chrome/RoomComposer';
 import type { Centerpiece } from './chrome/Hearth';
 import { HotMemoryPopup } from './popups/HotMemoryPopup';
 import { RowPopup } from './popups/RowPopup';
@@ -1063,7 +1064,6 @@ export function App() {
     setPopup((current) => current?.kind === 'whiteboard' ? null : { kind: 'whiteboard' });
   }, []);
 
-  const [inputText, setInputText] = useState('');
   const [composerTarget, setComposerTarget] = useState<AgentId | null>(null);
   const [composerBroadcast, setComposerBroadcast] = useState(false);
   const [broadcastPopupOpen, setBroadcastPopupOpen] = useState(false);
@@ -1766,10 +1766,6 @@ export function App() {
       window.removeEventListener(TAVERN_PROFILE_CHANGED_EVENT, refreshWorkingHeroes);
       window.removeEventListener('kota-v2:user-hero-avatars-changed', refreshWorkingHeroes);
     };
-  }, []);
-
-  const handleInputChange = useCallback((next: string) => {
-    setInputText(next);
   }, []);
 
   const unavailableHeroIds = useMemo(() => new Set<AgentId>(), []);
@@ -4377,10 +4373,8 @@ export function App() {
                       ) : null
                     }
                     composer={
-                      <InputBar
+                      <RoomComposer
                         ref={inputBarRef}
-                        value={inputText}
-                        onChange={handleInputChange}
                         targetAgent={targetAgent}
                         agentMeta={agentMeta}
                         mentionAgentIds={roomAgentIdsOrdered}
@@ -4452,7 +4446,7 @@ export function App() {
             <AgentWindowsLayer
               ref={windowsRef}
               liveAgents={activeLiveAgentsOrdered}
-              grids={agentRuntime.grids}
+              gridStore={agentRuntime.gridStore}
               status={agentRuntime.status}
               agentMeta={agentMeta}
               focusedAgent={
