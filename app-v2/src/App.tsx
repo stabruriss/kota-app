@@ -88,6 +88,7 @@ import {
   saveComposerClipboardImage,
   startFreshProjectAgentSession,
   loadWhiteboardCanvas,
+  prepareComposerTemporalContext,
   renameWhiteboardCanvasPage,
   saveWhiteboardCanvas,
   saveWhiteboardCanvasSnapshot,
@@ -4172,9 +4173,19 @@ export function App() {
         privacy: PRIVATE_CHAT_UI_ENABLED && !!options?.privacy,
         mentions: options?.mentions,
       });
+      let preparedPayloads = new Map<AgentId, string>();
+      try {
+        preparedPayloads = new Map((await prepareComposerTemporalContext({
+          projectRoot: violetProjectRoot,
+          targetAgentIds: recipients,
+          payload,
+        })).map((prepared) => [prepared.targetAgentId, prepared.payload]));
+      } catch (err) {
+        console.warn('[composer] temporal context unavailable', err);
+      }
       const results = await Promise.allSettled(
         recipients.map(async (id) => {
-          await submitPromptToAgent(id, payload);
+          await submitPromptToAgent(id, preparedPayloads.get(id) ?? payload);
           return id;
         }),
       );

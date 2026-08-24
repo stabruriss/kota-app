@@ -1,6 +1,6 @@
 import dreamAgentPromptTemplate from '../src-tauri/prompts/ember-dream-agent.md?raw';
 import dreamConsolidatePromptTemplate from '../src-tauri/prompts/ember-dream-consolidate.md?raw';
-import { readSystemPrompt } from './pty-client';
+import { readSystemPrompt, type AgentBusTerminalTiming } from './pty-client';
 import type { AgentId } from './types/scene';
 
 export type EmberScheduleMode = 'idle' | 'delay' | 'at' | 'daily' | 'interval';
@@ -334,12 +334,16 @@ export function emberScheduleSummary(schedule: EmberSchedule): string {
   return `In ${schedule.delayAmount ?? 10} ${unit}`;
 }
 
-export function renderEmberReminderPrompt(schedule: EmberSchedule): string {
-  return [
-    'Ember scheduled prompt',
-    '',
-    schedule.text.trim(),
-  ].join('\n');
+export function emberReminderTerminalTiming(
+  schedule: EmberSchedule,
+  source: 'auto' | 'manual',
+): AgentBusTerminalTiming {
+  if (source === 'manual') return { trigger: 'manual' };
+  if (schedule.mode === 'idle' || schedule.waitForIdle) return { trigger: 'idle' };
+  return {
+    trigger: 'scheduled',
+    scheduledFor: schedule.nextRunAt,
+  };
 }
 
 export function emberScheduleTargetIds(schedule: EmberSchedule): AgentId[] {

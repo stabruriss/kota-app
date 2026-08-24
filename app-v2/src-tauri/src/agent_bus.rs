@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
+use chrono::{DateTime, Local, SecondsFormat};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -45,6 +46,34 @@ pub struct ActorMessage {
     pub event_id: String,
     pub dedupe_key: Option<String>,
     pub launch_request: Option<AgentSpawnRequest>,
+    pub terminal_timing: Option<AgentBusTerminalTiming>,
+    pub temporal_gap_eligible: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentBusTimingTrigger {
+    Scheduled,
+    Idle,
+    Manual,
+}
+
+impl AgentBusTimingTrigger {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::Idle => "idle",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBusTerminalTiming {
+    pub trigger: AgentBusTimingTrigger,
+    #[serde(default)]
+    pub scheduled_for: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +106,8 @@ pub struct AgentBusSendRequest {
     pub event_id: Option<String>,
     #[serde(default)]
     pub dedupe_key: Option<String>,
+    #[serde(default)]
+    pub terminal_timing: Option<AgentBusTerminalTiming>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -161,7 +192,11 @@ impl AgentBusManager {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
-            .or_else(|| sender.map(|identity| identity.display_name))
+            .or_else(|| {
+                sender
+                    .as_ref()
+                    .map(|identity| identity.display_name.clone())
+            })
             .unwrap_or_else(|| sender_agent_id.clone());
         let text = request.text.trim().to_string();
         if text.is_empty() {
@@ -181,6 +216,17 @@ impl AgentBusManager {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| event_id.clone());
+        let intent = request
+            .intent
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("message")
+            .to_string();
+        let temporal_gap_eligible =
+            actor_uses_temporal_gap(sender.is_some(), &sender_agent_id, &intent);
+        let terminal_timing =
+            normalize_terminal_timing(&sender_agent_id, &intent, request.terminal_timing)?;
         let delivery = self.send_actor_message(
             app,
             pty,
@@ -189,17 +235,13 @@ impl AgentBusManager {
                 actor_id: sender_agent_id,
                 actor_name,
                 target_agent_id: target.agent_id.clone(),
-                intent: request
-                    .intent
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("message")
-                    .to_string(),
+                intent,
                 text,
                 event_id: event_id.clone(),
                 dedupe_key: Some(dedupe_key),
                 launch_request,
+                terminal_timing,
+                temporal_gap_eligible,
             },
         )?;
         Ok(AgentBusSendResult {
@@ -231,7 +273,11 @@ impl AgentBusManager {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
-            .or_else(|| sender.map(|identity| identity.display_name))
+            .or_else(|| {
+                sender
+                    .as_ref()
+                    .map(|identity| identity.display_name.clone())
+            })
             .unwrap_or_else(|| sender_agent_id.clone());
         let text = request.text.trim().to_string();
         if text.is_empty() {
@@ -248,22 +294,27 @@ impl AgentBusManager {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("{original_event_id}:retry:{}", Uuid::new_v4().simple()));
+        let intent = request
+            .intent
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("handoff")
+            .to_string();
+        let temporal_gap_eligible =
+            actor_uses_temporal_gap(sender.is_some(), &sender_agent_id, &intent);
         let message = ActorMessage {
             project_root: project_root.to_path_buf(),
             actor_id: sender_agent_id,
             actor_name,
             target_agent_id: target.agent_id.clone(),
-            intent: request
-                .intent
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("handoff")
-                .to_string(),
+            intent,
             text,
             event_id: event_id.clone(),
             dedupe_key: None,
             launch_request,
+            terminal_timing: None,
+            temporal_gap_eligible,
         };
         let delivery = self.deliver_to_terminal(app, pty, &message);
         Ok(AgentBusRetryDeliveryResult {
@@ -552,6 +603,7 @@ impl AgentBusManager {
                 text: request.text,
                 event_id: Some(request.event_id),
                 dedupe_key: Some(request.dedupe_key),
+                terminal_timing: None,
             },
             launch_request,
         )
@@ -578,7 +630,19 @@ impl AgentBusManager {
         pty: &PtyManager,
         message: &ActorMessage,
     ) -> Result<()> {
-        let payload = render_terminal_message(message);
+        let now = Local::now();
+        let body = if message.temporal_gap_eligible {
+            app.state::<crate::temporal_context::TemporalContextManager>()
+                .prepare_payload_best_effort(
+                    &message.project_root,
+                    &message.target_agent_id,
+                    &message.text,
+                    now,
+                )
+        } else {
+            message.text.clone()
+        };
+        let payload = render_terminal_message_with_body_at(message, &body, now);
         let input = format!("{BRACKETED_PASTE_START}{payload}{BRACKETED_PASTE_END}");
         match submit_to_agent(app, pty, &message.target_agent_id, &input) {
             Ok(()) => return Ok(()),
@@ -598,15 +662,99 @@ fn submit_to_agent(app: &AppHandle, pty: &PtyManager, agent_id: &str, input: &st
     pty.agent_submit_prompt(app, agent_id.to_string(), input.to_string())
 }
 
-fn render_terminal_message(message: &ActorMessage) -> String {
+fn actor_uses_temporal_gap(is_project_agent: bool, actor_id: &str, intent: &str) -> bool {
+    is_project_agent || (actor_id == "laughing-man" && intent == "telegram")
+}
+
+fn normalize_terminal_timing(
+    actor_id: &str,
+    intent: &str,
+    timing: Option<AgentBusTerminalTiming>,
+) -> Result<Option<AgentBusTerminalTiming>> {
+    let Some(timing) = timing else {
+        return Ok(None);
+    };
+    if actor_id != "ember" || intent != "reminder" {
+        bail!("terminalTiming is only supported for Ember reminders");
+    }
+    let scheduled_for = timing
+        .scheduled_for
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match timing.trigger {
+        AgentBusTimingTrigger::Scheduled => {
+            let scheduled_for = scheduled_for
+                .ok_or_else(|| anyhow!("scheduled Ember timing requires scheduledFor"))?;
+            let parsed = DateTime::parse_from_rfc3339(scheduled_for)
+                .map_err(|_| anyhow!("scheduledFor must be an RFC 3339 timestamp"))?;
+            Ok(Some(AgentBusTerminalTiming {
+                trigger: AgentBusTimingTrigger::Scheduled,
+                scheduled_for: Some(
+                    parsed
+                        .with_timezone(&Local)
+                        .to_rfc3339_opts(SecondsFormat::Secs, false),
+                ),
+            }))
+        }
+        AgentBusTimingTrigger::Idle | AgentBusTimingTrigger::Manual => {
+            if scheduled_for.is_some() {
+                bail!("idle/manual Ember timing must not include scheduledFor");
+            }
+            Ok(Some(AgentBusTerminalTiming {
+                trigger: timing.trigger,
+                scheduled_for: None,
+            }))
+        }
+    }
+}
+
+fn render_terminal_timing_attributes(
+    timing: Option<&AgentBusTerminalTiming>,
+    now: DateTime<Local>,
+) -> String {
+    let Some(timing) = timing else {
+        return String::new();
+    };
+    let scheduled_for = timing
+        .scheduled_for
+        .as_deref()
+        .map(|value| format!(" scheduled_for=\"{}\"", escape_attr(value)))
+        .unwrap_or_default();
+    let current_time = now.to_rfc3339_opts(SecondsFormat::Secs, false);
     format!(
-        "<KOTA_MESSAGE id=\"{}\" from=\"{}\" to=\"{}\" intent=\"{}\">\n{}\n</KOTA_MESSAGE>",
+        " trigger=\"{}\"{} current_time=\"{}\"",
+        timing.trigger.as_str(),
+        scheduled_for,
+        escape_attr(&current_time),
+    )
+}
+
+fn render_terminal_message_with_body_at(
+    message: &ActorMessage,
+    body: &str,
+    now: DateTime<Local>,
+) -> String {
+    let timing = render_terminal_timing_attributes(message.terminal_timing.as_ref(), now);
+    format!(
+        "<KOTA_MESSAGE id=\"{}\" from=\"{}\" to=\"{}\" intent=\"{}\"{}>\n{}\n</KOTA_MESSAGE>",
         escape_attr(&message.event_id),
         escape_attr(&message.actor_id),
         escape_attr(&message.target_agent_id),
         escape_attr(&message.intent),
-        message.text.trim()
+        timing,
+        body.trim()
     )
+}
+
+#[cfg(test)]
+fn render_terminal_message_at(message: &ActorMessage, now: DateTime<Local>) -> String {
+    render_terminal_message_with_body_at(message, &message.text, now)
+}
+
+#[cfg(test)]
+fn render_terminal_message(message: &ActorMessage) -> String {
+    render_terminal_message_at(message, Local::now())
 }
 
 fn escape_attr(value: &str) -> String {
@@ -1080,6 +1228,8 @@ mod tests {
             event_id: "msg_1".into(),
             dedupe_key: None,
             launch_request: None,
+            terminal_timing: None,
+            temporal_gap_eligible: false,
         };
 
         let text = render_terminal_message(&message);
@@ -1088,6 +1238,115 @@ mod tests {
         assert!(text.contains("from=\"bartender\""));
         assert!(text.contains("to=\"alice\""));
         assert!(text.contains("Resolve this conflict."));
+        assert!(!text.contains("current_time="));
+    }
+
+    #[test]
+    fn temporal_gap_is_limited_to_project_agents_and_laughing_man_telegram() {
+        assert!(actor_uses_temporal_gap(true, "agent-a", "custom-intent"));
+        assert!(actor_uses_temporal_gap(false, "laughing-man", "telegram"));
+        assert!(!actor_uses_temporal_gap(false, "laughing-man", "status"));
+        assert!(!actor_uses_temporal_gap(false, "ember", "reminder"));
+        assert!(!actor_uses_temporal_gap(false, "bbs", "bbs-thread"));
+        assert!(!actor_uses_temporal_gap(
+            false,
+            "bartender",
+            "resolve-conflict"
+        ));
+    }
+
+    #[test]
+    fn ember_terminal_timing_is_hidden_in_the_structured_envelope() {
+        let timing = normalize_terminal_timing(
+            "ember",
+            "reminder",
+            Some(AgentBusTerminalTiming {
+                trigger: AgentBusTimingTrigger::Scheduled,
+                scheduled_for: Some("2026-08-18T09:00:00-07:00".into()),
+            }),
+        )
+        .unwrap();
+        let message = ActorMessage {
+            project_root: PathBuf::from("/tmp/project"),
+            actor_id: "ember".into(),
+            actor_name: "Ember".into(),
+            target_agent_id: "alice".into(),
+            intent: "reminder".into(),
+            text: "Take a break.".into(),
+            event_id: "ember-reminder-1".into(),
+            dedupe_key: None,
+            launch_request: None,
+            terminal_timing: timing,
+            temporal_gap_eligible: false,
+        };
+        let now = DateTime::parse_from_rfc3339("2026-08-18T09:00:03-07:00")
+            .unwrap()
+            .with_timezone(&Local);
+
+        let text = render_terminal_message_at(&message, now);
+
+        assert!(text.contains("intent=\"reminder\" trigger=\"scheduled\""));
+        assert!(text.contains("scheduled_for=\""));
+        assert!(text.contains("current_time=\""));
+        assert!(text.contains(">\nTake a break.\n</KOTA_MESSAGE>"));
+        assert!(!text.contains("Ember scheduled prompt"));
+    }
+
+    #[test]
+    fn ember_idle_and_manual_timing_do_not_claim_a_scheduled_time() {
+        for trigger in [AgentBusTimingTrigger::Idle, AgentBusTimingTrigger::Manual] {
+            let timing = normalize_terminal_timing(
+                "ember",
+                "reminder",
+                Some(AgentBusTerminalTiming {
+                    trigger,
+                    scheduled_for: None,
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            let attrs = render_terminal_timing_attributes(
+                Some(&timing),
+                DateTime::parse_from_rfc3339("2026-08-18T09:00:03-07:00")
+                    .unwrap()
+                    .with_timezone(&Local),
+            );
+
+            assert!(attrs.contains(&format!("trigger=\"{}\"", timing.trigger.as_str())));
+            assert!(attrs.contains("current_time=\""));
+            assert!(!attrs.contains("scheduled_for="));
+        }
+    }
+
+    #[test]
+    fn terminal_timing_rejects_non_ember_or_ambiguous_metadata() {
+        assert!(normalize_terminal_timing(
+            "agent-one",
+            "reminder",
+            Some(AgentBusTerminalTiming {
+                trigger: AgentBusTimingTrigger::Manual,
+                scheduled_for: None,
+            }),
+        )
+        .is_err());
+        assert!(normalize_terminal_timing(
+            "ember",
+            "reminder",
+            Some(AgentBusTerminalTiming {
+                trigger: AgentBusTimingTrigger::Scheduled,
+                scheduled_for: None,
+            }),
+        )
+        .is_err());
+        assert!(normalize_terminal_timing(
+            "ember",
+            "reminder",
+            Some(AgentBusTerminalTiming {
+                trigger: AgentBusTimingTrigger::Idle,
+                scheduled_for: Some("2026-08-18T09:00:00-07:00".into()),
+            }),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1101,7 +1360,7 @@ mod tests {
         let record = ActorMessageRecord {
             actor_id: "ember".into(),
             actor_name: "Ember".into(),
-            text: "Ember scheduled prompt\n\nTake a break.".into(),
+            text: "Take a break.".into(),
             target_agent_ids: vec!["__kota_human_telegram__".into()],
             event_id: event_id.into(),
             actor_intent: Some("reminder".into()),
@@ -1133,6 +1392,8 @@ mod tests {
             1
         );
         assert!(raw.contains("- actor_intent: reminder"));
+        assert!(raw.contains("Assistant:\nTake a break."));
+        assert!(!raw.contains("Ember scheduled prompt"));
         fs::remove_dir_all(root).unwrap();
     }
 

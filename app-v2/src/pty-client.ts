@@ -1207,6 +1207,12 @@ export interface AgentBusSendRequest {
   text: string;
   eventId?: string | null;
   dedupeKey?: string | null;
+  terminalTiming?: AgentBusTerminalTiming | null;
+}
+
+export interface AgentBusTerminalTiming {
+  trigger: 'scheduled' | 'idle' | 'manual';
+  scheduledFor?: string | null;
 }
 
 export interface AgentBusSendResult {
@@ -1215,6 +1221,17 @@ export interface AgentBusSendResult {
   submitted: boolean;
   duplicate: boolean;
   skippedReason?: string | null;
+}
+
+export interface TemporalContextPrepareRequest {
+  projectRoot?: string | null;
+  targetAgentIds: string[];
+  payload: string;
+}
+
+export interface TemporalContextPreparedPrompt {
+  targetAgentId: string;
+  payload: string;
 }
 
 export interface AgentBusRetryDeliveryRequest {
@@ -1393,6 +1410,7 @@ export interface VioletChatMessage {
   nativeEventId?: string | null;
   violetSeq?: number | null;
   actorIntent?: string | null;
+  messageOrigin?: string | null;
   targetAgentIds?: string[];
   agentDisplayName?: string | null;
   agentAvatarId?: string | null;
@@ -2151,6 +2169,18 @@ export async function agentBusSend(request: AgentBusSendRequest): Promise<AgentB
     };
   }
   return invoke<AgentBusSendResult>('agent_bus_send', { request });
+}
+
+export async function prepareComposerTemporalContext(
+  request: TemporalContextPrepareRequest,
+): Promise<TemporalContextPreparedPrompt[]> {
+  if (!useTauriRuntime()) {
+    return Array.from(new Set(request.targetAgentIds.filter(Boolean))).map((targetAgentId) => ({
+      targetAgentId,
+      payload: request.payload,
+    }));
+  }
+  return invoke<TemporalContextPreparedPrompt[]>('temporal_context_prepare_composer', { request });
 }
 
 export async function agentBusRetryDelivery(

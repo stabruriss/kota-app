@@ -29,6 +29,7 @@ pub(crate) const PROJECT_AGENT_ID_PREFIX: &str = "agent-";
 const PROJECT_AGENT_ID_SUFFIX_LEN: usize = 10;
 const KOTA_HOME_DIR: &str = "Kota";
 const KOTA_WORKSPACES_DIR: &str = "Workspaces";
+const KOTA_HANDOFFS_DIR: &str = "Handoffs";
 const STORAGE_MEASUREMENT_CACHE_FILE: &str = "storage-measurement.json";
 const STORAGE_MEASUREMENT_CACHE_VERSION: u32 = 1;
 const STORAGE_MEASUREMENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -3135,6 +3136,25 @@ pub fn ensure_storage_layout() {
     ensure_kota_storage_layout_once();
 }
 
+pub fn ensure_handoffs_root() -> Result<PathBuf> {
+    ensure_kota_storage_layout_once();
+    ensure_handoffs_root_at(&kota_home_raw())
+}
+
+fn ensure_handoffs_root_at(kota_home: &Path) -> Result<PathBuf> {
+    let handoffs = kota_home.join(KOTA_HANDOFFS_DIR);
+    match fs::metadata(&handoffs) {
+        Ok(metadata) if metadata.is_dir() => Ok(handoffs),
+        Ok(_) => bail!("{} exists but is not a directory", handoffs.display()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(&handoffs)
+                .with_context(|| format!("create {}", handoffs.display()))?;
+            Ok(handoffs)
+        }
+        Err(err) => Err(err).with_context(|| format!("inspect {}", handoffs.display())),
+    }
+}
+
 fn ensure_kota_storage_layout_once() {
     #[cfg(not(test))]
     {
@@ -3525,6 +3545,38 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn handoffs_root_create_is_idempotent_and_preserves_existing_files() {
+        let root = temp_dir("handoffs-root");
+        let handoffs = root.join(KOTA_HANDOFFS_DIR);
+
+        assert_eq!(ensure_handoffs_root_at(&root).unwrap(), handoffs);
+        assert!(handoffs.is_dir());
+
+        let nested = handoffs.join("existing-delivery");
+        fs::create_dir_all(&nested).unwrap();
+        let existing = nested.join("keep.txt");
+        fs::write(&existing, b"keep this delivery").unwrap();
+
+        assert_eq!(ensure_handoffs_root_at(&root).unwrap(), handoffs);
+        assert_eq!(fs::read(existing).unwrap(), b"keep this delivery");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handoffs_root_collision_preserves_non_directory() {
+        let root = temp_dir("handoffs-root-collision");
+        let collision = root.join(KOTA_HANDOFFS_DIR);
+        fs::write(&collision, b"user data").unwrap();
+
+        let err = ensure_handoffs_root_at(&root).unwrap_err().to_string();
+        assert!(err.contains("exists but is not a directory"));
+        assert_eq!(fs::read(&collision).unwrap(), b"user data");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn workspace_for_test(root: &Path, agents: Vec<AgentLaunchSpec>) -> WorkspaceProject {

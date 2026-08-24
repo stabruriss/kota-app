@@ -1,6 +1,7 @@
 import type { VioletChatMessage } from '../pty-client';
 import { syncVioletProjectAgentsNow } from '../lib/violet-sync-engine';
 import {
+  prepareComposerDeliveryDedupeText,
   prepareDedupeText,
   preparedDedupeTextsMatch,
   timestampsWithinComposerConfirmationWindow,
@@ -89,7 +90,7 @@ function hasNativeUserEvidence(
   const localTime = Date.parse(message.timestamp);
   return nativeMessages.some((nativeMessage) => (
     nativeMessage.agentId === agentId &&
-    preparedDedupeTextsMatch(prepareDedupeText(nativeMessage.text), localText) &&
+    preparedDedupeTextsMatch(prepareComposerDeliveryDedupeText(nativeMessage.text), localText) &&
     timestampsWithinComposerConfirmationWindow(Date.parse(nativeMessage.timestamp), localTime)
   ));
 }

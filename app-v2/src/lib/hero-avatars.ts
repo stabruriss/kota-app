@@ -76,6 +76,7 @@ const USER_AVATAR_STORAGE_KEY = 'kota-v2.user-hero-avatars';
 const TAVERN_PROFILE_STORAGE_KEY = 'kota-v2.tavern.hero-profiles';
 const USER_AVATAR_CHANGED_EVENT = 'kota-v2:user-hero-avatars-changed';
 let userAvatarCache: UserHeroAvatar[] = [];
+let userAvatarCacheHydrated = false;
 
 export function isHeroProviderId(value: unknown): value is HeroProviderId {
   return value === 'claude' || value === 'codex' || value === 'antigravity' || value === 'opencode' || value === 'pi' || value === 'kimi';
@@ -99,55 +100,62 @@ export function isUserHeroAvatarId(value: string | null | undefined): value is s
 export function loadUserHeroAvatars(): UserHeroAvatar[] {
   if (userAvatarCache.length > 0) return userAvatarCache;
   if (typeof window === 'undefined') return [];
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(USER_AVATAR_STORAGE_KEY) || '[]');
-    if (!Array.isArray(parsed)) return [];
-    userAvatarCache = parsed.filter((item): item is UserHeroAvatar => (
-      item &&
-      typeof item.id === 'string' &&
-      item.id.startsWith('user:') &&
-      typeof item.label === 'string' &&
-      typeof item.dataUrl === 'string' &&
-      item.dataUrl.startsWith('data:image/') &&
-      typeof item.createdAt === 'string'
-    ));
-    return userAvatarCache;
-  } catch {
-    return [];
-  }
+  if (isTauri()) return [];
+  userAvatarCache = readLocalUserHeroAvatars();
+  userAvatarCacheHydrated = true;
+  return userAvatarCache;
 }
 
-export function saveUserHeroAvatars(avatars: readonly UserHeroAvatar[]): void {
+function updateUserHeroAvatarCache(avatars: readonly UserHeroAvatar[]): void {
   userAvatarCache = [...avatars];
+  userAvatarCacheHydrated = true;
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(USER_AVATAR_CHANGED_EVENT));
+}
+
+function saveBrowserUserHeroAvatars(avatars: readonly UserHeroAvatar[]): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(USER_AVATAR_STORAGE_KEY, JSON.stringify(avatars));
-  window.dispatchEvent(new Event(USER_AVATAR_CHANGED_EVENT));
+  updateUserHeroAvatarCache(avatars);
 }
 
 export async function refreshUserHeroAvatars(): Promise<UserHeroAvatar[]> {
   if (typeof window === 'undefined') return [];
   if (isTauri()) {
-    const fromDisk = await invoke<UserHeroAvatar[]>('hero_avatar_list');
-    const local = readLocalUserHeroAvatars();
-    if (fromDisk.length === 0 && local.length > 0) {
-      const migrated: UserHeroAvatar[] = [];
-      for (const avatar of local) {
-        migrated.push(await invoke<UserHeroAvatar>('hero_avatar_save', {
-          request: {
-            id: avatar.id,
-            label: avatar.label,
-            dataUrl: avatar.dataUrl,
-          },
-        }));
+    let fromDisk = await invoke<UserHeroAvatar[]>('hero_avatar_list');
+    const hasLegacyStorage = hasLocalUserHeroAvatarStorage();
+    const local = hasLegacyStorage ? readLocalUserHeroAvatars() : [];
+    const diskIds = new Set(fromDisk.map((avatar) => avatar.id));
+    const missing = local.filter((avatar) => !diskIds.has(avatar.id));
+    if (missing.length > 0) {
+      for (const avatar of missing) {
+        try {
+          await invoke<UserHeroAvatar>('hero_avatar_save', {
+            request: {
+              id: avatar.id,
+              label: avatar.label,
+              dataUrl: avatar.dataUrl,
+            },
+          });
+        } catch (error) {
+          console.warn(`Unable to migrate legacy avatar ${avatar.id}; will retry later.`, error);
+        }
       }
-      saveUserHeroAvatars(migrated);
-      return migrated;
+      fromDisk = await invoke<UserHeroAvatar[]>('hero_avatar_list');
     }
-    saveUserHeroAvatars(fromDisk);
+    const refreshedDiskIds = new Set(fromDisk.map((avatar) => avatar.id));
+    if (hasLegacyStorage && local.every((avatar) => refreshedDiskIds.has(avatar.id))) {
+      try {
+        window.localStorage.removeItem(USER_AVATAR_STORAGE_KEY);
+      } catch (error) {
+        console.warn('Unable to clear migrated legacy avatar storage; will retry later.', error);
+      }
+    }
+    updateUserHeroAvatarCache(fromDisk);
     return fromDisk;
   }
   const local = readLocalUserHeroAvatars();
-  saveUserHeroAvatars(local);
+  saveBrowserUserHeroAvatars(local);
   return local;
 }
 
@@ -162,11 +170,11 @@ export async function addUserHeroAvatar(fileName: string, dataUrl: string): Prom
     const avatar = await invoke<UserHeroAvatar>('hero_avatar_save', {
       request: { label: base.slice(0, 40), dataUrl },
     });
-    saveUserHeroAvatars([...loadUserHeroAvatars().filter((item) => item.id !== avatar.id), avatar]);
+    updateUserHeroAvatarCache([...loadUserHeroAvatars().filter((item) => item.id !== avatar.id), avatar]);
     return avatar;
   }
   const avatar = makeLocalUserHeroAvatar(base, dataUrl);
-  saveUserHeroAvatars([...loadUserHeroAvatars(), avatar]);
+  saveBrowserUserHeroAvatars([...loadUserHeroAvatars(), avatar]);
   return avatar;
 }
 
@@ -177,8 +185,10 @@ export async function deleteUserHeroAvatar(id: string): Promise<void> {
   }
   if (typeof window !== 'undefined' && isTauri()) {
     await invoke('hero_avatar_delete', { request: { avatarId: id } });
+    updateUserHeroAvatarCache(loadUserHeroAvatars().filter((avatar) => avatar.id !== id));
+    return;
   }
-  saveUserHeroAvatars(loadUserHeroAvatars().filter((avatar) => avatar.id !== id));
+  saveBrowserUserHeroAvatars(loadUserHeroAvatars().filter((avatar) => avatar.id !== id));
 }
 
 export function avatarReferenceNames(id: string, extraNames: readonly string[] = []): string[] {
@@ -207,7 +217,10 @@ export function normalizeHeroAvatarId(
 ): HeroAvatarId {
   const fallback = defaultAvatarIdForProvider(provider);
   if (!value) return fallback;
-  if (isUserHeroAvatarId(value) && userAvatarUrlForId(value)) return value;
+  if (isUserHeroAvatarId(value)) {
+    if (!userAvatarCacheHydrated || userAvatarUrlForId(value)) return value;
+    return fallback;
+  }
   if (value in HERO_AVATAR_BY_ID) return value;
   return fallback;
 }
@@ -298,6 +311,15 @@ function readLocalUserHeroAvatars(): UserHeroAvatar[] {
     ));
   } catch {
     return [];
+  }
+}
+
+function hasLocalUserHeroAvatarStorage(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(USER_AVATAR_STORAGE_KEY) !== null;
+  } catch {
+    return false;
   }
 }
 

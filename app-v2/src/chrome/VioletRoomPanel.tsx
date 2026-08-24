@@ -33,7 +33,9 @@ import { avatarClassForId, avatarImageStyleForId } from '../lib/hero-avatars';
 import { AgentCommendButton } from './AgentCommendButton';
 import { isHumanTelegramTarget } from '../ember-config';
 import {
+  hasLeadingTemporalGap,
   normalizeForDedupe,
+  prepareComposerDeliveryDedupeText,
   prepareDedupeText,
   preparedDedupeTextsMatch,
   timestampsWithinComposerConfirmationWindow,
@@ -48,6 +50,7 @@ import {
   type RoomQuoteReference,
 } from '../lib/room-quote';
 import { RoomQuoteMark } from '../lib/room-quote-mark';
+import subagentUpdateIconUrl from '../assets/tavern/icons/subagent-update.png';
 
 export {
   normalizeAttachmentInsensitive,
@@ -119,6 +122,17 @@ type PreparedLocalComposerMessage = PreparedNativeUserMessage & {
   targetAgentIds: ReadonlySet<string>;
 };
 
+type MatchedNativeComposerMessage = {
+  quoteRefId: string;
+  violetSeq?: number | null;
+};
+
+type PreparedVioletMessageSort<T extends VioletChatMessage> = {
+  message: T;
+  time: number;
+  resolutionMs: number | null;
+};
+
 type ComposerDeliveryEvidence = {
   nativeUsersByAgent: ReadonlyMap<string, readonly PreparedNativeUserMessage[]>;
   latestAssistantAtByAgent: ReadonlyMap<string, number>;
@@ -129,6 +143,7 @@ type VioletProgressEntry = {
   shell: string;
   timestamp: string;
   text: string;
+  messageOrigin?: string | null;
   agentDisplayName?: string | null;
   agentAvatarId?: string | null;
   agentProvider?: string | null;
@@ -1255,8 +1270,14 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
   const showAvatar = !isUser && (!isProcess || isCommentary);
   const progressEntries = isCommentary ? progressEntriesForMessage(message) : [];
   const progressItems = progressEntries.map((entry) => entry.text);
-  const latestProgressText = progressItems[progressItems.length - 1] ?? message.text;
+  const latestProgressEntry = progressEntries[progressEntries.length - 1];
+  const latestProgressText = latestProgressEntry?.text ?? message.text;
   const progressAgentIds = isCommentary ? distinctProgressAgentIds(progressEntries) : [];
+  const progressSummaryCopy = progressSummary(
+    progressItems.length,
+    progressAgentIds.length,
+    latestProgressText,
+  );
   const isMultiAgentProgress = progressAgentIds.length > 1;
   const canOpenTerminal = (
     message.kind === 'control' && !isUser && !isProcess && !!onOpenAgentTerminal
@@ -1436,7 +1457,13 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
             <details className="violet-commentary-details">
               <summary>
                 <span>Progress</span>
-                <em>{progressSummary(progressItems.length, progressAgentIds.length, latestProgressText)}</em>
+                <em>
+                  {progressSummaryCopy.prefix && <>{progressSummaryCopy.prefix} · </>}
+                  {isSubagentProgressEntry(latestProgressEntry) && (
+                    <SubagentUpdateMark placement="summary" />
+                  )}
+                  {progressSummaryCopy.preview}
+                </em>
               </summary>
               {progressEntries.length > 1 ? (
                 <div className="violet-commentary-feed">
@@ -1448,12 +1475,15 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
                           agentMeta={agentMeta}
                         />
                       )}
-                      <MarkdownText text={entry.text} projectRoot={projectRoot} enableLocalFileRefs />
+                      <ProgressEntryContent entry={entry} projectRoot={projectRoot} />
                     </div>
                   ))}
                 </div>
               ) : (
-                <MarkdownText text={message.text} projectRoot={projectRoot} enableLocalFileRefs />
+                <ProgressEntryContent
+                  entry={progressEntries[0] ?? progressEntryFromMessage(message, message.text)}
+                  projectRoot={projectRoot}
+                />
               )}
             </details>
           ) : isEmberDream ? (
@@ -1637,6 +1667,19 @@ function QueuedMessageIcon() {
   );
 }
 
+function SubagentUpdateMark({ placement }: { placement: 'summary' | 'entry' }) {
+  return (
+    <span
+      className={`violet-subagent-origin violet-subagent-origin-${placement}`}
+      role="img"
+      aria-label="Subagent update"
+    >
+      <img src={subagentUpdateIconUrl} alt="" aria-hidden draggable={false} />
+      <span className="violet-subagent-origin-label">Subagent</span>
+    </span>
+  );
+}
+
 const GhostSasayakiBubble = memo(function GhostSasayakiBubble({
   message,
   projectRoot,
@@ -1775,19 +1818,45 @@ const ProgressEntrySpeaker = memo(function ProgressEntrySpeaker({
   );
 });
 
+const ProgressEntryContent = memo(function ProgressEntryContent({
+  entry,
+  projectRoot,
+}: {
+  entry: VioletProgressEntry;
+  projectRoot?: string | null;
+}) {
+  const subagent = isSubagentProgressEntry(entry);
+  if (!subagent) {
+    return <MarkdownText text={entry.text} projectRoot={projectRoot} enableLocalFileRefs />;
+  }
+  return (
+    <div className="violet-commentary-entry-content subagent">
+      <SubagentUpdateMark placement="entry" />
+      <MarkdownText text={entry.text} projectRoot={projectRoot} enableLocalFileRefs />
+    </div>
+  );
+});
+
 function compactPreview(text: string): string {
   const value = text.replace(/\s+/g, ' ').trim();
   if (value.length <= 96) return value;
   return `${value.slice(0, 95)}...`;
 }
 
-function progressSummary(updateCount: number, agentCount: number, latestText: string): string {
+function progressSummary(
+  updateCount: number,
+  agentCount: number,
+  latestText: string,
+): { prefix: string; preview: string } {
   const preview = compactPreview(latestText);
   const parts = [];
   if (updateCount > 1) parts.push(`${updateCount} updates`);
   if (agentCount > 1) parts.push(`${agentCount} agents`);
-  parts.push(preview);
-  return parts.join(' · ');
+  return { prefix: parts.join(' · '), preview };
+}
+
+function isSubagentProgressEntry(entry?: VioletProgressEntry): boolean {
+  return entry?.messageOrigin === 'subagent';
 }
 
 function progressEntriesForMessage(message: VioletRoomMessage): readonly VioletProgressEntry[] {
@@ -1806,6 +1875,7 @@ function progressEntryFromMessage(message: VioletRoomMessage, text: string): Vio
     shell: message.shell,
     timestamp: message.timestamp,
     text,
+    messageOrigin: message.messageOrigin,
     agentDisplayName: message.agentDisplayName,
     agentAvatarId: message.agentAvatarId,
     agentProvider: message.agentProvider,
@@ -2826,25 +2896,33 @@ export function mergeRoomMessages(
   localMessages: readonly VioletRoomMessage[],
 ): VioletRoomMessage[] {
   const preparedLocalMessages = prepareLocalComposerMessages(localMessages);
-  const quoteRefByLocalId = new Map<string, string>();
+  const nativeMatchByLocalId = new Map<string, MatchedNativeComposerMessage>();
   const filteredNative = nativeMessages.filter((message) => {
     const local = matchingLocalComposerMessage(message, preparedLocalMessages);
     if (!local) return true;
-    if (!quoteRefByLocalId.has(local.id)) quoteRefByLocalId.set(local.id, message.id);
+    if (!nativeMatchByLocalId.has(local.id)) {
+      nativeMatchByLocalId.set(local.id, {
+        quoteRefId: message.id,
+        violetSeq: message.violetSeq,
+      });
+    }
     return false;
   });
   const materializedLocalMessages = localMessages.map((message) => {
-    const quoteRefId = quoteRefByLocalId.get(message.id);
-    return quoteRefId && message.quoteRefId !== quoteRefId
-      ? { ...message, quoteRefId }
-      : message;
+    const nativeMatch = nativeMatchByLocalId.get(message.id);
+    if (!nativeMatch) return message;
+    const violetSeq = nativeMatch.violetSeq ?? message.violetSeq;
+    return message.quoteRefId === nativeMatch.quoteRefId && message.violetSeq === violetSeq
+      ? message
+      : { ...message, quoteRefId: nativeMatch.quoteRefId, violetSeq };
   });
   const markedNative = markGhostSasayakiMessages(
     collapseNativeBroadcastUserMessages(filteredNative),
     materializedLocalMessages,
   );
-  return dedupeRoomMessages([...markedNative, ...materializedLocalMessages])
-    .sort(compareRoomMessagesForDisplay);
+  return sortRoomMessagesForDisplay(
+    dedupeRoomMessages([...markedNative, ...materializedLocalMessages]),
+  );
 }
 
 function violetMessageMatchesAgentFilter(message: VioletRoomMessage, agentIds: ReadonlySet<AgentId>): boolean {
@@ -2862,7 +2940,7 @@ function normalizeAgentIds(ids: readonly AgentId[]): AgentId[] {
 }
 
 function collapseNativeBroadcastUserMessages(messages: readonly VioletChatMessage[]): VioletRoomMessage[] {
-  const sorted = [...messages].sort(compareVioletMessageOrder);
+  const sorted = sortVioletMessages(messages);
   const groups: Array<{
     textKey: string;
     time: number;
@@ -2924,7 +3002,7 @@ function markGhostSasayakiMessages(
     .sort((a, b) => a.time - b.time || a.message.id.localeCompare(b.message.id));
 
   const markedInternalEchoes = nativeMessages.map((message) => (
-    isNativeInternalAgentBusEnvelopeEcho(message)
+    isNativeInternalAgentBusEnvelopeEcho(message) || isNativeTemporalGapEcho(message)
       ? { ...message, ghostSasayaki: true }
       : message
   ));
@@ -3008,6 +3086,10 @@ function isNativeInternalAgentBusEnvelopeEcho(message: VioletRoomMessage): boole
   return isNativeUserPrompt(message) && isInternalAgentBusEnvelopeText(message.text);
 }
 
+function isNativeTemporalGapEcho(message: VioletRoomMessage): boolean {
+  return isNativeUserPrompt(message) && hasLeadingTemporalGap(message.text);
+}
+
 function isInternalAgentBusEnvelopeText(text: string): boolean {
   const trimmed = trimTerminalEnvelopePadding(stripLeadingProviderAttachmentMarkers(text));
   return (
@@ -3038,22 +3120,115 @@ function isProviderAttachmentMarker(marker: string): boolean {
   return label.length > 0 && /^[0-9]+$/.test(ordinal);
 }
 
-function compareRoomMessagesForDisplay(left: VioletRoomMessage, right: VioletRoomMessage): number {
-  const leftTime = roomMessageDisplaySortTime(left);
-  const rightTime = roomMessageDisplaySortTime(right);
-  if (leftTime !== rightTime) return leftTime - rightTime;
-  return compareVioletMessageOrder(left, right);
+function sortRoomMessagesForDisplay(messages: readonly VioletRoomMessage[]): VioletRoomMessage[] {
+  const prepared = prepareVioletMessageSort(messages, roomMessageDisplaySortTime);
+  const coarseSeconds = coarseTimestampSeconds(prepared);
+  return prepared.sort((left, right) => compareVioletMessageOrderWithTimes(
+    left.message,
+    right.message,
+    coarseSeconds,
+    left.time,
+    right.time,
+  )).map(({ message }) => message);
+}
+
+function sortVioletMessages<T extends VioletChatMessage>(messages: readonly T[]): T[] {
+  const prepared = prepareVioletMessageSort(messages, (message) => Date.parse(message.timestamp));
+  const coarseSeconds = coarseTimestampSeconds(prepared);
+  return prepared.sort((left, right) => compareVioletMessageOrderWithTimes(
+    left.message,
+    right.message,
+    coarseSeconds,
+    left.time,
+    right.time,
+  )).map(({ message }) => message);
 }
 
 export function compareVioletMessageOrder(
   left: VioletChatMessage,
   right: VioletChatMessage,
+  coarseSeconds: ReadonlySet<number> = new Set<number>(),
 ): number {
-  return (
-    left.timestamp.localeCompare(right.timestamp) ||
-    (left.violetSeq ?? 0) - (right.violetSeq ?? 0) ||
-    left.id.localeCompare(right.id)
+  return compareVioletMessageOrderWithTimes(
+    left,
+    right,
+    coarseSeconds,
+    Date.parse(left.timestamp),
+    Date.parse(right.timestamp),
   );
+}
+
+function compareVioletMessageOrderWithTimes(
+  left: VioletChatMessage,
+  right: VioletChatMessage,
+  coarseSeconds: ReadonlySet<number>,
+  leftTime: number,
+  rightTime: number,
+): number {
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+    const leftSecond = Math.floor(leftTime / 1_000);
+    const rightSecond = Math.floor(rightTime / 1_000);
+    if (leftSecond !== rightSecond) return leftSecond - rightSecond;
+    if (coarseSeconds.has(leftSecond)) {
+      return (
+        (left.violetSeq ?? 0) - (right.violetSeq ?? 0) ||
+        leftTime - rightTime ||
+        left.timestamp.localeCompare(right.timestamp) ||
+        left.id.localeCompare(right.id)
+      );
+    }
+    return (
+      leftTime - rightTime ||
+      left.timestamp.localeCompare(right.timestamp) ||
+      (left.violetSeq ?? 0) - (right.violetSeq ?? 0) ||
+      left.id.localeCompare(right.id)
+    );
+  }
+  if (Number.isFinite(leftTime)) return -1;
+  if (Number.isFinite(rightTime)) return 1;
+  return left.timestamp.localeCompare(right.timestamp) ||
+    (left.violetSeq ?? 0) - (right.violetSeq ?? 0) ||
+    left.id.localeCompare(right.id);
+}
+
+function prepareVioletMessageSort<T extends VioletChatMessage>(
+  messages: readonly T[],
+  sortTime: (message: T) => number,
+): PreparedVioletMessageSort<T>[] {
+  return messages.map((message) => ({
+    message,
+    time: sortTime(message),
+    resolutionMs: timestampResolutionMs(message.timestamp),
+  }));
+}
+
+function coarseTimestampSeconds<T extends VioletChatMessage>(
+  prepared: readonly PreparedVioletMessageSort<T>[],
+): ReadonlySet<number> {
+  // A pairwise precision-overlap comparator is not transitive. Once a coarse
+  // timestamp appears, use sequence order for that whole displayed second.
+  const seconds = new Set<number>();
+  for (const { resolutionMs, time } of prepared) {
+    if (resolutionMs === null || resolutionMs <= 1) continue;
+    if (Number.isFinite(time)) seconds.add(Math.floor(time / 1_000));
+  }
+  return seconds;
+}
+
+function timestampResolutionMs(timestamp: string): number | null {
+  const precision = timestamp.match(
+    /T\d{2}:\d{2}:\d{2}(?:\.(\d+))?(?:Z|[+-]\d{2}:\d{2})$/i,
+  );
+  if (!precision) return null;
+  const fractionalDigits = precision[1]?.length ?? 0;
+  const resolutionMs = fractionalDigits === 0
+    ? 1_000
+    : fractionalDigits === 1
+      ? 100
+      : fractionalDigits === 2
+        ? 10
+        : 1;
+  return resolutionMs;
 }
 
 function roomMessageDisplaySortTime(message: VioletRoomMessage): number {
@@ -3176,7 +3351,7 @@ function buildComposerDeliveryEvidence(
       const items = nativeUsersByAgent.get(message.agentId) ?? [];
       items.push({
         timestampMs,
-        text: prepareDedupeText(message.text),
+        text: prepareComposerDeliveryDedupeText(message.text),
       });
       nativeUsersByAgent.set(message.agentId, items);
       continue;
@@ -3358,7 +3533,7 @@ function uniqueComposerMentions(
 }
 
 function dedupeRoomMessages(messages: VioletRoomMessage[]): VioletRoomMessage[] {
-  const sorted = [...messages].sort(compareVioletMessageOrder);
+  const sorted = sortVioletMessages(messages);
   const seen = new Set<string>();
   const out: VioletRoomMessage[] = [];
   for (const message of sorted) {
@@ -3428,8 +3603,9 @@ export function mergeSyncedNativeMessages(
   right: readonly VioletChatMessage[],
   options: { preserveLoadedHistory?: boolean } = {},
 ): VioletChatMessage[] {
-  const merged = dedupeRoomMessages([...(left as VioletRoomMessage[]), ...(right as VioletRoomMessage[])])
-    .sort(compareVioletMessageOrder);
+  const merged = sortVioletMessages(
+    dedupeRoomMessages([...(left as VioletRoomMessage[]), ...(right as VioletRoomMessage[])]),
+  );
   const bounded = options.preserveLoadedHistory
     ? merged
     : merged.slice(-VIOLET_ROOM_LIVE_LIMIT);
@@ -3440,8 +3616,9 @@ export function mergeOlderRoomMessages(
   left: readonly VioletChatMessage[],
   right: readonly VioletChatMessage[],
 ): VioletChatMessage[] {
-  const merged = dedupeRoomMessages([...(left as VioletRoomMessage[]), ...(right as VioletRoomMessage[])])
-    .sort(compareVioletMessageOrder);
+  const merged = sortVioletMessages(
+    dedupeRoomMessages([...(left as VioletRoomMessage[]), ...(right as VioletRoomMessage[])]),
+  );
   return reuseStableRoomMessages(left as readonly VioletRoomMessage[], merged);
 }
 
@@ -3539,6 +3716,7 @@ function sameRoomMessage(left: VioletChatMessage, right: VioletChatMessage): boo
     nullishString(left.sourcePath) === nullishString(right.sourcePath) &&
     nullishString(left.nativeEventId) === nullishString(right.nativeEventId) &&
     nullishString(left.actorIntent) === nullishString(right.actorIntent) &&
+    nullishString(left.messageOrigin) === nullishString(right.messageOrigin) &&
     nullishString(left.agentDisplayName) === nullishString(right.agentDisplayName) &&
     nullishString(left.agentAvatarId) === nullishString(right.agentAvatarId) &&
     nullishString(left.agentProvider) === nullishString(right.agentProvider) &&
@@ -3587,6 +3765,7 @@ function progressEntriesKey(entries?: readonly VioletProgressEntry[]): string {
     entry.shell,
     entry.timestamp,
     entry.text,
+    nullishString(entry.messageOrigin),
     nullishString(entry.agentDisplayName),
     nullishString(entry.agentAvatarId),
     nullishString(entry.agentProvider),

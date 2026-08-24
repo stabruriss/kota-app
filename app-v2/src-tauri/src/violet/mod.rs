@@ -326,6 +326,8 @@ pub struct VioletChatMessage {
     pub violet_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_origin: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_agent_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,6 +457,8 @@ struct NativeEvent {
     source_path: PathBuf,
     native_event_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     work_signal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     turn_id: Option<String>,
@@ -488,6 +492,8 @@ struct ChathistoryEvent {
     target_agent_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     actor_intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -931,7 +937,7 @@ fn apply_room_request_window(
     request: &VioletRoomRequest,
 ) -> Vec<VioletChatMessage> {
     let mut messages = dedupe_room_messages(messages);
-    messages.sort_by(compare_room_message_order);
+    sort_room_messages(&mut messages);
     if let Some(before) = request
         .before
         .as_deref()
@@ -1046,6 +1052,7 @@ pub fn record_actor_message(
         native_event_id: Some(record.event_id.clone()),
         violet_seq: None,
         actor_intent: record.actor_intent.clone(),
+        message_origin: None,
         target_agent_ids: record.target_agent_ids.clone(),
         agent_display_name: Some(record.actor_name.clone()),
         agent_avatar_id: Some(record.actor_id.clone()),
@@ -4436,6 +4443,7 @@ fn codex_routed_agent_message_events(
     // signals. A late child result must not re-activate an otherwise idle agent.
     progress.work_signal = None;
     progress.turn_id = turn_id;
+    progress.message_origin = Some("subagent".into());
     vec![progress]
 }
 
@@ -5062,6 +5070,7 @@ fn opencode_permission_event_from_log_line(
         text,
         source_path: path.to_path_buf(),
         native_event_id: Some(format!("opencode-log:{permission_id}")),
+        message_origin: None,
         work_signal: Some("activity".into()),
         turn_id: None,
         stop_reason: Some("permission_requested".into()),
@@ -5667,6 +5676,7 @@ fn event(
         text,
         source_path: source.path.clone(),
         native_event_id: Some(event_id.to_string()),
+        message_origin: None,
         work_signal,
         turn_id: None,
         stop_reason: None,
@@ -5692,6 +5702,7 @@ fn control_event(
         text: reason.clone().unwrap_or_else(|| signal.to_string()),
         source_path: source.path.clone(),
         native_event_id: Some(event_id.to_string()),
+        message_origin: None,
         work_signal: Some(signal.to_string()),
         turn_id,
         stop_reason: reason,
@@ -5834,36 +5845,158 @@ fn tail_events(mut events: Vec<NativeEvent>, limit: usize) -> Vec<NativeEvent> {
     events.split_off(events.len() - limit)
 }
 
-fn compare_room_message_order(
-    left: &VioletChatMessage,
-    right: &VioletChatMessage,
-) -> std::cmp::Ordering {
-    left.timestamp
-        .cmp(&right.timestamp)
-        .then(
-            left.violet_seq
-                .unwrap_or(0)
-                .cmp(&right.violet_seq.unwrap_or(0)),
-        )
-        .then(left.id.cmp(&right.id))
+#[derive(Clone, Copy)]
+struct TimestampOrderPrecision {
+    time_ms: i64,
+    second: i64,
+    resolution_ms: i64,
 }
 
-fn compare_chathistory_event_order(
-    left: &ChathistoryEvent,
-    right: &ChathistoryEvent,
+fn timestamp_order_precision(timestamp: &str) -> Option<TimestampOrderPrecision> {
+    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    let time = timestamp
+        .find('T')
+        .or_else(|| timestamp.find('t'))
+        .map(|index| &timestamp[index + 1..])?;
+    if time.len() < 8
+        || time.as_bytes().get(2) != Some(&b':')
+        || time.as_bytes().get(5) != Some(&b':')
+    {
+        return None;
+    }
+    let after_seconds = &time[8..];
+    let fractional_digits = after_seconds.strip_prefix('.').map_or(0, |fraction| {
+        fraction
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count()
+    });
+    if after_seconds.starts_with('.') && fractional_digits == 0 {
+        return None;
+    }
+    let resolution_ms = match fractional_digits {
+        0 => 1_000,
+        1 => 100,
+        2 => 10,
+        _ => 1,
+    };
+    let time_ms = parsed.timestamp_millis();
+    Some(TimestampOrderPrecision {
+        time_ms,
+        second: time_ms.div_euclid(1_000),
+        resolution_ms,
+    })
+}
+
+fn coarse_timestamp_seconds(
+    precisions: impl Iterator<Item = TimestampOrderPrecision>,
+) -> HashSet<i64> {
+    // Pairwise "precision windows overlap" comparisons can form a cycle.
+    // Promote the whole affected second to sequence order instead, so every
+    // sort sees one transitive key while precise-only seconds keep time order.
+    precisions
+        .filter(|precision| precision.resolution_ms > 1)
+        .map(|precision| precision.second)
+        .collect()
+}
+
+fn compare_violet_order_parts(
+    left_timestamp: &str,
+    left_precision: Option<TimestampOrderPrecision>,
+    left_seq: Option<u64>,
+    left_id: &str,
+    right_timestamp: &str,
+    right_precision: Option<TimestampOrderPrecision>,
+    right_seq: Option<u64>,
+    right_id: &str,
+    coarse_seconds: &HashSet<i64>,
 ) -> std::cmp::Ordering {
-    left.ts
-        .cmp(&right.ts)
-        .then(
-            left.violet_seq
-                .unwrap_or(0)
-                .cmp(&right.violet_seq.unwrap_or(0)),
+    match (left_precision, right_precision) {
+        (Some(left), Some(right)) => {
+            let second_order = left.second.cmp(&right.second);
+            if second_order != std::cmp::Ordering::Equal {
+                return second_order;
+            }
+
+            if coarse_seconds.contains(&left.second) {
+                return left_seq
+                    .unwrap_or(0)
+                    .cmp(&right_seq.unwrap_or(0))
+                    .then(left.time_ms.cmp(&right.time_ms))
+                    .then(left_timestamp.cmp(right_timestamp))
+                    .then(left_id.cmp(right_id));
+            }
+
+            return left
+                .time_ms
+                .cmp(&right.time_ms)
+                .then(left_timestamp.cmp(right_timestamp))
+                .then(left_seq.unwrap_or(0).cmp(&right_seq.unwrap_or(0)))
+                .then(left_id.cmp(right_id));
+        }
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left_timestamp
+            .cmp(right_timestamp)
+            .then(left_seq.unwrap_or(0).cmp(&right_seq.unwrap_or(0)))
+            .then(left_id.cmp(right_id)),
+    }
+}
+
+fn sort_room_messages(messages: &mut Vec<VioletChatMessage>) {
+    let mut prepared = std::mem::take(messages)
+        .into_iter()
+        .map(|message| {
+            let precision = timestamp_order_precision(&message.timestamp);
+            (message, precision)
+        })
+        .collect::<Vec<_>>();
+    let coarse_seconds =
+        coarse_timestamp_seconds(prepared.iter().filter_map(|(_, precision)| *precision));
+    prepared.sort_by(|(left, left_precision), (right, right_precision)| {
+        compare_violet_order_parts(
+            &left.timestamp,
+            *left_precision,
+            left.violet_seq,
+            &left.id,
+            &right.timestamp,
+            *right_precision,
+            right.violet_seq,
+            &right.id,
+            &coarse_seconds,
         )
-        .then(left.id.cmp(&right.id))
+    });
+    messages.extend(prepared.into_iter().map(|(message, _)| message));
+}
+
+fn sort_chathistory_events(events: &mut Vec<ChathistoryEvent>) {
+    let mut prepared = std::mem::take(events)
+        .into_iter()
+        .map(|event| {
+            let precision = timestamp_order_precision(&event.ts);
+            (event, precision)
+        })
+        .collect::<Vec<_>>();
+    let coarse_seconds =
+        coarse_timestamp_seconds(prepared.iter().filter_map(|(_, precision)| *precision));
+    prepared.sort_by(|(left, left_precision), (right, right_precision)| {
+        compare_violet_order_parts(
+            &left.ts,
+            *left_precision,
+            left.violet_seq,
+            &left.id,
+            &right.ts,
+            *right_precision,
+            right.violet_seq,
+            &right.id,
+            &coarse_seconds,
+        )
+    });
+    events.extend(prepared.into_iter().map(|(event, _)| event));
 }
 
 fn dedupe_room_messages(mut messages: Vec<VioletChatMessage>) -> Vec<VioletChatMessage> {
-    messages.sort_by(compare_room_message_order);
+    sort_room_messages(&mut messages);
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(messages.len());
     for message in messages {
@@ -8286,7 +8419,7 @@ fn render_chathistory_events(events: &[ChathistoryEvent]) -> Result<String, Stri
 }
 
 fn dedupe_chathistory_events(mut events: Vec<ChathistoryEvent>) -> Vec<ChathistoryEvent> {
-    events.sort_by(compare_chathistory_event_order);
+    sort_chathistory_events(&mut events);
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(events.len());
     for event in events {
@@ -8323,6 +8456,7 @@ fn chathistory_event_from_message(
         },
         target_agent_ids: message.target_agent_ids.clone(),
         actor_intent: message.actor_intent.clone(),
+        message_origin: message.message_origin.clone(),
         agent_display_name: message
             .agent_display_name
             .clone()
@@ -8356,6 +8490,7 @@ fn message_from_chathistory_event(event: ChathistoryEvent) -> VioletChatMessage 
         native_event_id: event.source.native_event_id,
         violet_seq: event.violet_seq,
         actor_intent: event.actor_intent,
+        message_origin: event.message_origin,
         target_agent_ids: event.target_agent_ids,
         agent_display_name: event.agent_display_name,
         agent_avatar_id: event.agent_avatar_id,
@@ -8785,6 +8920,7 @@ fn parse_normalized_block(block: &str, session_id: &str, path: &Path) -> Option<
         native_event_id,
         violet_seq: None,
         actor_intent: metadata_value(metadata, "actor_intent"),
+        message_origin: None,
         target_agent_ids,
         agent_display_name: actor_name,
         agent_avatar_id,
@@ -8826,6 +8962,7 @@ fn event_to_message(event: NativeEvent) -> VioletChatMessage {
         native_event_id: event.native_event_id,
         violet_seq: None,
         actor_intent: None,
+        message_origin: event.message_origin,
         target_agent_ids: Vec::new(),
         agent_display_name: None,
         agent_avatar_id: None,
@@ -9785,6 +9922,7 @@ mod tests {
             text: text.into(),
             source_path: PathBuf::from("/tmp/a.jsonl"),
             native_event_id: None,
+            message_origin: None,
             work_signal: None,
             turn_id: None,
             stop_reason: None,
@@ -10311,6 +10449,7 @@ mod tests {
             native_event_id: Some(id.into()),
             violet_seq: None,
             actor_intent: None,
+            message_origin: None,
             target_agent_ids: Vec::new(),
             agent_display_name: Some("Alice".into()),
             agent_avatar_id: None,
@@ -10443,6 +10582,42 @@ mod tests {
         assert_eq!(
             manifest.get("next_seq").and_then(JsonValue::as_u64),
             Some(3)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn chathistory_writer_uses_sequence_when_timestamp_precision_overlaps() {
+        let root = temp_violet_dir("violet-mixed-timestamp-precision");
+        fs::create_dir_all(&root).unwrap();
+        let messages = vec![
+            chat_message(
+                "agent-bus-prompt",
+                "assistant",
+                "message",
+                "2026-08-20T21:31:45.085001+00:00",
+                "prompt",
+            ),
+            chat_message(
+                "provider-reply",
+                "assistant",
+                "message",
+                "2026-08-20T21:31:45+00:00",
+                "reply",
+            ),
+        ];
+
+        write_chathistory_messages(&root, &messages).unwrap();
+        let events =
+            read_chathistory_event_file(&chathistory_events_dir(&root).join("2026-08-20.jsonl"))
+                .unwrap();
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| (event.id.as_str(), event.violet_seq))
+                .collect::<Vec<_>>(),
+            vec![("agent-bus-prompt", Some(1)), ("provider-reply", Some(2))]
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -11289,6 +11464,7 @@ done"#;
         assert_eq!(events[0].role, "assistant");
         assert_eq!(events[0].kind, "commentary");
         assert_eq!(events[0].work_signal.as_deref(), Some("activity"));
+        assert_eq!(events[0].message_origin, None);
 
         let (room, shared) = split_for_violet_outputs(events, Path::new("/tmp/kota"));
         assert_eq!(room.len(), 1);
@@ -11345,15 +11521,23 @@ done"#;
         assert_eq!(events[0].role, "assistant");
         assert_eq!(events[0].kind, "commentary");
         assert_eq!(events[0].text, expected);
+        assert_eq!(events[0].message_origin.as_deref(), Some("subagent"));
         assert_eq!(events[0].turn_id.as_deref(), Some("turn-routed-child"));
         assert_eq!(events[0].work_signal, None);
         assert!(native_work_event(&events[0]).is_none());
 
         let message = event_to_message(events[0].clone());
+        assert_eq!(message.message_origin.as_deref(), Some("subagent"));
         assert!(!message_counts_as_turn(&message));
         let history = chathistory_event_from_message(&message, None);
+        assert_eq!(history.message_origin.as_deref(), Some("subagent"));
         assert!(!history.agent_visible);
         assert!(!is_summary_count_event(&history));
+        let serialized = serde_json::to_string(&history).unwrap();
+        assert!(serialized.contains("\"message_origin\":\"subagent\""));
+        let persisted: ChathistoryEvent = serde_json::from_str(&serialized).unwrap();
+        let restored = message_from_chathistory_event(persisted);
+        assert_eq!(restored.message_origin.as_deref(), Some("subagent"));
 
         let (room, shared) = split_for_violet_outputs(events, Path::new("/tmp/kota"));
         assert_eq!(room.len(), 1);
@@ -12218,6 +12402,7 @@ done"#;
                     native_event_id: Some("tool".into()),
                     violet_seq: None,
                     actor_intent: None,
+                    message_origin: None,
                     target_agent_ids: Vec::new(),
                     agent_display_name: None,
                     agent_avatar_id: None,
@@ -12237,6 +12422,7 @@ done"#;
                     native_event_id: Some("message".into()),
                     violet_seq: None,
                     actor_intent: None,
+                    message_origin: None,
                     target_agent_ids: Vec::new(),
                     agent_display_name: None,
                     agent_avatar_id: None,
@@ -12284,6 +12470,7 @@ done"#;
                     native_event_id: Some("local-command".into()),
                     violet_seq: None,
                     actor_intent: None,
+                    message_origin: None,
                     target_agent_ids: Vec::new(),
                     agent_display_name: None,
                     agent_avatar_id: None,
@@ -12303,6 +12490,7 @@ done"#;
                     native_event_id: Some("real-user".into()),
                     violet_seq: None,
                     actor_intent: None,
+                    message_origin: None,
                     target_agent_ids: Vec::new(),
                     agent_display_name: None,
                     agent_avatar_id: None,
@@ -12406,6 +12594,7 @@ done"#;
             native_event_id: Some(text.into()),
             violet_seq: None,
             actor_intent: None,
+            message_origin: None,
             target_agent_ids: Vec::new(),
             agent_display_name: None,
             agent_avatar_id: None,
@@ -12481,6 +12670,7 @@ done"#;
             native_event_id: Some(text.into()),
             violet_seq: None,
             actor_intent: None,
+            message_origin: None,
             target_agent_ids: Vec::new(),
             agent_display_name: None,
             agent_avatar_id: None,
@@ -12614,6 +12804,7 @@ done"#;
             text: r#"{"collaboration_mode_kind":"default","model_context_window":258400,"turn_id":"turn","type":"task_started"}"#.into(),
             source_path: PathBuf::from("/tmp/a.jsonl"),
             native_event_id: None,
+            message_origin: None,
             work_signal: None,
             turn_id: None,
             stop_reason: None,
@@ -12805,6 +12996,7 @@ done"#;
                 native_event_id: Some("old-native".into()),
                 violet_seq: None,
                 actor_intent: None,
+                message_origin: None,
                 target_agent_ids: Vec::new(),
                 agent_display_name: None,
                 agent_avatar_id: None,
@@ -12909,6 +13101,7 @@ done"#;
                 native_event_id: Some("old-visible-native".into()),
                 violet_seq: None,
                 actor_intent: None,
+                message_origin: None,
                 target_agent_ids: Vec::new(),
                 agent_display_name: None,
                 agent_avatar_id: None,

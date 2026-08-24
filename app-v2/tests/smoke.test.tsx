@@ -1896,7 +1896,7 @@ describe('W3+W5 · composer target picker', () => {
         role: 'assistant',
         kind: 'message',
         timestamp: '2026-07-22T10:00:00.000Z',
-        text: 'Ember scheduled prompt\n\nTake a break.',
+        text: 'Take a break.',
         sourcePath: null,
         nativeEventId: 'ember-reminder-human-one',
         targetAgentIds: [HUMAN_TELEGRAM_TARGET_ID],
@@ -1921,6 +1921,7 @@ describe('W3+W5 · composer target picker', () => {
     expect(bubble).not.toBeNull();
     expect(within(bubble as HTMLElement).getByText('@Human Tester')).toHaveClass('human');
     expect(bubble).not.toHaveClass('delivery-issue');
+    expect(bubble).not.toHaveTextContent('Ember scheduled prompt');
     expect(container).not.toHaveTextContent(HUMAN_TELEGRAM_TARGET_ID);
   });
 
@@ -2854,6 +2855,7 @@ describe('W3+W5 · composer target picker', () => {
                 kind: 'commentary',
                 timestamp: '2026-05-20T10:00:01.000Z',
                 text: 'Then I will run the focused smoke test.',
+                messageOrigin: 'subagent',
                 sourcePath: null,
                 nativeEventId: null,
               },
@@ -2878,10 +2880,74 @@ describe('W3+W5 · composer target picker', () => {
     expect(article.querySelector('.violet-msg-avatar')).not.toBeNull();
     expect(within(article).queryByText('commentary')).not.toBeInTheDocument();
     expect(within(article).getByText(/2 updates/)).toBeInTheDocument();
+    const summaryOrigin = summary.querySelector('.violet-subagent-origin-summary') as HTMLElement;
+    expect(summaryOrigin).toHaveAttribute(
+      'aria-label',
+      'Subagent update',
+    );
+    expect(summaryOrigin).not.toHaveAttribute('title');
+    expect(within(summaryOrigin).getByText('Subagent')).toBeInTheDocument();
     fireEvent.click(summary);
     expect(wrapper.open).toBe(true);
     expect(screen.getByText('I am checking the layout first.')).toBeVisible();
     expect(screen.getByText('Then I will run the focused smoke test.')).toBeVisible();
+    const entries = article.querySelectorAll('.violet-commentary-entry');
+    expect(entries[0]?.querySelector('.violet-subagent-origin-entry')).toBeNull();
+    const childOrigin = entries[1]?.querySelector('.violet-subagent-origin-entry') as HTMLElement;
+    expect(childOrigin).not.toBeNull();
+    expect(within(childOrigin).getByText('Subagent')).toBeInTheDocument();
+  });
+
+  it('keeps a hidden subagent update off the collapsed progress summary', async () => {
+    const projectRoot = '/tmp/kota-subagent-progress-test';
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages: [
+        {
+          id: 'dex-child-progress',
+          sessionId: 's',
+          agentId: 'dex',
+          shell: 'codex',
+          role: 'assistant',
+          kind: 'commentary',
+          timestamp: '2026-05-20T10:00:00.000Z',
+          text: 'A child agent found the relevant fixture.',
+          messageOrigin: 'subagent',
+          sourcePath: null,
+          nativeEventId: null,
+        },
+        {
+          id: 'dex-root-progress',
+          sessionId: 's',
+          agentId: 'dex',
+          shell: 'codex',
+          role: 'assistant',
+          kind: 'commentary',
+          timestamp: '2026-05-20T10:00:01.000Z',
+          text: 'The root agent is checking the result.',
+          sourcePath: null,
+          nativeEventId: null,
+        },
+      ],
+      sources: [],
+      workEvents: [],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+      syncedAt: '2026-05-20T10:00:02.000Z',
+    });
+
+    render(<VioletRoomPanel projectRoot={projectRoot} agentIds={['dex']} />);
+
+    const progressLabel = await screen.findByText('Progress');
+    const article = progressLabel.closest('article') as HTMLElement;
+    const summary = article.querySelector('summary') as HTMLElement;
+    expect(summary.querySelector('.violet-subagent-origin-summary')).toBeNull();
+
+    fireEvent.click(summary);
+    const entries = article.querySelectorAll('.violet-commentary-entry');
+    const childOrigin = entries[0]?.querySelector('.violet-subagent-origin-entry') as HTMLElement;
+    expect(childOrigin).not.toBeNull();
+    expect(within(childOrigin).getByText('Subagent')).toBeInTheDocument();
+    expect(entries[1]?.querySelector('.violet-subagent-origin-entry')).toBeNull();
   });
 
   it('groups adjacent all-chat progress runs across agents', async () => {

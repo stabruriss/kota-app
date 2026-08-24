@@ -10,6 +10,21 @@ export function prepareDedupeText(text: string): PreparedDedupeText {
   };
 }
 
+export function prepareComposerDeliveryDedupeText(text: string): PreparedDedupeText {
+  return prepareDedupeText(stripLeadingTemporalGap(text));
+}
+
+export function hasLeadingTemporalGap(text: string): boolean {
+  const prepared = prepareLeadingEnvelopeText(text);
+  return TEMPORAL_GAP_BLOCK.test(prepared);
+}
+
+export function stripLeadingTemporalGap(text: string): string {
+  const prepared = prepareLeadingEnvelopeText(text);
+  const match = prepared.match(TEMPORAL_GAP_BLOCK);
+  return match ? prepared.slice(match[0].length) : text;
+}
+
 export function preparedDedupeTextsMatch(
   nativeText: PreparedDedupeText,
   localText: PreparedDedupeText,
@@ -86,4 +101,29 @@ function trimTerminalControlPadding(text: string): string {
     /^[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]+|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]+$/gu,
     '',
   );
+}
+
+const TEMPORAL_GAP_COPY =
+  'It has been over 24 hours since your last completed response in this room.';
+const TEMPORAL_GAP_BLOCK = new RegExp(
+  `^<KOTA_TEMPORAL_GAP v="1" current_time="[^"\\r\\n]{1,64}">\\r?\\n${TEMPORAL_GAP_COPY.replaceAll('.', '\\.')}` +
+  '\\r?\\n</KOTA_TEMPORAL_GAP>(?:\\r?\\n|$)',
+);
+
+function prepareLeadingEnvelopeText(text: string): string {
+  let rest = text.replace(/^[\s\u0000-\u001f\u007f-\u009f]+/u, '');
+  for (let index = 0; index < 8; index += 1) {
+    const match = rest.match(/^\[([^\]\n]{1,40})\]\s*/u);
+    if (!match || !isProviderAttachmentMarker(match[1] ?? '')) break;
+    rest = rest.slice(match[0].length);
+  }
+  return rest;
+}
+
+function isProviderAttachmentMarker(marker: string): boolean {
+  const hashIndex = marker.lastIndexOf('#');
+  if (hashIndex <= 0) return false;
+  const label = marker.slice(0, hashIndex).trim();
+  const ordinal = marker.slice(hashIndex + 1).trim();
+  return label.length > 0 && /^[0-9]+$/.test(ordinal);
 }

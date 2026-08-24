@@ -19,6 +19,25 @@
     ]
   },
   {
+    "name": "sequence resolves overlapping timestamp precision",
+    "messages": [
+      {
+        "id": "provider-reply",
+        "timestamp": "2026-08-20T21:31:45+00:00",
+        "violetSeq": 1474
+      },
+      {
+        "id": "agent-bus-prompt",
+        "timestamp": "2026-08-20T21:31:45.085001+00:00",
+        "violetSeq": 1473
+      }
+    ],
+    "expectedIds": [
+      "agent-bus-prompt",
+      "provider-reply"
+    ]
+  },
+  {
     "name": "timestamp remains authoritative outside a tie",
     "messages": [
       {
@@ -35,6 +54,31 @@
     "expectedIds": [
       "earlier",
       "later"
+    ]
+  },
+  {
+    "name": "a coarse second uses one transitive sequence order",
+    "messages": [
+      {
+        "id": "precise-sequence-three",
+        "timestamp": "2026-08-20T21:31:45.100Z",
+        "violetSeq": 3
+      },
+      {
+        "id": "coarse-sequence-two",
+        "timestamp": "2026-08-20T21:31:45Z",
+        "violetSeq": 2
+      },
+      {
+        "id": "precise-sequence-one",
+        "timestamp": "2026-08-20T21:31:45.200Z",
+        "violetSeq": 1
+      }
+    ],
+    "expectedIds": [
+      "precise-sequence-one",
+      "coarse-sequence-two",
+      "precise-sequence-three"
     ]
   },
   {

@@ -72,6 +72,29 @@ describe('Violet Composer delivery after an agent exits', () => {
     expect(violetComposerSentHistory(projectRoot)[0]?.delivery).toEqual({ status: 'clear' });
   });
 
+  it('retires a prompt when native evidence has a temporal context wrapper', async () => {
+    const projectRoot = '/tmp/kota-exit-temporal-confirmed';
+    const sent = emitVioletComposerSent({
+      projectRoot,
+      text: 'check the date',
+      targetAgentIds: ['alice'],
+      privacy: false,
+    });
+    const wrapped = [
+      '<KOTA_TEMPORAL_GAP v="1" current_time="2026-08-18T12:00:00-07:00">',
+      'It has been over 24 hours since your last completed response in this room.',
+      '</KOTA_TEMPORAL_GAP>',
+      'check the date',
+    ].join('\n');
+    mocks.syncVioletProjectAgentsNow.mockResolvedValue(roomState([
+      nativeUserMessage('alice', wrapped, offsetTimestamp(sent!.timestamp, 1_000)),
+    ]));
+
+    await reconcileVioletComposerAfterAgentExit({ projectRoot, agentId: 'alice' });
+
+    expect(violetComposerSentHistory(projectRoot)[0]?.delivery).toEqual({ status: 'clear' });
+  });
+
   it('queues only the exited group target after every peer is natively confirmed', async () => {
     const projectRoot = '/tmp/kota-exit-group-confirmed-peer';
     const sent = emitVioletComposerSent({

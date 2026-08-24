@@ -72,6 +72,7 @@ import {
   summarizeVioletAuto,
   summarizeVioletNow,
   type AgentBusSendResult,
+  type AgentBusTerminalTiming,
   type BbsPost,
   type BbsSnapshot,
   type BbsThread,
@@ -103,6 +104,7 @@ import {
   EMBER_NOT_DELIVERED,
   HUMAN_TELEGRAM_TARGET_ID,
   emberScheduleSummary,
+  emberReminderTerminalTiming,
   emberScheduleTargetIds,
   emberScheduleTargetLabel,
   emberScheduleTargetNames,
@@ -111,7 +113,6 @@ import {
   isHumanTelegramTarget,
   loadEmberState,
   renderDreamPromptFromFile,
-  renderEmberReminderPrompt,
   rescheduleEmberSchedule,
   resumeEmberSchedule,
   saveEmberState,
@@ -1586,6 +1587,7 @@ export function RightColumn({
     text: string,
     intent: string,
     eventId: string,
+    terminalTiming?: AgentBusTerminalTiming,
   ): Promise<AgentBusSendResult> => {
     if (!targetProjectRoot) {
       throw new Error('Open a Kota project before scheduling Ember prompts.');
@@ -1599,6 +1601,7 @@ export function RightColumn({
       text,
       eventId,
       dedupeKey: eventId,
+      terminalTiming,
     });
     if (!result.submitted && !result.duplicate) {
       throw new Error(result.skippedReason || `Could not reach ${targetAgentId}`);
@@ -1635,9 +1638,10 @@ export function RightColumn({
           await sendEmberBusMessage(
             emberProjectRoot,
             agentId,
-            renderEmberReminderPrompt(schedule),
+            schedule.text.trim(),
             'reminder',
             emberEventId('reminder', schedule.id, agentId),
+            emberReminderTerminalTiming(schedule, source),
           );
         }
         return {

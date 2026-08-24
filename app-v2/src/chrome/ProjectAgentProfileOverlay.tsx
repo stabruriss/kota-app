@@ -41,7 +41,7 @@ type ProjectAgentModelCache = Record<string, {
   models: SupportedProviderModel[];
 }>;
 
-const PROJECT_AGENT_MODEL_CACHE_KEY = 'kota-v2.project-agent.model-catalog-cache';
+const PROJECT_AGENT_MODEL_CACHE_KEY = 'kota-v2.project-agent.model-catalog-cache.v2';
 
 interface ProjectAgentProfileOverlayProps {
   agentId: AgentId;
@@ -189,13 +189,22 @@ export function ProjectAgentProfileOverlay({
 
   const toggleShellEdit = async () => {
     if (!shellEditing) {
+      if (detail) {
+        setModel(detail.model);
+        setEffort(detail.effort ?? '');
+      }
       setShellEditing(true);
       setNotice(null);
       setError(null);
       return;
     }
-    const saved = await save();
-    if (saved) setShellEditing(false);
+    if (!detail || modelRefreshing) return;
+    const nextModel = model.trim() || 'default';
+    const nextEffort = effort.trim();
+    const saved = await save({ model: nextModel, effort: nextEffort || null });
+    if (saved) {
+      setShellEditing(false);
+    }
   };
 
   const save = async (patch: {
@@ -205,14 +214,18 @@ export function ProjectAgentProfileOverlay({
     closeGhost?: boolean;
     avatarId?: string | null;
     skills?: string[];
+    model?: string;
+    effort?: string | null;
   } = {}): Promise<boolean> => {
     if (!detail) return false;
     const nextDisplayName = (patch.displayName ?? displayName).trim();
     const nextGhost = patch.ghost ?? ghost;
     const nextAvatarId = patch.avatarId !== undefined ? patch.avatarId : avatarId;
     const nextSkills = patch.skills ?? detail.skills;
-    const nextModel = model.trim() || 'default';
-    const nextEffort = effort.trim();
+    const nextModel = (patch.model ?? detail.model).trim() || 'default';
+    const nextEffort = patch.effort !== undefined
+      ? (patch.effort ?? '').trim()
+      : (detail.effort ?? '').trim();
     const nameChanged = patch.displayName !== undefined && displayName.trim() !== nextDisplayName;
     const currentNameFields = projectAgentNameFieldsFromDetail(detail, displayName);
     const nextNameFields = patch.nameFields ?? (nameChanged ? nameDraft : currentNameFields);
@@ -253,8 +266,8 @@ export function ProjectAgentProfileOverlay({
       setDisplayName(savedDisplayName);
       setNameDraft(projectAgentNameFieldsFromDetail(next, savedDisplayName));
       setNameEditing(false);
-      setModel(next.model);
-      setEffort(next.effort ?? '');
+      if (patch.model !== undefined) setModel(next.model);
+      if (patch.effort !== undefined) setEffort(next.effort ?? '');
       setAvatarId(next.avatarId ?? null);
       setSkills((current) => (patch.skills !== undefined ? next.skills : current));
       setGhost(next.ghost);

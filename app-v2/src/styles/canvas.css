@@ -11897,14 +11897,22 @@ body::before {
   border-radius: 50%;
 }
 .win-title-avatar-clip .win-title-agent-avatar.tavern-avatar-art {
-  width: 52px;
-  height: 52px;
-  flex: 0 0 52px;
+  /* Fill the clip instead of forcing 52px into its 42px content box
+     (.win-title-avatar-button is 52px border-box with 1px border + 4px
+     padding). An oversized grid item is clamped to the start edge rather
+     than centred, which pushed the art 5px down-right; the old
+     translate(-2px,-2px) took back only 2 of those, leaving every window
+     avatar 3px off-centre. Filling the box centres it without depending on
+     overflow-alignment behaviour, and 114% now frames the art exactly like
+     every other avatar in the app. Do not switch to `cover`: that renders
+     square under WKWebView's circular clip. */
+  width: 100%;
+  height: 100%;
+  flex: 0 0 auto;
   border-width: 0;
   background-position: center;
   background-size: 114%;
   box-shadow: none;
-  transform: translate(-2px, -2px);
 }
 .win-title-name-bar {
   display: inline-flex;
@@ -18988,6 +18996,44 @@ body::before {
   white-space: nowrap;
 }
 
+.violet-subagent-origin {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: auto;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: #c6ad76;
+  vertical-align: -4px;
+}
+
+.violet-subagent-origin img {
+  display: block;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  opacity: 0.86;
+  pointer-events: none;
+}
+
+.violet-subagent-origin-label {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.015em;
+  opacity: 0.86;
+}
+
+.violet-subagent-origin-summary {
+  margin: 0 4px 0 2px;
+}
+
+.violet-commentary-details[open] .violet-subagent-origin-summary {
+  display: none;
+}
+
 .violet-commentary-details[open] summary,
 .violet-ember-dream-details[open] summary,
 .violet-bartender-conflict-details[open] summary {
@@ -19002,6 +19048,17 @@ body::before {
 .violet-commentary-entry + .violet-commentary-entry {
   padding-top: 8px;
   border-top: 1px dashed rgba(222, 205, 166, 0.14);
+}
+
+.violet-commentary-entry-content.subagent {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  column-gap: 8px;
+}
+
+.violet-subagent-origin-entry {
+  margin-top: 1px;
 }
 
 .violet-commentary-entry-speaker {

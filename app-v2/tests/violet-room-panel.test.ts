@@ -85,6 +85,40 @@ describe('Violet room message dedupe', () => {
     expect((merged[0] as { ghostSasayaki?: boolean } | undefined)?.ghostSasayaki).toBeUndefined();
   });
 
+  it('keeps a matched local composer prompt before a coarse same-second reply', () => {
+    const nativeUser = roomMessage({
+      id: 'native-coarse-user',
+      agentId: 'agent-a',
+      role: 'user',
+      text: 'fast prompt',
+      timestamp: '2026-08-20T18:43:56+00:00',
+      violetSeq: 313,
+    });
+    const nativeReply = roomMessage({
+      id: 'native-coarse-reply',
+      agentId: 'agent-a',
+      role: 'assistant',
+      text: 'fast reply',
+      timestamp: '2026-08-20T18:43:56+00:00',
+      violetSeq: 314,
+    });
+    const local = localComposerMessage({
+      id: 'local-precise-prompt',
+      text: 'fast prompt',
+      targetAgentIds: ['agent-a'],
+      timestamp: '2026-08-20T18:43:56.412Z',
+    });
+
+    const merged = mergeRoomMessages([nativeUser, nativeReply], [local]);
+
+    expect(merged.map((message) => message.id)).toEqual([
+      'local-precise-prompt',
+      'native-coarse-reply',
+    ]);
+    expect(merged[0]?.violetSeq).toBe(313);
+    expect((merged[0] as { quoteRefId?: string } | undefined)?.quoteRefId).toBe('native-coarse-user');
+  });
+
   it('marks only the first near native user echo as Ghost Sasayaki', () => {
     const nativeFirst = roomMessage({
       id: 'native-near-first',
@@ -100,7 +134,7 @@ describe('Violet room message dedupe', () => {
     });
     const local = localComposerMessage({
       id: 'local-image-prompt',
-      text: 'project-memory/attachments/composer/att_1/original.png same prompt',
+      text: 'project-memory/attachments/composer/att_1/original.png composer prompt',
       targetAgentIds: ['agent-a'],
       timestamp: '2026-06-07T20:00:00.000Z',
     });
@@ -138,11 +172,11 @@ describe('Violet room message dedupe', () => {
       id: 'native-early-echo',
       agentId: 'agent-a',
       text: '[Image #15]button spacing',
-      timestamp: '2026-06-07T20:00:00.000Z',
+      timestamp: '2026-06-07T20:00:00Z',
     });
     const local = localComposerMessage({
       id: 'local-image-prompt',
-      text: 'project-memory/attachments/composer/att_1/original.png button spacing',
+      text: 'project-memory/attachments/composer/att_1/original.png composer button spacing',
       targetAgentIds: ['agent-a'],
       timestamp: '2026-06-07T20:00:02.000Z',
     });

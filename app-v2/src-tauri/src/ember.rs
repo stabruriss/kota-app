@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-use crate::agent_bus::{AgentBusManager, AgentBusSendRequest};
+use crate::agent_bus::{
+    AgentBusManager, AgentBusSendRequest, AgentBusTerminalTiming, AgentBusTimingTrigger,
+};
 use crate::integrations::IntegrationManager;
 use crate::pty::PtyManager;
 use crate::violet::ActorMessageRecord;
@@ -632,9 +634,10 @@ fn deliver_schedule(
                 sender_name: Some(EMBER_ACTOR_NAME.into()),
                 target: target.clone(),
                 intent: Some("reminder".into()),
-                text: render_reminder_prompt(schedule),
+                text: schedule.text.clone(),
                 event_id: Some(event_id.clone()),
                 dedupe_key: Some(event_id),
+                terminal_timing: Some(reminder_terminal_timing(schedule)),
             },
             launch_request,
         );
@@ -662,12 +665,18 @@ fn deliver_schedule(
     Ok(outcome)
 }
 
-fn render_reminder_prompt(schedule: &EmberSchedule) -> String {
-    render_reminder_text(&schedule.text)
-}
-
-fn render_reminder_text(text: &str) -> String {
-    format!("Ember scheduled prompt\n\n{}", text.trim())
+fn reminder_terminal_timing(schedule: &EmberSchedule) -> AgentBusTerminalTiming {
+    if schedule.mode == "idle" || schedule.wait_for_idle.unwrap_or(false) {
+        AgentBusTerminalTiming {
+            trigger: AgentBusTimingTrigger::Idle,
+            scheduled_for: None,
+        }
+    } else {
+        AgentBusTerminalTiming {
+            trigger: AgentBusTimingTrigger::Scheduled,
+            scheduled_for: Some(schedule.next_run_at.clone()),
+        }
+    }
 }
 
 pub(crate) fn deliver_human_reminder(
@@ -698,7 +707,7 @@ pub(crate) fn deliver_human_reminder(
         ActorMessageRecord {
             actor_id: EMBER_ACTOR_ID.into(),
             actor_name: EMBER_ACTOR_NAME.into(),
-            text: render_reminder_text(&text),
+            text: text.clone(),
             target_agent_ids: vec![HUMAN_TELEGRAM_TARGET_ID.into()],
             event_id: event_id.clone(),
             actor_intent: Some("reminder".into()),
@@ -2127,6 +2136,13 @@ fn apply_cli_timing(
         CliTiming::At(value) => {
             let at = parse_local_datetime_or_rfc3339(&value)
                 .ok_or_else(|| anyhow!("invalid --at datetime"))?;
+            if at <= now {
+                bail!(
+                    "--at must be in the future (interpreted as {}; current time is {})",
+                    format_cli_local_datetime(at),
+                    format_cli_local_datetime(now),
+                );
+            }
             schedule.mode = "at".into();
             schedule.at_date_time = Some(at.to_rfc3339());
             schedule.repeat_enabled = Some(false);
@@ -2655,6 +2671,13 @@ fn parse_local_datetime_or_rfc3339(value: &str) -> Option<chrono::DateTime<Utc>>
     None
 }
 
+fn format_cli_local_datetime(value: chrono::DateTime<Utc>) -> String {
+    value
+        .with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S %Z (%a)")
+        .to_string()
+}
+
 fn parse_rfc3339(value: &str) -> Option<chrono::DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
@@ -2914,6 +2937,29 @@ mod tests {
     }
 
     #[test]
+    fn reminder_timing_distinguishes_clock_and_idle_schedules() {
+        let due_at = utc(10, 0, 0);
+        let changed_at = utc(9, 0, 0);
+        let scheduled = schedule_for_reconcile("scheduled", "at", due_at, changed_at);
+        let idle = schedule_for_reconcile("idle", "idle", due_at, changed_at);
+
+        assert_eq!(
+            reminder_terminal_timing(&scheduled),
+            AgentBusTerminalTiming {
+                trigger: AgentBusTimingTrigger::Scheduled,
+                scheduled_for: Some(due_at.to_rfc3339()),
+            }
+        );
+        assert_eq!(
+            reminder_terminal_timing(&idle),
+            AgentBusTerminalTiming {
+                trigger: AgentBusTimingTrigger::Idle,
+                scheduled_for: None,
+            }
+        );
+    }
+
+    #[test]
     fn normalize_schedule_preserves_human_telegram_target_name() {
         let mut schedule = schedule_with_targets(vec![HUMAN_TELEGRAM_TARGET_ID], vec!["human_name"]);
         normalize_schedule(&std::env::temp_dir(), &mut schedule, actor_human()).unwrap();
@@ -2939,6 +2985,39 @@ mod tests {
             Some("human_name".into())
         );
         assert_eq!(human_telegram_target_name_for("human_name", None), None);
+    }
+
+    #[test]
+    fn cli_at_rejects_past_or_current_time_before_mutating_schedule() {
+        let now = utc(12, 0, 0);
+        for at in [utc(11, 59, 59), now] {
+            let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+
+            let error = apply_cli_timing(&mut schedule, Some(CliTiming::At(at.to_rfc3339())), now)
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains("--at must be in the future"));
+            assert!(error.contains(&format_cli_local_datetime(at)));
+            assert!(error.contains(&format_cli_local_datetime(now)));
+            assert_eq!(schedule.mode, "delay");
+            assert!(schedule.at_date_time.is_none());
+        }
+    }
+
+    #[test]
+    fn cli_at_accepts_a_future_time() {
+        let now = utc(12, 0, 0);
+        let at = utc(12, 0, 1);
+        let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+
+        apply_cli_timing(&mut schedule, Some(CliTiming::At(at.to_rfc3339())), now).unwrap();
+
+        let expected = at.to_rfc3339();
+        assert_eq!(schedule.mode, "at");
+        assert_eq!(schedule.at_date_time.as_deref(), Some(expected.as_str()));
+        assert_eq!(schedule.next_run_at, expected);
+        assert_eq!(schedule.repeat_enabled, Some(false));
     }
 
     #[test]

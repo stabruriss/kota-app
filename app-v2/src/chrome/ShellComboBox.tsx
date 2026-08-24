@@ -188,7 +188,7 @@ function shellComboSourceLabel(source: string): string {
   const normalized = source.trim().toLowerCase();
   if (!normalized) return 'Kota';
   if (normalized === 'current' || normalized === 'manual' || normalized === 'typed' || normalized === 'selected') {
-    return 'Manual';
+    return 'Custom';
   }
   if (normalized === 'models.dev' || normalized === 'models-dev' || normalized === 'modelsdev') {
     return 'Models.dev';
