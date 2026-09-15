@@ -71,6 +71,8 @@ export interface InputBarHandle {
   insertAttachment: (attachment: ComposerAttachment) => void;
   insertQuote: (quote: RoomQuoteReference) => RoomQuoteInsertResult;
   serialize: () => { payload: string; mentions: ComposerMention[] };
+  /** BBS-only metadata channel. The room serializer above deliberately stays unchanged. */
+  serializeBbs: () => { body: string; mentions: ComposerMention[]; attachments: ComposerAttachment[] };
   clear: () => void;
 }
 
@@ -450,6 +452,7 @@ function createAttachmentChip(attachment: ComposerAttachment): HTMLElement {
   chip.dataset.ibAttachment = 'true';
   chip.dataset.path = attachment.path;
   chip.dataset.kind = attachment.kind ?? 'file';
+  chip.dataset.name = attachment.name || basename(attachment.path);
   if (attachment.kind === 'prompt') chip.dataset.ibPrefixPrompt = 'true';
   if (attachment.previewUrl) chip.dataset.previewUrl = attachment.previewUrl;
   if (attachment.prompt) chip.dataset.prompt = attachment.prompt;
@@ -811,6 +814,17 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     serialize: () => ({
       payload: serializeEditor(fieldRef.current, quotesRef.current).trimEnd(),
       mentions: collectMentions(fieldRef.current),
+    }),
+    serializeBbs: () => ({
+      body: editorPlainText(fieldRef.current).trimEnd(),
+      mentions: collectMentions(fieldRef.current),
+      attachments: Array.from(fieldRef.current?.querySelectorAll<HTMLElement>(ATTACHMENT_SELECTOR) ?? [])
+        .filter((chip) => !!chip.dataset.path && chip.dataset.kind !== 'prompt')
+        .map((chip) => ({
+          path: chip.dataset.path!,
+          name: chip.dataset.name,
+          kind: chip.dataset.kind as ComposerAttachment['kind'],
+        })),
     }),
     clear: clearDraft,
   }), [clearDraft, insertAttachment, insertPaths, insertQuote]);

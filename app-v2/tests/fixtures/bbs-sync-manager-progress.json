@@ -1,0 +1,104 @@
+[
+  {
+    "protocolVersion": 1,
+    "device": {
+      "id": "device-one",
+      "name": "This device"
+    },
+    "worker": {
+      "configured": false,
+      "canCreateGroup": false
+    },
+    "group": {
+      "id": "group-one",
+      "name": null,
+      "role": "member",
+      "members": [
+        {
+          "id": "peer",
+          "name": "Peer",
+          "role": "owner",
+          "online": true,
+          "publicKey": "public-only"
+        }
+      ]
+    },
+    "invitation": "none",
+    "invitationGeneration": null,
+    "sync": {
+      "phase": "syncing",
+      "completed": 0,
+      "total": 3,
+      "lastSuccessfulAt": "2000-01-01T00:00:00Z",
+      "error": null
+    }
+  },
+  {
+    "protocolVersion": 1,
+    "device": {
+      "id": "device-one",
+      "name": "This device"
+    },
+    "worker": {
+      "configured": false,
+      "canCreateGroup": false
+    },
+    "group": {
+      "id": "group-one",
+      "name": null,
+      "role": "member",
+      "members": [
+        {
+          "id": "peer",
+          "name": "Peer",
+          "role": "owner",
+          "online": true,
+          "publicKey": "public-only"
+        }
+      ]
+    },
+    "invitation": "none",
+    "invitationGeneration": null,
+    "sync": {
+      "phase": "syncing",
+      "completed": 1,
+      "total": 3,
+      "lastSuccessfulAt": "2000-01-01T00:00:00Z",
+      "error": null
+    }
+  },
+  {
+    "protocolVersion": 1,
+    "device": {
+      "id": "device-one",
+      "name": "This device"
+    },
+    "worker": {
+      "configured": false,
+      "canCreateGroup": false
+    },
+    "group": {
+      "id": "group-one",
+      "name": null,
+      "role": "member",
+      "members": [
+        {
+          "id": "peer",
+          "name": "Peer",
+          "role": "owner",
+          "online": true,
+          "publicKey": "public-only"
+        }
+      ]
+    },
+    "invitation": "none",
+    "invitationGeneration": null,
+    "sync": {
+      "phase": "syncing",
+      "completed": 3,
+      "total": 3,
+      "lastSuccessfulAt": "2000-01-01T00:00:00Z",
+      "error": null
+    }
+  }
+]

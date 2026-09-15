@@ -1,15 +1,18 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { DurableObject } from 'cloudflare:workers';
+import { BbsGroup, routeBbs } from './bbs_group';
+export { BbsGroup } from './bbs_group';
 
-const RELAY_VERSION = '0.1.2';
+const RELAY_VERSION = '0.1.3';
 const PROTOCOL_VERSION = 'kota-lm-standby.v1';
 const ONLINE_GRACE_MS = 90_000;
 const MAX_PULL_LIMIT = 50;
 const QUEUE_PREFIX = 'queue:';
 
-interface Env {
+export interface Env {
   RELAY_STATE: DurableObjectNamespace<RelayState>;
+  BBS_GROUP: DurableObjectNamespace<BbsGroup>;
 }
 
 interface TelegramUpdate {
@@ -341,6 +344,13 @@ export class RelayState extends DurableObject<Env> {
 
   private async isPaired(): Promise<boolean> {
     return Boolean(await this.getConfig('desktopSecret'));
+  }
+
+  // Read-only RPC: BBS owner management reuses the existing paired credential.
+  // No BBS state is stored in RelayState or exposed through an HTTP auth endpoint.
+  async authorizeBbsOwner(secret: string): Promise<boolean> {
+    const expected = await this.getConfig('desktopSecret');
+    return Boolean(expected && expected === secret);
   }
 
   private async desktopOnline(): Promise<boolean> {
@@ -696,6 +706,7 @@ export class RelayState extends DurableObject<Env> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    if (new URL(request.url).pathname.startsWith('/bbs/')) return routeBbs(request, env);
     const id = env.RELAY_STATE.idFromName('kota-laughing-man-standby');
     return env.RELAY_STATE.get(id).fetch(request);
   },

@@ -815,6 +815,7 @@ export function TavernModal({
   const saveRuleTimerRef = useRef<number | null>(null);
   const saveRuleSeqRef = useRef(0);
   const systemPromptLoadRef = useRef<Promise<void> | null>(null);
+  const systemPromptsLoadedRef = useRef(systemPromptsLoaded);
   const mountedRef = useRef(false);
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
 
@@ -893,27 +894,34 @@ export function TavernModal({
     onGhosttyTerminalEnhancementChange?.(status.ghosttyTerminalEnhancementEnabled);
   }, [onGhosttyTerminalEnhancementChange]);
 
-  const loadSystemPrompts = useCallback(() => {
-    if (systemPromptsLoaded) return Promise.resolve();
+  const refreshSystemPrompts = useCallback(() => {
     if (systemPromptLoadRef.current) return systemPromptLoadRef.current;
-    setTaskLoading('prompts', true);
+    const showLoading = !systemPromptsLoadedRef.current;
+    if (showLoading) setTaskLoading('prompts', true);
     const task = loadSystemPromptTemplates()
       .then((templates) => {
         if (!mountedRef.current) return;
         setSystemPromptTemplates(templates);
+        systemPromptsLoadedRef.current = true;
         setSystemPromptsLoaded(true);
       })
       .catch((err) => {
         if (!mountedRef.current) return;
         setError(String(err));
-        systemPromptLoadRef.current = null;
       })
       .finally(() => {
-        if (mountedRef.current) setTaskLoading('prompts', false);
+        systemPromptLoadRef.current = null;
+        if (showLoading && mountedRef.current) setTaskLoading('prompts', false);
       });
     systemPromptLoadRef.current = task;
     return task;
-  }, [setTaskLoading, systemPromptsLoaded]);
+  }, [setTaskLoading]);
+
+  const loadSystemPrompts = useCallback(() => {
+    if (systemPromptLoadRef.current) return systemPromptLoadRef.current;
+    if (systemPromptsLoadedRef.current) return Promise.resolve();
+    return refreshSystemPrompts();
+  }, [refreshSystemPrompts]);
 
   useEffect(() => {
     if (!open) return;
@@ -923,6 +931,7 @@ export function TavernModal({
     setLoadingTasks({});
     setHeroFilesReady(false);
     lastSavedProfilesPayloadRef.current = null;
+    void refreshSystemPrompts();
     let cancelled = false;
     const applyProfiles = (savedProfiles: TavernHeroProfileDraft[]) => {
       const synced = tavernStateFromProfiles(savedProfiles);
@@ -989,6 +998,7 @@ export function TavernModal({
     refreshAccount,
     refreshAccountUser,
     refreshShells,
+    refreshSystemPrompts,
     setTaskLoading,
   ]);
 
@@ -1408,7 +1418,7 @@ export function TavernModal({
   const selectSystemHero = (id: SystemHeroId) => {
     setGhostExpanded(false);
     setProfileTarget({ type: 'system', id });
-    void loadSystemPrompts();
+    void refreshSystemPrompts();
   };
 
   const selectProvider = (hero: AgentCardSpec, nextProviderId: ProviderId) => {

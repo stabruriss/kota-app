@@ -8,6 +8,10 @@
       {
         "name": "RELAY_STATE",
         "class_name": "RelayState"
+      },
+      {
+        "name": "BBS_GROUP",
+        "class_name": "BbsGroup"
       }
     ]
   },
@@ -15,6 +19,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["RelayState"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["BbsGroup"]
     }
   ]
 }

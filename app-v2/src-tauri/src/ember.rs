@@ -31,8 +31,12 @@ const HUMAN_TELEGRAM_TARGET_ID: &str = "__kota_human_telegram__";
 const MAX_DRAFTS: usize = 20;
 const MAX_SCHEDULES: usize = 40;
 const MAX_HISTORY: usize = 120;
-const DELIVERY_GRACE_SECONDS: i64 = 120;
+const LATE_DELIVERY_WINDOW_SECONDS: i64 = 86_400;
+const LATE_DELIVERY_PREFIX_SECONDS: i64 = 300;
+const TICK_GAP_LOG_SECONDS: i64 = 60;
 const NOT_DELIVERED: &str = "Not Delivered";
+
+static LAST_TICK: Mutex<Option<(chrono::DateTime<Utc>, Instant)>> = Mutex::new(None);
 
 #[derive(Debug, Default)]
 struct EmberDeliveryOutcome {
@@ -284,6 +288,7 @@ struct CliSchedulePatch {
 #[derive(Clone, Debug)]
 enum CliTiming {
     Delay(String),
+    Every(String),
     At(String),
     Idle,
     Cron(String),
@@ -464,6 +469,20 @@ pub fn scheduler_tick(
     project_roots: &[String],
     working_agent_ids: &[String],
 ) -> Result<EmberSchedulerTickResult> {
+    let tick_started_at = Utc::now();
+    let tick_started_mono = Instant::now();
+    let gap_line = {
+        let mut last_tick = LAST_TICK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let line = tick_gap_line(last_tick.clone(), tick_started_at, tick_started_mono);
+        *last_tick = Some((tick_started_at, tick_started_mono));
+        line
+    };
+    if let Some(line) = gap_line {
+        crate::kota_debug_log(&line);
+    }
+
     let mut checked_projects = 0usize;
     let mut fired = 0usize;
     let mut failed = 0usize;
@@ -561,11 +580,36 @@ pub fn scheduler_tick(
             }
         }
     }
+    let elapsed = tick_started_mono.elapsed();
+    if elapsed > Duration::from_secs(5) {
+        crate::kota_debug_log(&format!(
+            "[ember] slow tick {}ms projects={checked_projects} fired={fired}",
+            elapsed.as_millis()
+        ));
+    }
     Ok(EmberSchedulerTickResult {
         checked_projects,
         fired,
         failed,
     })
+}
+
+fn tick_gap_line(
+    previous: Option<(chrono::DateTime<Utc>, Instant)>,
+    now: chrono::DateTime<Utc>,
+    now_mono: Instant,
+) -> Option<String> {
+    let (previous_wall, previous_mono) = previous?;
+    let wall_seconds = now.signed_duration_since(previous_wall).num_seconds();
+    if wall_seconds < TICK_GAP_LOG_SECONDS {
+        return None;
+    }
+    let mono_seconds = now_mono
+        .saturating_duration_since(previous_mono)
+        .as_secs();
+    Some(format!(
+        "[ember] tick gap wall={wall_seconds}s mono={mono_seconds}s (expected ~10s)"
+    ))
 }
 
 fn deliver_schedule(
@@ -590,13 +634,14 @@ fn deliver_schedule(
             .unwrap_or_else(|| target.clone());
         if is_human_telegram_target(target) {
             let event_id = ember_event_id("reminder", &schedule.id, target);
+            let text = human_reminder_text(schedule, Utc::now());
             match deliver_human_reminder(
                 app,
                 project_root,
                 EmberHumanReminderRequest {
                     project_root: Some(path_string(project_root)),
                     event_id,
-                    text: schedule.text.clone(),
+                    text,
                 },
             ) {
                 Ok(result) if result.delivered => {
@@ -663,6 +708,38 @@ fn deliver_schedule(
         );
     }
     Ok(outcome)
+}
+
+fn human_reminder_text(schedule: &EmberSchedule, now: chrono::DateTime<Utc>) -> String {
+    if schedule.mode == "idle" || schedule.wait_for_idle.unwrap_or(false) {
+        return schedule.text.clone();
+    }
+    parse_rfc3339(&schedule.next_run_at)
+        .and_then(|scheduled_for| late_delivery_prefix(scheduled_for, now))
+        .map(|prefix| format!("{prefix}\n{}", schedule.text))
+        .unwrap_or_else(|| schedule.text.clone())
+}
+
+fn late_delivery_prefix(
+    scheduled_for: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> Option<String> {
+    let late_seconds = now.signed_duration_since(scheduled_for).num_seconds();
+    if late_seconds < LATE_DELIVERY_PREFIX_SECONDS {
+        return None;
+    }
+    let late_minutes = late_seconds / 60;
+    let duration = if late_minutes < 60 {
+        format!("{late_minutes} min")
+    } else {
+        format!("{} h {} min", late_minutes / 60, late_minutes % 60)
+    };
+    let scheduled_for = scheduled_for
+        .with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M %Z (%a)");
+    Some(format!(
+        "[Late reminder] Scheduled for {scheduled_for}, delivered {duration} late."
+    ))
 }
 
 fn reminder_terminal_timing(schedule: &EmberSchedule) -> AgentBusTerminalTiming {
@@ -827,7 +904,7 @@ fn reconcile_overdue_not_delivered(
     state: &mut EmberStateFile,
     now: chrono::DateTime<Utc>,
 ) -> usize {
-    let overdue_before = now - chrono::Duration::seconds(DELIVERY_GRACE_SECONDS);
+    let overdue_before = now - chrono::Duration::seconds(LATE_DELIVERY_WINDOW_SECONDS);
     let mut missed = Vec::new();
     for schedule in &mut state.schedules {
         if schedule.status != "scheduled" || schedule.wait_for_idle.unwrap_or(false) {
@@ -839,7 +916,8 @@ fn reconcile_overdue_not_delivered(
         if next_due > overdue_before {
             continue;
         }
-        let missed_count = count_missed_runs(schedule, overdue_before).max(1);
+        let (missed_count, first_unmissed_next_run_at) =
+            count_missed_runs(schedule, overdue_before, now);
         missed.push((schedule.clone(), missed_count, next_due));
         if schedule_should_continue(
             schedule,
@@ -848,8 +926,9 @@ fn reconcile_overdue_not_delivered(
         ) {
             schedule.run_count = schedule.run_count.saturating_add(missed_count);
             schedule.last_run_at = Some(now.to_rfc3339());
-            schedule.next_run_at =
-                next_run_after(schedule, now).unwrap_or_else(|| now.to_rfc3339());
+            schedule.next_run_at = first_unmissed_next_run_at
+                .or_else(|| next_run_after(schedule, now))
+                .unwrap_or_else(|| now.to_rfc3339());
             schedule.updated_at = now.to_rfc3339();
             schedule.error = Some(NOT_DELIVERED.into());
         } else {
@@ -877,22 +956,33 @@ fn reconcile_overdue_not_delivered(
     missed_count
 }
 
-fn count_missed_runs(schedule: &EmberSchedule, now: chrono::DateTime<Utc>) -> u32 {
+fn count_missed_runs(
+    schedule: &EmberSchedule,
+    overdue_before: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> (u32, Option<String>) {
     if !is_repeating(schedule) {
-        return 1;
+        return (1, None);
     }
     let mut count = 0u32;
     let mut cursor = schedule.clone();
-    while parse_rfc3339(&cursor.next_run_at).is_some_and(|due| due <= now) && count < 500 {
+    loop {
+        let Some(due) = parse_rfc3339(&cursor.next_run_at) else {
+            return (count.max(1), next_run_after(schedule, now));
+        };
+        if due > overdue_before {
+            return (count.max(1), Some(cursor.next_run_at));
+        }
+        if count >= 500 {
+            return (count.max(1), next_run_after(schedule, now));
+        }
         count = count.saturating_add(1);
         cursor.run_count = cursor.run_count.saturating_add(1);
-        let Some(next) = next_run_after(&cursor, parse_rfc3339(&cursor.next_run_at).unwrap_or(now))
-        else {
-            break;
+        let Some(next) = next_run_after(&cursor, due) else {
+            return (count.max(1), next_run_after(schedule, now));
         };
         cursor.next_run_at = next;
     }
-    count.max(1)
 }
 
 fn history_for_schedule(
@@ -1857,6 +1947,8 @@ fn cli_update(args: Vec<String>) -> Result<()> {
         .into_iter()
         .find(|schedule| schedule.id == id)
         .ok_or_else(|| anyhow!("Ember schedule not found: {id}"))?;
+    let previous_error = schedule.error.clone();
+    let rearmed = apply_cli_update_timing(&mut schedule, patch.timing, Utc::now())?;
     if let Some(text) = patch.text {
         if !text.trim().is_empty() {
             schedule.text = text.trim().into();
@@ -1864,9 +1956,6 @@ fn cli_update(args: Vec<String>) -> Result<()> {
     }
     if let Some(targets) = patch.targets {
         schedule.target_agent_ids = targets;
-    }
-    if patch.timing.is_some() {
-        apply_cli_timing(&mut schedule, patch.timing, Utc::now())?;
     }
     if let Some(end_after) = patch.end_after {
         schedule.end_mode = Some("after".into());
@@ -1886,6 +1975,13 @@ fn cli_update(args: Vec<String>) -> Result<()> {
     normalize_schedule(&project_root, &mut schedule, actor_agent())?;
     enqueue_dispatch(&project_root, "upsert", Some(schedule.clone()), None)?;
     println!("{}", schedule.id);
+    if rearmed {
+        if let Some(error) = previous_error {
+            println!("re-armed: previous status was failed ({error})");
+        } else {
+            println!("re-armed: previous status was failed");
+        }
+    }
     println!("interpreted as: {}", schedule_interpretation(&schedule));
     Ok(())
 }
@@ -1951,7 +2047,7 @@ fn cli_item_id(args: &[String]) -> Option<&String> {
 fn is_schedule_only_argument(arg: &str) -> bool {
     matches!(
         arg,
-        "--to" | "--in" | "--at" | "--idle" | "--cron" | "--end-after" | "--end-at"
+        "--to" | "--in" | "--every" | "--at" | "--idle" | "--cron" | "--end-after" | "--end-at"
     )
 }
 
@@ -2035,6 +2131,14 @@ fn parse_cli_patch(args: Vec<String>, require_body: bool) -> Result<CliScheduleP
     let mut end_at = None;
     let mut i = 0;
     while i < args.len() {
+        if timing.is_some()
+            && matches!(
+                args[i].as_str(),
+                "--in" | "--every" | "--at" | "--idle" | "--cron"
+            )
+        {
+            bail!("use only one timing option: --in, --every, --at, --idle, or --cron");
+        }
         match args[i].as_str() {
             "--to" => {
                 i += 1;
@@ -2055,6 +2159,15 @@ fn parse_cli_patch(args: Vec<String>, require_body: bool) -> Result<CliScheduleP
                 timing = Some(CliTiming::Delay(
                     args.get(i)
                         .ok_or_else(|| anyhow!("--in requires a duration"))?
+                        .clone(),
+                ));
+                i += 1;
+            }
+            "--every" => {
+                i += 1;
+                timing = Some(CliTiming::Every(
+                    args.get(i)
+                        .ok_or_else(|| anyhow!("--every requires a duration"))?
                         .clone(),
                 ));
                 i += 1;
@@ -2119,6 +2232,34 @@ fn parse_cli_patch(args: Vec<String>, require_body: bool) -> Result<CliScheduleP
     })
 }
 
+fn apply_cli_update_timing(
+    schedule: &mut EmberSchedule,
+    timing: Option<CliTiming>,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool> {
+    let has_timing = timing.is_some();
+    if schedule.status == "failed" && !has_timing {
+        let error = schedule.error.as_deref().unwrap_or("unknown error");
+        bail!(
+            "Ember schedule {} is failed ({error}); pass --at, --in, --every, --idle, or --cron to re-arm it, or delete it and add a new one",
+            schedule.id
+        );
+    }
+    if has_timing {
+        apply_cli_timing(schedule, timing, now)?;
+    }
+    Ok(has_timing && rearm_failed_schedule(schedule))
+}
+
+fn rearm_failed_schedule(schedule: &mut EmberSchedule) -> bool {
+    if schedule.status != "failed" {
+        return false;
+    }
+    schedule.status = "scheduled".into();
+    schedule.error = None;
+    true
+}
+
 fn apply_cli_timing(
     schedule: &mut EmberSchedule,
     timing: Option<CliTiming>,
@@ -2131,6 +2272,16 @@ fn apply_cli_timing(
             schedule.delay_amount = Some(minutes.max(1));
             schedule.delay_unit = Some("minutes".into());
             schedule.repeat_enabled = Some(false);
+            schedule.next_run_at = (now + chrono::Duration::minutes(minutes as i64)).to_rfc3339();
+        }
+        CliTiming::Every(value) => {
+            let minutes = parse_duration_minutes(&value)?;
+            schedule.mode = "delay".into();
+            schedule.delay_amount = Some(minutes);
+            schedule.delay_unit = Some("minutes".into());
+            schedule.repeat_enabled = Some(true);
+            schedule.repeat_kind = Some("fixed".into());
+            schedule.repeat_every_minutes = Some(minutes);
             schedule.next_run_at = (now + chrono::Duration::minutes(minutes as i64)).to_rfc3339();
         }
         CliTiming::At(value) => {
@@ -2150,13 +2301,13 @@ fn apply_cli_timing(
         }
         CliTiming::Idle => {
             schedule.mode = "idle".into();
-            schedule.wait_for_idle = Some(true);
             schedule.repeat_enabled = Some(false);
             schedule.next_run_at = now.to_rfc3339();
         }
         CliTiming::Cron(expr) => apply_cron(schedule, &expr, now)?,
     }
-    if schedule.end_after_count.is_some() && schedule.repeat_enabled.unwrap_or(false) {
+    schedule.wait_for_idle = Some(schedule.mode == "idle");
+    if schedule.end_after_count.is_some() && is_repeating(schedule) {
         schedule.end_mode = Some("after".into());
     }
     if let Some(end_at) = schedule.end_at.clone() {
@@ -2287,6 +2438,11 @@ fn parse_month_days(value: &str) -> Result<Vec<String>> {
 }
 
 fn schedule_interpretation(schedule: &EmberSchedule) -> String {
+    if schedule.repeat_enabled.unwrap_or(false) && schedule.repeat_kind.as_deref() == Some("fixed") {
+        if let Some(minutes) = schedule.repeat_every_minutes {
+            return format!("every {minutes} minutes");
+        }
+    }
     match schedule.mode.as_str() {
         "idle" => "when targets are idle".into(),
         "delay" => format!(
@@ -2450,7 +2606,7 @@ fn print_cli_usage() {
     eprintln!("Kota Ember CLI");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  kota-ember add --to <agent-or-human[,agent-or-human...]> (--in <duration> | --at <local time> | --idle | --cron <expr>) <<'EOF'");
+    eprintln!("  kota-ember add --to <agent-or-human[,agent-or-human...]> (--in <duration> | --every <duration> | --at <local time> | --idle | --cron <expr>) <<'EOF'");
     eprintln!("  kota-ember add --draft <<'EOF'");
     eprintln!("  kota-ember list [--json]");
     eprintln!("  kota-ember list --draft [--json]");
@@ -2467,12 +2623,17 @@ fn print_cli_usage() {
     eprintln!();
     eprintln!("Timing:");
     eprintln!("  --in <duration>       Delay such as 10m, 2h, or 1d.");
+    eprintln!("  --every <duration>    Repeat at a fixed interval such as 10m, 2h, or 1d (minimum 1m).");
     eprintln!("  --at <local time>     Local datetime such as \"2026-06-18 14:00\".");
     eprintln!("  --idle                Deliver when the target is idle.");
     eprintln!("  --cron <expr>         Supported cron expression.");
-    eprintln!("  --end-after <count>   Stop a repeating schedule after count runs.");
+    eprintln!("  --end-after <count>   Stop a repeating schedule after count total runs (including completed or missed runs).");
     eprintln!("  --end-at <time>       Stop a repeating schedule at a local/RFC3339 datetime.");
     eprintln!("  --project-root <dir>  Override project root detection.");
+    eprintln!();
+    eprintln!("  Choose one timing option for add or update.");
+    eprintln!("  --every first runs one interval after add/update, then repeats from each actual delivery.");
+    eprintln!("  Without --end-after or --end-at, --every repeats indefinitely; update preserves existing limits.");
     eprintln!();
     eprintln!("Draft notes:");
     eprintln!(
@@ -2497,6 +2658,7 @@ fn print_cli_usage() {
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  printf 'Review the release notes' | kota-ember add --to Gem --in 2h");
+    eprintln!("  printf 'Check progress twice' | kota-ember add --to Gem --every 2h --end-after 2");
     eprintln!("  kota-ember add --to '<your-name>' --at \"2026-06-18 14:00\" <<'EOF'");
     eprintln!("  Discuss whether human Ember reminders should use Cloudflare.");
     eprintln!("  EOF");
@@ -2937,6 +3099,38 @@ mod tests {
     }
 
     #[test]
+    fn tick_gap_line_ignores_first_tick() {
+        assert_eq!(tick_gap_line(None, utc(10, 0, 0), Instant::now()), None);
+    }
+
+    #[test]
+    fn tick_gap_line_ignores_fifty_nine_seconds() {
+        let now = utc(10, 0, 0);
+        let now_mono = Instant::now();
+        let previous = (
+            now - chrono::Duration::seconds(59),
+            now_mono - Duration::from_secs(59),
+        );
+
+        assert_eq!(tick_gap_line(Some(previous), now, now_mono), None);
+    }
+
+    #[test]
+    fn tick_gap_line_reports_wall_and_monotonic_intervals() {
+        let now = utc(10, 0, 0);
+        let now_mono = Instant::now();
+        let previous = (
+            now - chrono::Duration::seconds(190),
+            now_mono - Duration::from_secs(12),
+        );
+
+        assert_eq!(
+            tick_gap_line(Some(previous), now, now_mono).as_deref(),
+            Some("[ember] tick gap wall=190s mono=12s (expected ~10s)")
+        );
+    }
+
+    #[test]
     fn reminder_timing_distinguishes_clock_and_idle_schedules() {
         let due_at = utc(10, 0, 0);
         let changed_at = utc(9, 0, 0);
@@ -3018,6 +3212,240 @@ mod tests {
         assert_eq!(schedule.at_date_time.as_deref(), Some(expected.as_str()));
         assert_eq!(schedule.next_run_at, expected);
         assert_eq!(schedule.repeat_enabled, Some(false));
+    }
+
+    #[test]
+    fn cli_every_repeats_from_actual_delivery_and_stops() {
+        for lateness in [0, 3] {
+            let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+            schedule.end_after_count = Some(2);
+            apply_cli_timing(
+                &mut schedule,
+                Some(CliTiming::Every("2h".into())),
+                utc(10, 20, 0),
+            )
+            .unwrap();
+            assert_eq!(schedule.next_run_at, utc(12, 20, 0).to_rfc3339());
+            assert_eq!(schedule_interpretation(&schedule), "every 120 minutes");
+            let mut state = empty_state();
+            state.schedules.push(schedule.clone());
+
+            let first_delivery = utc(12, 20, 0) + chrono::Duration::minutes(lateness);
+            mark_schedule_delivered(&mut state, &schedule, first_delivery);
+            assert_eq!(state.schedules.len(), 1);
+            assert_eq!(state.schedules[0].run_count, 1);
+            let second = state.schedules[0].clone();
+            let next = parse_rfc3339(&second.next_run_at).unwrap();
+            assert_eq!(next, first_delivery + chrono::Duration::hours(2));
+
+            mark_schedule_delivered(&mut state, &second, next);
+            assert!(state.schedules.is_empty());
+        }
+    }
+
+    #[test]
+    fn cli_every_rejects_invalid_duration_without_mutating_schedule() {
+        for value in ["0h", "-1h", "1.5h", "2hr", "invalid"] {
+            let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+            let before = serde_json::to_value(&schedule).unwrap();
+            assert!(apply_cli_timing(
+                &mut schedule,
+                Some(CliTiming::Every(value.into())),
+                utc(10, 20, 0),
+            )
+            .is_err());
+            assert_eq!(serde_json::to_value(&schedule).unwrap(), before, "{value}");
+        }
+    }
+
+    #[test]
+    fn cli_every_update_replaces_idle_or_calendar_timing_and_keeps_run_count() {
+        for previous in [
+            CliTiming::Idle,
+            CliTiming::Cron("0 9 * * MON".into()),
+            CliTiming::Cron("0 9 1 * *".into()),
+        ] {
+            let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+            apply_cli_timing(&mut schedule, Some(previous), utc(9, 0, 0)).unwrap();
+            schedule.status = "failed".into();
+            schedule.error = Some(NOT_DELIVERED.into());
+            schedule.run_count = 1;
+            schedule.end_after_count = Some(3);
+
+            assert!(apply_cli_update_timing(
+                &mut schedule,
+                Some(CliTiming::Every("2h".into())),
+                utc(10, 20, 0),
+            )
+            .unwrap());
+            assert_eq!(schedule.status, "scheduled");
+            assert!(schedule.error.is_none());
+            assert_eq!(schedule.wait_for_idle, Some(false));
+            assert_eq!(schedule.next_run_at, utc(12, 20, 0).to_rfc3339());
+            assert_eq!(
+                next_run_after(&schedule, utc(12, 23, 0)),
+                Some(utc(14, 23, 0).to_rfc3339())
+            );
+            assert_eq!(schedule.run_count, 1);
+            assert_eq!(schedule.end_mode.as_deref(), Some("after"));
+            assert_eq!(schedule.end_after_count, Some(3));
+        }
+    }
+
+    #[test]
+    fn cli_every_requires_a_duration_and_rejects_multiple_timing_options() {
+        let error = parse_cli_patch(vec!["--every".into()], false).unwrap_err();
+        assert!(error.to_string().contains("--every requires a duration"));
+        for other in [
+            vec!["--in", "1h"],
+            vec!["--at", "2026-06-13 09:00"],
+            vec!["--idle"],
+            vec!["--cron", "0 9 * * *"],
+            vec!["--every", "1h"],
+        ] {
+            let every = vec!["--every", "2h"];
+            for args in [
+                [every.clone(), other.clone()].concat(),
+                [other.clone(), every.clone()].concat(),
+            ] {
+                let error = parse_cli_patch(args.into_iter().map(str::to_string).collect(), false)
+                    .unwrap_err();
+                assert!(error.to_string().contains("use only one timing option"));
+            }
+        }
+    }
+
+    #[test]
+    fn cli_cron_end_after_stops_after_requested_runs() {
+        for expr in ["0 9 * * *", "0 9 * * MON", "0 9 1 * *"] {
+            for count in [1, 2] {
+                let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+                schedule.end_after_count = Some(count);
+                apply_cli_timing(
+                    &mut schedule,
+                    Some(CliTiming::Cron(expr.into())),
+                    utc(12, 0, 0),
+                )
+                .unwrap();
+                let mut state = empty_state();
+                state.schedules.push(schedule);
+
+                for completed in 1..=count {
+                    let pending = state.schedules[0].clone();
+                    let due = parse_rfc3339(&pending.next_run_at).unwrap();
+                    mark_schedule_delivered(&mut state, &pending, due);
+
+                    if completed < count {
+                        assert_eq!(state.schedules.len(), 1, "{expr}");
+                        assert_eq!(state.schedules[0].run_count, completed, "{expr}");
+                        assert!(parse_rfc3339(&state.schedules[0].next_run_at).unwrap() > due);
+                    } else {
+                        assert!(
+                            state.schedules.is_empty(),
+                            "{expr} must stop after {count} runs"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cli_update_from_idle_uses_scheduled_delivery_for_clock_timing() {
+        let now = utc(10, 20, 0);
+        for timing in [
+            CliTiming::Delay("10m".into()),
+            CliTiming::Every("2h".into()),
+            CliTiming::At(utc(11, 20, 0).to_rfc3339()),
+            CliTiming::Cron("0 9 * * *".into()),
+            CliTiming::Cron("0 9 * * MON".into()),
+            CliTiming::Cron("0 9 1 * *".into()),
+        ] {
+            let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+            apply_cli_timing(&mut schedule, Some(CliTiming::Idle), now).unwrap();
+            apply_cli_update_timing(&mut schedule, Some(timing), now).unwrap();
+
+            assert_eq!(schedule.wait_for_idle, Some(false));
+            assert_eq!(
+                reminder_terminal_timing(&schedule),
+                AgentBusTerminalTiming {
+                    trigger: AgentBusTimingTrigger::Scheduled,
+                    scheduled_for: Some(schedule.next_run_at.clone()),
+                }
+            );
+
+            apply_cli_update_timing(&mut schedule, Some(CliTiming::Idle), now).unwrap();
+            assert_eq!(schedule.wait_for_idle, Some(true));
+            assert_eq!(
+                reminder_terminal_timing(&schedule),
+                AgentBusTerminalTiming {
+                    trigger: AgentBusTimingTrigger::Idle,
+                    scheduled_for: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn cli_update_rearms_failed_schedule_when_timing_given() {
+        let now = utc(12, 0, 0);
+        let at = utc(12, 30, 0);
+        let last_run_at = utc(11, 0, 0).to_rfc3339();
+        let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+        schedule.status = "failed".into();
+        schedule.error = Some(NOT_DELIVERED.into());
+        schedule.run_count = 3;
+        schedule.last_run_at = Some(last_run_at.clone());
+
+        let rearmed = apply_cli_update_timing(
+            &mut schedule,
+            Some(CliTiming::At(at.to_rfc3339())),
+            now,
+        )
+        .unwrap();
+
+        assert!(rearmed);
+        assert_eq!(schedule.status, "scheduled");
+        assert!(schedule.error.is_none());
+        assert_eq!(schedule.run_count, 3);
+        assert_eq!(schedule.last_run_at.as_deref(), Some(last_run_at.as_str()));
+        assert_eq!(schedule.next_run_at, at.to_rfc3339());
+    }
+
+    #[test]
+    fn cli_update_rejects_failed_schedule_without_timing() {
+        let now = utc(12, 0, 0);
+        let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+        schedule.status = "failed".into();
+        schedule.error = Some(NOT_DELIVERED.into());
+        let before = serde_json::to_value(&schedule).unwrap();
+
+        let error = apply_cli_update_timing(&mut schedule, None, now)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("schedule-test is failed (Not Delivered)"));
+        assert!(error.contains("pass --at, --in, --every, --idle, or --cron to re-arm it"));
+        assert_eq!(serde_json::to_value(&schedule).unwrap(), before);
+    }
+
+    #[test]
+    fn cli_update_keeps_paused_schedule_paused() {
+        let now = utc(12, 0, 0);
+        let at = utc(12, 30, 0);
+        let mut schedule = schedule_with_targets(vec!["agent-one"], vec!["Agent One"]);
+        schedule.status = "paused".into();
+
+        let rearmed = apply_cli_update_timing(
+            &mut schedule,
+            Some(CliTiming::At(at.to_rfc3339())),
+            now,
+        )
+        .unwrap();
+
+        assert!(!rearmed);
+        assert_eq!(schedule.status, "paused");
+        assert_eq!(schedule.next_run_at, at.to_rfc3339());
     }
 
     #[test]
@@ -3368,6 +3796,17 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("does not accept schedule argument: --at"));
+        assert!(validate_draft_add_args(&["--draft".into(), "--every".into(), "2h".into()])
+            .unwrap_err()
+            .to_string()
+            .contains("does not accept schedule argument: --every"));
+        assert!(validate_draft_update_args(
+            &["draft-one".into(), "--every".into(), "2h".into()],
+            "draft-one"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("does not accept schedule argument: --every"));
     }
 
     #[test]
@@ -3392,13 +3831,13 @@ mod tests {
     }
 
     #[test]
-    fn overdue_reconcile_honors_full_two_minute_grace() {
-        let changed_at = utc(9, 50, 0);
-        let due_at = utc(10, 1, 1);
+    fn overdue_reconcile_honors_full_twenty_four_hour_window() {
         let now = utc(10, 3, 0);
+        let due_at = now - chrono::Duration::hours(24) + chrono::Duration::seconds(1);
+        let changed_at = due_at - chrono::Duration::minutes(10);
         let mut state = empty_state();
         state.schedules.push(schedule_for_reconcile(
-            "schedule-in-grace",
+            "schedule-in-window",
             "delay",
             due_at,
             changed_at,
@@ -3413,10 +3852,10 @@ mod tests {
     }
 
     #[test]
-    fn overdue_reconcile_marks_schedule_not_delivered_at_two_minutes() {
-        let changed_at = utc(9, 50, 0);
-        let due_at = utc(10, 1, 0);
+    fn overdue_reconcile_marks_schedule_not_delivered_at_twenty_four_hours() {
         let now = utc(10, 3, 0);
+        let due_at = now - chrono::Duration::hours(24);
+        let changed_at = due_at - chrono::Duration::minutes(10);
         let mut state = empty_state();
         state.schedules.push(schedule_for_reconcile(
             "schedule-overdue",
@@ -3443,9 +3882,10 @@ mod tests {
 
     #[test]
     fn overdue_reconcile_keeps_repeating_schedule_active_and_flagged() {
-        let changed_at = utc(9, 50, 0);
-        let due_at = utc(10, 0, 0);
         let now = utc(10, 3, 0);
+        let due_at = now - chrono::Duration::hours(25) - chrono::Duration::minutes(30);
+        let first_unmissed = due_at + chrono::Duration::hours(2);
+        let changed_at = due_at - chrono::Duration::minutes(10);
         let mut schedule = schedule_for_reconcile("schedule-repeat", "delay", due_at, changed_at);
         schedule.repeat_enabled = Some(true);
         schedule.repeat_kind = Some("fixed".into());
@@ -3458,10 +3898,80 @@ mod tests {
 
         assert_eq!(reconciled, 1);
         assert_eq!(state.schedules[0].status, "scheduled");
+        assert_eq!(state.schedules[0].run_count, 2);
         assert_eq!(state.schedules[0].error.as_deref(), Some(NOT_DELIVERED));
-        assert!(parse_rfc3339(&state.schedules[0].next_run_at).is_some_and(|next| next > now));
+        assert_eq!(
+            parse_rfc3339(&state.schedules[0].next_run_at),
+            Some(first_unmissed)
+        );
+        assert!(first_unmissed <= now);
         assert_eq!(state.history[0].status, "failed");
         assert_eq!(state.history[0].error.as_deref(), Some(NOT_DELIVERED));
+        assert_eq!(state.history[0].missed_runs, Some(2));
+    }
+
+    #[test]
+    fn missed_run_cursor_falls_forward_after_safety_limit() {
+        let now = utc(10, 3, 0);
+        let due_at = now - chrono::Duration::hours(600);
+        let mut schedule = schedule_for_reconcile("schedule-repeat", "delay", due_at, due_at);
+        schedule.repeat_enabled = Some(true);
+        schedule.repeat_kind = Some("fixed".into());
+        schedule.repeat_every_minutes = Some(60);
+
+        let (missed_runs, next_run_at) =
+            count_missed_runs(&schedule, now - chrono::Duration::hours(24), now);
+
+        assert_eq!(missed_runs, 500);
+        assert_eq!(
+            next_run_at.as_deref().and_then(parse_rfc3339),
+            Some(now + chrono::Duration::hours(1))
+        );
+    }
+
+    #[test]
+    fn human_reminder_text_does_not_mark_idle_wait_as_late() {
+        let created_at = utc(7, 0, 0);
+        let schedule = schedule_for_reconcile("idle", "idle", created_at, created_at);
+
+        assert_eq!(
+            human_reminder_text(&schedule, created_at + chrono::Duration::hours(3)),
+            schedule.text
+        );
+    }
+
+    #[test]
+    fn late_delivery_prefix_ignores_less_than_five_minutes() {
+        let scheduled_for = utc(10, 0, 0);
+
+        assert_eq!(
+            late_delivery_prefix(
+                scheduled_for,
+                scheduled_for + chrono::Duration::seconds(299),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn late_delivery_prefix_reports_minutes() {
+        let scheduled_for = utc(10, 0, 0);
+        let prefix =
+            late_delivery_prefix(scheduled_for, scheduled_for + chrono::Duration::minutes(5))
+                .unwrap();
+
+        assert!(prefix.contains("[Late reminder]"));
+        assert!(prefix.contains("5 min late."));
+    }
+
+    #[test]
+    fn late_delivery_prefix_reports_hours_and_minutes() {
+        let scheduled_for = utc(10, 0, 0);
+        let prefix =
+            late_delivery_prefix(scheduled_for, scheduled_for + chrono::Duration::minutes(65))
+                .unwrap();
+
+        assert!(prefix.contains("1 h 5 min late."));
     }
 
     #[test]

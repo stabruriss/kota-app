@@ -324,10 +324,12 @@ export interface StageProps {
   /** Group chat overlay. */
   groupChatOpen?: boolean;
   chatFilterActive?: boolean;
+  showAgentToAgentMessages?: boolean;
   groupChatUnreadCount?: number;
   unreadAgentIds?: ReadonlySet<AgentId>;
   onToggleGroupChat?: () => void;
   onChatFilterActiveChange?: (active: boolean) => void;
+  onShowAgentToAgentMessagesChange?: (show: boolean) => void;
   projectRoot?: string | null;
   projectRulesDir?: string | null;
   children?: ReactNode;
@@ -388,10 +390,12 @@ export function Stage({
   onQuoteMessage,
   groupChatOpen = false,
   chatFilterActive: chatFilterActiveProp,
+  showAgentToAgentMessages: showAgentToAgentMessagesProp,
   groupChatUnreadCount = 0,
   unreadAgentIds,
   onToggleGroupChat,
   onChatFilterActiveChange,
+  onShowAgentToAgentMessagesChange,
   projectRoot,
   projectRulesDir,
   children,
@@ -550,6 +554,13 @@ export function Stage({
   const setChatFilterActive = (active: boolean) => {
     if (!chatFilterControlled) setInternalChatFilterActive(active);
     onChatFilterActiveChange?.(active);
+  };
+  const [internalShowAgentToAgentMessages, setInternalShowAgentToAgentMessages] = useState(true);
+  const showAgentToAgentMessages = showAgentToAgentMessagesProp ?? internalShowAgentToAgentMessages;
+  const setShowAgentToAgentMessages = (show: boolean) => {
+    if (showAgentToAgentMessagesProp === undefined) setInternalShowAgentToAgentMessages(show);
+    onShowAgentToAgentMessagesChange?.(show);
+    if (!groupChatOpen) onToggleGroupChat?.();
   };
   const chatFilterTargetIds = useMemo(() => (
     chatFilterTargetAgents.filter((id, index, ids) => (
@@ -881,6 +892,7 @@ export function Stage({
               agentIds={groupChatAgentIds}
               chatFilterActive={chatFilterEffectiveActive}
               chatFilterAgentIds={chatFilterTargetIds}
+              showAgentToAgentMessages={showAgentToAgentMessages}
               agentMeta={agentMeta}
               agentRecords={agentRecords}
               onAgentContextMenu={onAgentContextMenu}
@@ -939,6 +951,8 @@ export function Stage({
           privateAgents={privacySet}
           chatFilterActive={chatFilterEffectiveActive}
           chatFilterTargetAgents={chatFilterTargetIds}
+          showAgentToAgentMessages={showAgentToAgentMessages}
+          onShowAgentToAgentMessagesChange={setShowAgentToAgentMessages}
           unreadAgentIds={unreadAgentIds}
           onOpenAgent={onOpenRibbonAgent ?? onOpenAgent}
           onToggleChatFilter={toggleChatFilterMode}

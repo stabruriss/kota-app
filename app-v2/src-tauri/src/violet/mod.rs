@@ -1821,7 +1821,7 @@ fn write_agent_session_binding(agent: &ProjectAgent, source: &NativeSource) -> R
     let next =
         serde_yaml::to_string(&yaml).map_err(|err| format!("serialize agent.yaml: {err}"))?;
     if next != text {
-        write_if_changed(&path, next.as_bytes())?;
+        crate::adapter_sync::write_if_changed(&path, next.as_bytes())?;
     }
     Ok(())
 }

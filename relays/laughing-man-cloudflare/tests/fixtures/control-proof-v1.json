@@ -1,0 +1,13 @@
+{
+  "method": "POST",
+  "path": "/bbs/groups/group-example-0001/heartbeat",
+  "groupId": "group-example-0001",
+  "timestamp": 1000,
+  "nonce": "nonce-example-000001",
+  "body": "{\"expectedGroupId\":\"group-example-0001\",\"protocolVersion\":1}",
+  "publicKey": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+  "deviceId": "fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889",
+  "message": "kota-bbs-control.v1\nhttps://worker.example\nPOST\n/bbs/groups/group-example-0001/heartbeat\ngroup-example-0001\nfe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889\n1000\nnonce-example-000001\n62e9d33cce4b9da02105ec4245224b0866f512fa60783ed4ed70c2d251df287c",
+  "signature": "9iAFmEFSqxf9MB5XF78sxrgY7nxyAmoc6XCZxVBfCxcABAbmHzsFAmCA36JlefyHZmsSrlfW9ov4HucWVbc/Dg==",
+  "origin": "https://worker.example"
+}

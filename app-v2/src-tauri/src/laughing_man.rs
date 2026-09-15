@@ -30,8 +30,8 @@ const CATALOG_REFRESH_SECS: u64 = 45;
 const STANDBY_LOOP_SECS: u64 = 30;
 const STANDBY_PULL_LIMIT: usize = 20;
 const STANDBY_SEEN_RING_MAX: usize = 600;
-const STANDBY_PROTOCOL: &str = "kota-lm-standby.v1";
-const STANDBY_RECOMMENDED_VERSION: &str = "0.1.2";
+pub(crate) const STANDBY_PROTOCOL: &str = "kota-lm-standby.v1";
+pub(crate) const STANDBY_RECOMMENDED_VERSION: &str = "0.1.3";
 const API_BASE: &str = "https://api.telegram.org";
 const MAX_TELEGRAM_TEXT_CHARS: usize = 3_800;
 const MAX_LOG_ENTRIES: usize = 500;
@@ -1492,6 +1492,20 @@ impl LaughingManManager {
         deliver: std::sync::Arc<InboundDeliverFn>,
     ) -> Result<()> {
         if self.running.swap(true, Ordering::AcqRel) {
+            let guard = self.lock_guard.lock().expect("lm lock poisoned");
+            let owns_lock = self.running.load(Ordering::Acquire)
+                && guard.is_some()
+                && fs::read_to_string(lock_path())
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+                    == Some(std::process::id());
+            if owns_lock {
+                let _state_guard = STATE_LOCK.lock().expect("lm state lock poisoned");
+                let mut state = load_state_unlocked();
+                if clear_stale_self_poller_error(&mut state, owns_lock) {
+                    save_state_unlocked(&state)?;
+                }
+            }
             return Ok(());
         }
         let Some(token) = load_token() else {
@@ -2085,6 +2099,18 @@ fn clear_error() {
     state.transient_poll_failure_since = None;
     state.last_transient_poll_error = None;
     let _ = save_state(&state);
+}
+
+fn clear_stale_self_poller_error(state: &mut LmState, owns_lock: bool) -> bool {
+    let expected = format!(
+        "start: another Laughing Man poller is active (pid {})",
+        std::process::id()
+    );
+    if !owns_lock || state.last_error.as_deref() != Some(expected.as_str()) {
+        return false;
+    }
+    state.last_error = None;
+    true
 }
 
 fn record_poll_error(message: &str) {
@@ -3968,6 +3994,72 @@ use std::io::Read as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn self_poller_conflict_state() -> LmState {
+        LmState {
+            last_error: Some(format!(
+                "start: another Laughing Man poller is active (pid {})",
+                std::process::id()
+            )),
+            transient_poll_failure_since: Some(123),
+            last_transient_poll_error: Some("keep this separate error".into()),
+            ..LmState::default()
+        }
+    }
+
+    #[test]
+    fn retry_clears_only_stale_self_poller_conflict() {
+        let mut state = self_poller_conflict_state();
+        let mut expected = serde_json::to_value(&state).unwrap();
+        expected["lastError"] = JsonValue::Null;
+        assert!(clear_stale_self_poller_error(&mut state, true));
+        assert_eq!(serde_json::to_value(&state).unwrap(), expected);
+        assert!(!clear_stale_self_poller_error(&mut state, true));
+    }
+
+    #[test]
+    fn retry_preserves_other_poller_conflict() {
+        let mut state = self_poller_conflict_state();
+        state.last_error = Some(format!(
+            "start: another Laughing Man poller is active (pid {})",
+            std::process::id() + 1
+        ));
+        let before = serde_json::to_value(&state).unwrap();
+        assert!(!clear_stale_self_poller_error(&mut state, true));
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    }
+
+    #[test]
+    fn retry_without_own_lock_preserves_self_poller_conflict() {
+        let mut state = self_poller_conflict_state();
+        let before = serde_json::to_value(&state).unwrap();
+        assert!(!clear_stale_self_poller_error(&mut state, false));
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    }
+
+    #[test]
+    fn retry_preserves_unrelated_error() {
+        let mut state = self_poller_conflict_state();
+        state.last_error = Some("poll: unauthorized".into());
+        let before = serde_json::to_value(&state).unwrap();
+        assert!(!clear_stale_self_poller_error(&mut state, true));
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    }
+
+    #[test]
+    fn standby_upgrade_tracks_old_and_bundled_worker_releases() {
+        let mut config = LmStandbyConfig {
+            relay_version: Some("0.1.2".into()),
+            protocol_version: Some(STANDBY_PROTOCOL.into()),
+            ..Default::default()
+        };
+        let old = standby_status_from_config(&config);
+        assert!(old.update_available);
+        assert_eq!(old.recommended_version, "0.1.3");
+        // Same update performed by the existing heartbeat loop after an upgrade.
+        config.relay_version = Some(STANDBY_RECOMMENDED_VERSION.into());
+        assert!(!standby_status_from_config(&config).update_available);
+    }
 
     #[test]
     fn outbound_matches_project_stream_semantics() {

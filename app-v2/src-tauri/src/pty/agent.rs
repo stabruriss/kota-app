@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use super::ansi::{AnsiLineDecoder, GridSnapshot};
+use super::input_buffer::{Admission, AfterFailure, InputBuffer, Receipt};
 use super::path_env::{augmented_path, resolve_on_augmented_path};
 
 const DEFAULT_COLS: u16 = 100;
@@ -1307,6 +1308,8 @@ struct AgentState {
     generation: AtomicU64,
     clear_next_submit: AtomicBool,
     submit_lock: Mutex<()>,
+    inputs: InputBuffer,
+    launch_prepared: AtomicBool,
     output_signal: OutputSignal,
     process: Mutex<Option<AgentProcess>>,
 }
@@ -1638,6 +1641,8 @@ impl AgentTerminalPty {
                 generation: AtomicU64::new(0),
                 clear_next_submit: AtomicBool::new(false),
                 submit_lock: Mutex::new(()),
+                inputs: InputBuffer::default(),
+                launch_prepared: AtomicBool::new(false),
                 output_signal: OutputSignal {
                     epoch: Mutex::new(0),
                     changed: Condvar::new(),
@@ -1697,20 +1702,96 @@ impl AgentTerminalPty {
         }
     }
 
-    /// Spawn the CLI process (or no-op if already running).
+    /// Blocking callers only. The actual start and queue flush use one
+    /// background task shared with raw keyboard and submit callers.
     pub fn init(&self, app: &AppHandle) -> Result<()> {
-        if self.is_running() {
-            self.emit_status(app, true);
-            return Ok(());
-        }
-        self.spawn(app)
+        self.inner.inputs.release_start();
+        self.write_confirmed(app, String::new())
+    }
+
+    fn prepare_launch(&self) -> Result<()> {
+        crate::sync_adapter_before_launch(
+            &self.inner.project_root,
+            &self.inner.agent_id,
+            self.inner.adapter_path.as_deref(),
+        )
+        .map_err(|error| anyhow!(error))
     }
 
     pub fn write(&self, app: &AppHandle, input: String) -> Result<()> {
-        if !self.is_running() {
-            self.spawn(app)?;
-        }
+        self.admit_input(app, input, None)
+    }
 
+    fn write_confirmed(&self, app: &AppHandle, input: String) -> Result<()> {
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        self.admit_input(app, input, Some(send))?;
+        receive
+            .recv()
+            .map_err(|_| anyhow!("agent input interrupted before delivery"))?
+            .map_err(|error| anyhow!(error))
+    }
+
+    fn admit_input(&self, app: &AppHandle, input: String, receipt: Option<Receipt>) -> Result<()> {
+        match self
+            .inner
+            .inputs
+            .admit(input, receipt, self.is_running())
+            .map_err(|error| anyhow!(error))?
+        {
+            Admission::Direct(input) => {
+                let result = self
+                    .write_to_process(&input.text)
+                    .map_err(|error| error.to_string());
+                input.complete(result.clone());
+                result.map_err(|error| anyhow!(error))
+            }
+            Admission::Queued { start } => {
+                if start {
+                    let pty = self.clone();
+                    let app = app.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            pty.spawn(&app).and_then(|_| pty.flush_inputs())
+                        }))
+                        .unwrap_or_else(|_| Err(anyhow!("agent startup task panicked")));
+                        if let Err(error) = result {
+                            let closed = pty.inner.inputs.is_closed();
+                            let running = pty.is_running();
+                            let after = if running { AfterFailure::KeepRunning } else { AfterFailure::RetryStart };
+                            let lost = pty.inner.inputs.fail(&error.to_string(), after);
+                            crate::kota_debug_log(&format!("[agent:{}] startup/flush failed; pending inputs not delivered={} error={error}", pty.inner.agent_id, lost));
+                            if !closed {
+                                pty.emit_status_detail(
+                                    &app,
+                                    running,
+                                    if running { None } else { Some(AgentStatusPhase::Exited) },
+                                    Some(format!("startup/input delivery failed: {error}")),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn flush_inputs(&self) -> Result<()> {
+        while let Some(input) = self.inner.inputs.next() {
+            let result = self
+                .write_to_process(&input.text)
+                .map_err(|error| error.to_string());
+            input.complete(result.clone());
+            result.map_err(|error| anyhow!(error))?;
+        }
+        Ok(())
+    }
+
+    fn write_to_process(&self, input: &str) -> Result<()> {
         let bytes = input.as_bytes();
         let preview: String = bytes
             .iter()
@@ -1766,7 +1847,6 @@ impl AgentTerminalPty {
                 self.inner.agent_id
             ));
         }
-        let started = Instant::now();
         let native_before = self.native_session_marker();
         let baseline_epoch = self.output_epoch();
         let clear_after_interrupt = self.inner.clear_next_submit.swap(false, Ordering::AcqRel);
@@ -1775,12 +1855,13 @@ impl AgentTerminalPty {
         } else {
             input
         };
-        if let Err(err) = self.write(app, input) {
+        if let Err(err) = self.write_confirmed(app, input) {
             if clear_after_interrupt {
                 self.inner.clear_next_submit.store(true, Ordering::Release);
             }
             return Err(err);
         }
+        let started = Instant::now();
         let first_output_epoch =
             self.wait_for_output_after(baseline_epoch, AGENT_PROMPT_FIRST_OUTPUT_WAIT);
         let first_output_ms = first_output_epoch.map(|_| started.elapsed().as_millis());
@@ -1799,7 +1880,7 @@ impl AgentTerminalPty {
 
         let mut enter_attempts = 1_u8;
         let first_enter_baseline = self.output_epoch();
-        self.write(app, prompt_submit_sequence(self.inner.cli).to_string())?;
+        self.write_confirmed(app, prompt_submit_sequence(self.inner.cli).to_string())?;
         let mut submit_confirm = if self.inner.cli == AgentCli::Pi {
             SubmitConfirmation::PtyWrite
         } else {
@@ -1819,7 +1900,7 @@ impl AgentTerminalPty {
                 "[agent:{}] submit prompt retrying enter after unconfirmed submit",
                 self.inner.agent_id
             ));
-            self.write(app, prompt_submit_sequence(self.inner.cli).to_string())?;
+            self.write_confirmed(app, prompt_submit_sequence(self.inner.cli).to_string())?;
             submit_confirm = self.wait_for_submit_confirmation(
                 native_before.as_ref(),
                 retry_baseline,
@@ -2168,6 +2249,9 @@ impl AgentTerminalPty {
     }
 
     pub fn close(&self, app: &AppHandle) -> Result<()> {
+        self.inner
+            .inputs
+            .fail("agent closed; pending input not delivered", AfterFailure::Closed);
         let child_pid = self.stop_current();
         let lease_path = self
             .inner
@@ -2185,6 +2269,12 @@ impl AgentTerminalPty {
     }
 
     fn spawn(&self, app: &AppHandle) -> Result<()> {
+        if !self.inner.launch_prepared.swap(false, Ordering::AcqRel) {
+            self.prepare_launch()?;
+        }
+        if self.inner.inputs.is_closed() {
+            return Err(anyhow!("agent closed before startup"));
+        }
         self.stop_current();
         if let Err(err) =
             prepare_provider_workspace(self.inner.cli, &self.inner.cwd, &self.inner.home)
@@ -2376,7 +2466,7 @@ impl AgentTerminalPty {
                 let mut query_tail: Vec<u8> = Vec::new();
                 let mut query_state = TerminalQueryState::default();
                 loop {
-                    if state.generation.load(Ordering::SeqCst) != generation {
+                    if state.generation.load(Ordering::SeqCst) != generation || state.inputs.is_closed() {
                         break;
                     }
                     match reader.read(&mut buffer) {
@@ -2578,7 +2668,9 @@ impl AgentTerminalPty {
             .spawn(move || {
                 let frame = std::time::Duration::from_millis(33);
                 loop {
-                    if state.generation.load(Ordering::SeqCst) != generation {
+                    if state.generation.load(Ordering::SeqCst) != generation
+                        || state.inputs.is_closed()
+                    {
                         break;
                     }
                     std::thread::sleep(frame);
@@ -2639,7 +2731,8 @@ impl AgentTerminalPty {
             .name(format!("kota-agent-pty-wait-{}", state.agent_id))
             .spawn(move || {
                 let exit_code = child.wait().ok().and_then(exit_status_code);
-                if state.generation.load(Ordering::SeqCst) != generation {
+                if state.generation.load(Ordering::SeqCst) != generation || state.inputs.is_closed()
+                {
                     return;
                 }
 
@@ -2676,17 +2769,26 @@ impl AgentTerminalPty {
             })
             .with_context(|| format!("spawn agent wait thread for {}", self.inner.agent_id))?;
 
-        self.inner
-            .process
-            .lock()
-            .expect("agent process poisoned")
-            .replace(AgentProcess {
-                master: pair.master,
-                writer,
-                killer,
-                decoder,
-                child_pid,
-            });
+        let mut process = Some(AgentProcess {
+            master: pair.master,
+            writer,
+            killer,
+            decoder,
+            child_pid,
+        });
+        if !self.inner.inputs.install_if_open(|| {
+            self.inner
+                .process
+                .lock()
+                .expect("agent process poisoned")
+                .replace(process.take().unwrap());
+        }) {
+            if let Some(mut process) = process {
+                let _ = process.killer.kill();
+            }
+            self.inner.generation.fetch_add(1, Ordering::SeqCst);
+            return Err(anyhow!("agent closed during startup"));
+        }
 
         self.emit_status_detail(
             app,
@@ -2723,6 +2825,16 @@ impl AgentTerminalPty {
     /// keyed by agent_id, same topic for old and new) doesn't see a
     /// phantom exit and clear `liveAgents`.
     pub fn stop_silently(&self) {
+        let lost = self
+            .inner
+            .inputs
+            .fail("agent replaced; pending input not delivered", AfterFailure::Closed);
+        if lost > 0 {
+            crate::kota_debug_log(&format!(
+                "[agent:{}] replaced; discarded {} undelivered inputs",
+                self.inner.agent_id, lost
+            ));
+        }
         self.stop_current();
     }
 
@@ -2943,11 +3055,40 @@ fn opencode_inline_config_env(cli: AgentCli, project_root: &Path) -> Option<Stri
 #[derive(Default)]
 pub struct AgentRegistry {
     ptys: Mutex<HashMap<String, AgentTerminalPty>>,
+    replacements: Mutex<HashMap<String, Arc<Replacement>>>,
+}
+
+#[derive(Default)]
+struct Replacement {
+    serial: Mutex<()>,
+    epoch: AtomicU64,
 }
 
 impl AgentRegistry {
+    fn replacement(&self, agent: &str) -> Arc<Replacement> {
+        self.replacements
+            .lock()
+            .expect("agent replacements poisoned")
+            .entry(agent.to_string())
+            .or_default()
+            .clone()
+    }
+
     pub fn spawn(&self, app: &AppHandle, req: AgentSpawnRequest) -> Result<AgentRoute> {
         let agent_id = req.agent_id.clone();
+        let replacement = self.replacement(&agent_id);
+        let epoch = replacement.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        let _replacement_guard = replacement
+            .serial
+            .lock()
+            .expect("agent replacement poisoned");
+        let pty = AgentTerminalPty::new(req.clone())?;
+        pty.prepare_launch()?;
+        pty.inner.launch_prepared.store(true, Ordering::Release);
+        pty.inner.inputs.hold_start();
+        if replacement.epoch.load(Ordering::SeqCst) != epoch {
+            return Err(anyhow!("agent startup cancelled or superseded"));
+        }
         let lease_path = agent_session_lease_path(&req);
         if let Some(lease) = active_foreign_agent_session_lease(&lease_path) {
             if req.takeover {
@@ -2960,23 +3101,26 @@ impl AgentRegistry {
         let lease_cwd = req.cwd.clone();
         let lease_project_root = req.project_root.clone();
         let lease_session_id = req.session_id.clone();
-        // If an existing pty for this agent_id is still alive, kill it
-        // silently (recruit cycle / restart). We must NOT call close()
-        // here — close() emits an exit event on the agent_id-keyed
-        // topic, which the frontend's brand-new exit listener (registered
-        // before the spawn IPC call) catches and clears liveAgents.
-        if let Some(existing) = self
+        // Publish a held incarnation so close and arriving input can find it.
+        // Release the registry lock before stopping the previous process.
+        let previous = self
             .ptys
             .lock()
             .expect("agent registry poisoned")
-            .remove(&agent_id)
-        {
-            existing.stop_silently();
+            .insert(agent_id.clone(), pty.clone());
+        if let Some(previous) = previous {
+            previous.stop_silently();
         }
-
-        let pty = AgentTerminalPty::new(req)?;
+        if replacement.epoch.load(Ordering::SeqCst) != epoch {
+            pty.stop_silently();
+            return Err(anyhow!("agent startup cancelled or superseded"));
+        }
         let route = pty.route();
         pty.init(app)?;
+        if replacement.epoch.load(Ordering::SeqCst) != epoch {
+            pty.stop_silently();
+            return Err(anyhow!("agent startup cancelled or superseded"));
+        }
         let now = Utc::now().to_rfc3339();
         if let Err(err) = write_agent_session_lease(
             &lease_path,
@@ -2996,10 +3140,6 @@ impl AgentRegistry {
             pty.stop_silently();
             return Err(err);
         }
-        self.ptys
-            .lock()
-            .expect("agent registry poisoned")
-            .insert(agent_id, pty);
         Ok(route)
     }
 
@@ -3024,6 +3164,9 @@ impl AgentRegistry {
     }
 
     pub fn close(&self, app: &AppHandle, agent_id: &str) -> Result<()> {
+        self.replacement(agent_id)
+            .epoch
+            .fetch_add(1, Ordering::SeqCst);
         let pty = self
             .ptys
             .lock()

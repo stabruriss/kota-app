@@ -748,10 +748,14 @@ impl IntegrationManager {
             *guard = None;
             clear_active_workspace()?;
         }
-        if root.exists() {
-            fs::remove_dir_all(&root)
-                .with_context(|| format!("remove workspace account dir {}", root.display()))?;
-        }
+        drop(guard);
+        crate::adapter_sync::remove_after_forgetting(root.clone(), None, || {
+            if root.exists() {
+                fs::remove_dir_all(&root)
+                    .map_err(|error| format!("remove workspace account dir {}: {error}", root.display()))?;
+            }
+            Ok(())
+        }).map_err(|error| anyhow!(error))?;
         Ok(WorkspaceProjectLifecycleResult {
             ok: true,
             dirty,
@@ -1596,6 +1600,7 @@ fn save_workspace_files(workspace: &WorkspaceProject) -> Result<()> {
         serde_json::to_string_pretty(&local)?,
     )?;
     write_account_ignore_files(&root)?;
+    crate::adapter_sync::roster_project_saved(root);
     Ok(())
 }
 

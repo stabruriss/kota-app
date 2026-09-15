@@ -271,6 +271,7 @@ interface RoomUiSnapshot {
   agentLayout: AgentLayoutState;
   groupChatOpen: boolean;
   chatFilterActive: boolean;
+  showAgentToAgentMessages: boolean;
 }
 
 interface VioletUnreadProjectState {
@@ -1897,6 +1898,7 @@ export function App() {
   const roomAgentIdsKey = roomAgentIdsOrdered.join('|');
   const [groupChatOpen, setGroupChatOpen] = useState(false);
   const [chatFilterActive, setChatFilterActive] = useState(false);
+  const [showAgentToAgentMessages, setShowAgentToAgentMessages] = useState(true);
   const [chatFilterOpenRequest, setChatFilterOpenRequest] = useState<{
     agentId: AgentId;
     nonce: number;
@@ -2332,6 +2334,7 @@ export function App() {
     setArchiveOpen(false);
     setGroupChatOpen(false);
     setChatFilterActive(false);
+    setShowAgentToAgentMessages(true);
   }, [invalidateAgentHydration]);
 
   const currentRoomUiSnapshot = useCallback((): RoomUiSnapshot => ({
@@ -2348,6 +2351,7 @@ export function App() {
     },
     groupChatOpen,
     chatFilterActive,
+    showAgentToAgentMessages,
   }), [
     agentLayout,
     broadcastPopupOpen,
@@ -2358,6 +2362,7 @@ export function App() {
     groupChatOpen,
     minimized,
     privateAgents,
+    showAgentToAgentMessages,
     terminalFocusedAgent,
   ]);
 
@@ -2391,6 +2396,7 @@ export function App() {
     setArchiveOpen(false);
     setGroupChatOpen(snapshot.groupChatOpen);
     setChatFilterActive(snapshot.chatFilterActive ?? true);
+    setShowAgentToAgentMessages(snapshot.showAgentToAgentMessages ?? true);
   }, [invalidateAgentHydration, resetRoomUiState]);
 
   const dismissAgentSessions = useCallback(async (agentIds: readonly AgentId[]) => {
@@ -4330,6 +4336,8 @@ export function App() {
                     chatFilterTargetAgents={chatFilterTargetAgents}
                     chatFilterActive={chatFilterActive}
                     onChatFilterActiveChange={setChatFilterActive}
+                    showAgentToAgentMessages={showAgentToAgentMessages}
+                    onShowAgentToAgentMessagesChange={setShowAgentToAgentMessages}
                     chatFilterOpenRequest={chatFilterOpenRequest}
                     privateAgents={effectivePrivateAgents}
                     privacyControlsEnabled={PRIVATE_CHAT_UI_ENABLED}

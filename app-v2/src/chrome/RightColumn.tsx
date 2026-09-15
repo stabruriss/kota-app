@@ -4,10 +4,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
-import {
-  renderBbsReplyPromptFromFile,
-  type BbsPromptProject,
-} from '../bbs-config';
+import type { BbsPromptProject } from '../bbs-config';
 import {
   TAVERN_SYSTEM_CONFIG_CHANGED_EVENT,
   loadBartenderConflictPrompts,
@@ -38,7 +35,6 @@ import {
   bbsDelete,
   bbsHumanPost,
   bbsHumanReply,
-  fileImageDataUrl,
   lmMessageLog,
   lmSetMuted,
   lmStart,
@@ -73,7 +69,7 @@ import {
   summarizeVioletNow,
   type AgentBusSendResult,
   type AgentBusTerminalTiming,
-  type BbsPost,
+  type BbsDeleteRequest,
   type BbsSnapshot,
   type BbsThread,
   type BartenderConflict,
@@ -89,9 +85,21 @@ import {
 } from '../pty-client';
 import { VIOLET_COMPOSER_SENT_EVENT, lastVioletComposerSentAt } from './violet-room-events';
 import { InputBar, type ComposerAttachment, type InputBarHandle } from './InputBar';
+import { BbsEditor, type BbsEditorHandle, type BbsEditorState } from './BbsEditor';
+import { BbsMentions } from './BbsMentions';
+import { BbsMentionClientError, bbsMentionTargets } from '../bbs-mentions';
+import type { BbsMentionSelection } from '../types/bbs-roster';
+import { BbsAttachments } from './BbsAttachments';
+import { BbsPostAvatar } from './BbsPostAvatar';
+import { BbsUnavailablePost } from './BbsUnavailablePost';
+import {
+  BBS_UNAVAILABLE_MESSAGE, bbsLogicalDeleteTarget, bbsRemoveDeletedItem, bbsSelectedTopic, bbsThreadVersions,
+  bbsUnavailablePosts, bbsVersionDeleteTarget,
+  type BbsPostVersionView,
+} from '../bbs-post-versions';
+import { BbsSyncScope, BbsSyncControlButton, BbsSyncActivity, BbsThreadSharing } from './BbsSyncControls';
 import { LaughingManSettings } from './LaughingManSettings';
 import { MarkdownText } from './VioletRoomPanel';
-import { splitProjectAgentName } from './ProjectAgentName';
 import { EmberScheduleInstrument } from './EmberScheduleInstrument';
 import type { Agent, AgentId } from '../types/scene';
 import type { LogRow as LogRowType } from '../types/scene';
@@ -133,8 +141,6 @@ const BARTENDER_AUTO_SYNC_STORAGE_PREFIX = 'kota-v2.bartender.auto-sync.';
 const EMPTY_AGENT_IDS: readonly AgentId[] = [];
 const EMBER_ACTOR_ID = 'ember';
 const EMBER_ACTOR_NAME = 'Ember';
-const BBS_ACTOR_ID = 'bbs';
-const BBS_ACTOR_NAME = 'BBS';
 const EMBER_DREAM_TITLE = "It's time to dream.";
 const ROCKER_COVER_CLOSE_MS = 1700;
 const DREAM_AGENT_OVERLAY_TTL_MS = 30 * 60 * 1000;
@@ -180,7 +186,6 @@ type EmberModalTab = 'scheduled' | 'drafts' | 'history';
 type EmberSendMode = 'idle' | 'delay' | 'at';
 type EmberEditorTarget = { kind: 'new' | 'schedule' | 'draft'; id?: string };
 type EmberTargetOption = { id: AgentId; name: string; kind: 'agent' | 'human' };
-type BbsFilter = 'tagged' | 'all';
 type BartenderConflictBlocker = {
   agentId: AgentId;
   agentName: string;
@@ -513,29 +518,10 @@ function violetSummaryIsAutoDue(
 
 
 
-function removeBbsPostFromSnapshot(snapshot: BbsSnapshot | null, post: BbsPost): BbsSnapshot | null {
-  if (!snapshot) return snapshot;
-  const threads = snapshot.threads.flatMap((thread) => {
-    if (thread.threadId !== post.threadId) return [thread];
-    if (post.kind === 'topic' || thread.posts.length <= 1) return [];
-    const posts = thread.posts.filter((candidate) => candidate.postId !== post.postId);
-    if (posts.length === 0) return [];
-    const latest = posts.reduce((current, candidate) => (
-      candidate.createdAt > current.createdAt ? candidate : current
-    ), posts[0]!);
-    return [{
-      ...thread,
-      posts,
-      latestPostId: latest.postId,
-      updatedAt: latest.createdAt,
-      isNew: posts.some((candidate) => candidate.state === 'new'),
-    }];
-  });
-  return {
-    ...snapshot,
-    threads,
-    newCount: threads.filter((thread) => thread.isNew).length,
-  };
+interface BbsDeleteSelection {
+  request: BbsDeleteRequest;
+  kind: 'thread' | 'reply' | 'version';
+  allVersions: boolean;
 }
 
 function workspaceProjectDisplayName(workspace: WorkspaceProject): string {
@@ -550,63 +536,6 @@ function workspacePromptProject(workspace: WorkspaceProject): BbsPromptProject {
   };
 }
 
-const bbsImageDataUrlCache = new Map<string, string>();
-const BBS_IMAGE_PATH_RE = /(?:^|[\s("'\`])((?:~\/|\/)?[^\s)"'\`]*(?:attachments|images?|screenshots?)[^\s)"'\`]*\.(?:png|jpe?g|gif|webp)|(?:~\/|\/)[^\s)"'\`]+\.(?:png|jpe?g|gif|webp))/gi;
-
-function bbsImagePathsFromBody(body: string): string[] {
-  const out: string[] = [];
-  for (const match of body.matchAll(BBS_IMAGE_PATH_RE)) {
-    const raw = (match[1] ?? '').trim();
-    if (raw && !out.includes(raw)) out.push(raw);
-    if (out.length >= 6) break;
-  }
-  return out;
-}
-
-function resolveBbsImagePath(path: string, baseRoot: string | null): string | null {
-  if (path.startsWith('/')) return path;
-  if (path.startsWith('~/')) return null;
-  if (!baseRoot) return null;
-  return `${baseRoot.replace(/\/$/, '')}/${path}`;
-}
-
-function BbsInlineImage({ path }: { path: string }) {
-  const [src, setSrc] = useState<string | null>(() => bbsImageDataUrlCache.get(path) ?? null);
-  useEffect(() => {
-    if (bbsImageDataUrlCache.has(path)) {
-      setSrc(bbsImageDataUrlCache.get(path) ?? null);
-      return;
-    }
-    let cancelled = false;
-    void fileImageDataUrl(path)
-      .then((dataUrl) => {
-        bbsImageDataUrlCache.set(path, dataUrl);
-        if (!cancelled) setSrc(dataUrl);
-      })
-      .catch(() => {
-        if (!cancelled) setSrc(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [path]);
-  if (!src) return null;
-  return <img className="bbs-post-image" src={src} alt={path.split('/').pop() ?? 'attachment'} />;
-}
-
-function BbsPostImages({ body, baseRoot }: { body: string; baseRoot: string | null }) {
-  const paths = useMemo(() => (
-    bbsImagePathsFromBody(body)
-      .map((path) => resolveBbsImagePath(path, baseRoot))
-      .filter((path): path is string => !!path)
-  ), [baseRoot, body]);
-  if (paths.length === 0) return null;
-  return (
-    <div className="bbs-post-images">
-      {paths.map((path) => <BbsInlineImage key={path} path={path} />)}
-    </div>
-  );
-}
 
 function emberProjectKey(workspace: WorkspaceProject | null | undefined, projectRoot: string | null | undefined): string | null {
   return workspace?.projectId ?? workspace?.localRoot ?? projectRoot ?? null;
@@ -1256,17 +1185,19 @@ export function RightColumn({
   ));
   const [bbs, setBbs] = useState<BbsSnapshot | null>(null);
   const [bbsOpen, setBbsOpen] = useState(false);
-  const [bbsFilter, setBbsFilter] = useState<BbsFilter>('all');
   const [bbsBusy, setBbsBusy] = useState<string | null>(null);
   const [bbsError, setBbsError] = useState<string | null>(null);
+  // Publication/attachment errors must survive the board's periodic snapshot refresh.
+  const [bbsPublishMessage, setBbsPublishMessage] = useState<string | null>(null);
   // Forum-style BBS: list ⇄ thread detail ⇄ compose views. Replies are
   // written by the human user (account identity) straight to BBS storage;
-  // optionally selected agents get a bus delivery on top.
+  // structured mentions are delivered by the durable backend bridge after publication.
   const [bbsView, setBbsView] = useState<'list' | 'detail' | 'compose'>('list');
   const [bbsDetailThreadId, setBbsDetailThreadId] = useState<string | null>(null);
+  const [bbsTopicVersionKey, setBbsTopicVersionKey] = useState<string | null>(null);
   const [bbsReplyText, setBbsReplyText] = useState('');
   const [bbsReplyAgentBarOpen, setBbsReplyAgentBarOpen] = useState(false);
-  const [bbsReplyAgents, setBbsReplyAgents] = useState<AgentId[]>([]);
+  const [bbsReplyAgents, setBbsReplyAgents] = useState<BbsMentionSelection[]>([]);
   const [bbsReplyBusy, setBbsReplyBusy] = useState(false);
   const [bbsComposeText, setBbsComposeText] = useState('');
   const [bbsComposeProjects, setBbsComposeProjects] = useState<Set<string>>(() => new Set());
@@ -1288,12 +1219,15 @@ export function RightColumn({
   const [lmRetryBusy, setLmRetryBusy] = useState(false);
   const [lmMuteBusy, setLmMuteBusy] = useState(false);
 
-  const [bbsDeleteTarget, setBbsDeleteTarget] = useState<BbsPost | null>(null);
+  const [bbsDeleteTarget, setBbsDeleteTarget] = useState<BbsDeleteSelection | null>(null);
+  const bbsDeleteInFlightRef = useRef(false);
   const bbsDetailScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingBbsScrollPostIdRef = useRef<string | null>(null);
   const pendingBbsScrollThreadIdRef = useRef<string | null>(null);
-  const bbsReplyInputRef = useRef<InputBarHandle | null>(null);
-  const bbsComposeInputRef = useRef<InputBarHandle | null>(null);
+  const bbsReplyInputRef = useRef<BbsEditorHandle | null>(null);
+  const bbsComposeInputRef = useRef<BbsEditorHandle | null>(null);
+  const [bbsEditorState, setBbsEditorState] = useState<BbsEditorState>({ hasContent: false, preparing: false });
+  const bbsPublishInFlightRef = useRef(false);
   const [emberState, setEmberState] = useState<EmberState>(() => loadEmberState(emberKey));
   const [emberModalOpen, setEmberModalOpen] = useState(false);
   const [emberTab, setEmberTab] = useState<EmberModalTab>('scheduled');
@@ -1371,6 +1305,10 @@ export function RightColumn({
     ));
   }, []);
   const bbsProjectId = workspace?.projectId ?? null;
+  const bbsProjectIdRef = useRef(bbsProjectId);
+  bbsProjectIdRef.current = bbsProjectId;
+  const bbsContextRef = useRef('');
+  bbsContextRef.current = JSON.stringify([bbsProjectId, bbsOpen, bbsView, bbsDetailThreadId]);
   const bbsRefreshInFlightRef = useRef<string | null>(null);
   const emberAgentOptions = useMemo(() => {
     const seen = new Set<AgentId>();
@@ -2523,11 +2461,11 @@ export function RightColumn({
         projectId: bbsProjectId,
         projectDisplayName: workspace ? workspaceProjectDisplayName(workspace) : null,
       });
-      if (bbsRefreshInFlightRef.current !== requestKey) return;
+      if (bbsRefreshInFlightRef.current !== requestKey || bbsProjectIdRef.current !== bbsProjectId) return;
       setBbs(next);
       setBbsError(null);
     } catch (err) {
-      if (bbsRefreshInFlightRef.current !== requestKey) return;
+      if (bbsRefreshInFlightRef.current !== requestKey || bbsProjectIdRef.current !== bbsProjectId) return;
       setBbsError(String(err));
     } finally {
       if (bbsRefreshInFlightRef.current === requestKey) {
@@ -2539,13 +2477,15 @@ export function RightColumn({
   useEffect(() => {
     setBbs(null);
     setBbsError(null);
-    setBbsFilter('all');
+    setBbsPublishMessage(null);
+    bbsRefreshInFlightRef.current = null;
     setBbsView('list');
     setBbsDetailThreadId(null);
+    setBbsTopicVersionKey(null);
     setBbsReplyText('');
     setBbsReplyAgentBarOpen(false);
     setBbsReplyAgents([]);
-    setBbsReplyBusy(false);
+    setBbsReplyBusy(bbsPublishInFlightRef.current);
     setBbsComposeText('');
     setBbsComposeProjects(new Set());
     setBbsDeleteTarget(null);
@@ -3002,6 +2942,12 @@ export function RightColumn({
     ? `${conflictBlocker.agentName} resolving${conflictBlocker.count > 1 ? `; ${conflictBlocker.count - 1} more conflict${conflictBlocker.count === 2 ? '' : 's'} pending` : ''}`
     : '';
   const bbsThreads = bbs?.threads ?? [];
+  const bbsVersionViews = useMemo(() => new Map(
+    (bbs?.threads ?? []).map((thread) => [thread.threadId, bbsThreadVersions(thread.posts)]),
+  ), [bbs?.threads]);
+  const bbsUnavailableViews = useMemo(() => new Map(
+    (bbs?.threads ?? []).map((thread) => [thread.threadId, bbsUnavailablePosts(thread)]),
+  ), [bbs?.threads]);
   const bbsNewCount = bbs?.newCount ?? 0;
   const bbsKnownProjects = useMemo(() => {
     const seen = new Set<string>();
@@ -3028,16 +2974,6 @@ export function RightColumn({
     () => bbsKnownProjects.filter((project) => project.projectId !== bbsProjectId),
     [bbsKnownProjects, bbsProjectId],
   );
-  const visibleBbsThreads = useMemo(() => (
-    bbsThreads.filter((thread) => {
-      // "Tagged" means relevant-to-me (backend rule: broadcast, tagged to me,
-      // created by me, or I posted in it) — not just literally tagged. The
-      // stricter projectTags check hid threads this project created, which
-      // made replies to them unreachable in this filter.
-      if (bbsFilter === 'tagged' && !thread.relevant) return false;
-      return true;
-    })
-  ), [bbsFilter, bbsThreads]);
   const latestVioletSummary = violetSummary?.latest ?? null;
   const violetOutstanding = violetSummary?.outstanding.messageCount ?? 0;
   const violetSummaryRunning = violetSummaryBusy || violetSummaryAutoBusy;
@@ -3276,7 +3212,8 @@ export function RightColumn({
     const pendingPostId = pendingBbsScrollPostIdRef.current;
     const pendingThreadId = pendingBbsScrollThreadIdRef.current;
     if (!pendingPostId && pendingThreadId !== bbsDetailThread.threadId) return undefined;
-    if (pendingPostId && !bbsDetailThread.posts.some((post) => post.postId === pendingPostId)) {
+    if (pendingPostId && !bbsDetailThread.posts.some((post) => post.postId === pendingPostId)
+      && !bbsUnavailablePosts(bbsDetailThread).some((post) => post.postId === pendingPostId)) {
       return undefined;
     }
     const frame = window.requestAnimationFrame(() => {
@@ -3296,17 +3233,19 @@ export function RightColumn({
 
   // Opening a thread marks its unread posts as seen — that is what drives
   // the new-badge now that Insert/Ignore buttons are gone.
-  const openBbsDetail = useCallback((thread: BbsThread) => {
+  const openBbsDetail = useCallback((thread: BbsThread, topicKey: string | null = null) => {
+    setBbsPublishMessage(null);
     setBbsDetailThreadId(thread.threadId);
+    setBbsTopicVersionKey(topicKey);
     setBbsView('detail');
     setBbsReplyText('');
     setBbsReplyAgents([]);
     setBbsReplyAgentBarOpen(false);
     if (!bbsProjectId) return;
-    const unseen = thread.posts.filter((post) => post.state === 'new');
+    const unseen = [...new Set(thread.posts.filter((post) => post.state === 'new').map((post) => post.postId))];
     if (unseen.length === 0) return;
-    void Promise.all(unseen.map((post) => (
-      bbsMarkProcessed({ projectId: bbsProjectId, postId: post.postId })
+    void Promise.all(unseen.map((postId) => (
+      bbsMarkProcessed({ projectId: bbsProjectId, postId })
     )))
       .then(() => refreshBbs(true))
       .catch((err) => console.warn('[bbs] mark seen failed', err));
@@ -3315,9 +3254,11 @@ export function RightColumn({
   const closeBbsDetail = useCallback(() => {
     setBbsView('list');
     setBbsDetailThreadId(null);
+    setBbsTopicVersionKey(null);
   }, []);
 
   const openBbsCompose = useCallback(() => {
+    setBbsPublishMessage(null);
     setBbsComposeText('');
     setBbsComposeProjects(new Set(
       bbsTargetProjects.length === 1 ? [bbsTargetProjects[0]!.projectId] : [],
@@ -3327,170 +3268,115 @@ export function RightColumn({
     setBbsView('compose');
   }, [bbsTargetProjects]);
 
-  // AKA (short name), matching the main room agent bar format.
-  const bbsAgentNameFor = useCallback((agentId: AgentId) => {
-    const full = agentMeta?.[agentId]?.name
-      ?? emberAgentOptions.find((agent) => agent.id === agentId)?.name
-      ?? agentId;
-    return splitProjectAgentName(full).base || full;
-  }, [agentMeta, emberAgentOptions]);
-
-  // Notify the selected agents over the bus with the reply wrapper, so the
-  // room shows the collapsed "Check this BBS Thread" bubble and the agents
-  // get actionable context plus the human's message.
-  const notifyBbsAgents = useCallback(async (
-    threadId: string,
-    humanBody: string,
-    agents: readonly AgentId[],
-  ) => {
-    if (!emberProjectRoot || !bbsCurrentProject || agents.length === 0) return;
-    const wrapper = await renderBbsReplyPromptFromFile({
-      currentProject: bbsCurrentProject,
-      threadId,
-      sourceProject: bbsCurrentProject,
-      latestAuthor: bbsUserIdentity?.name?.trim() || 'Human',
-    });
-    const text = `${wrapper}\n${humanBody}`;
-    await Promise.all(agents.map((agentId) => agentBusSend({
-      projectRoot: emberProjectRoot,
-      senderAgentId: BBS_ACTOR_ID,
-      senderName: BBS_ACTOR_NAME,
-      target: agentId,
-      intent: 'bbs-thread',
-      text,
-      eventId: emberEventId('bbs', threadId, agentId),
-      dedupeKey: null,
-    })));
-  }, [bbsCurrentProject, bbsUserIdentity, emberProjectRoot]);
-
-  const sendBbsReply = useCallback(async () => {
-    if (!bbsProjectId || !bbsDetailThread || bbsReplyBusy) return;
-    const text = (bbsReplyInputRef.current?.serialize().payload ?? bbsReplyText).trim();
-    if (!text) return;
-    const mentions = bbsReplyAgents.map((agentId) => `@${bbsAgentNameFor(agentId)}`).join(' ');
-    const body = mentions ? `${mentions}\n${text}` : text;
+  const publishBbs = useCallback(async (kind: 'topic' | 'reply') => {
+    const replying = kind === 'reply';
+    const input = replying ? bbsReplyInputRef.current : bbsComposeInputRef.current;
+    if (!bbsProjectId || !input || bbsPublishInFlightRef.current || (replying && !bbsDetailThread)) return;
+    const draft = input.snapshot();
+    if (draft.preparing || (!draft.body.trim() && draft.attachments.length === 0)) return;
+    const context = bbsContextRef.current;
+    // Freeze identifiers, never display names; backend validates all targets and
+    // writes the single prefix + durable notice along with the original body.
+    const mentions = bbsMentionTargets(bbsReplyAgents);
+    const body = draft.body.trim();
+    bbsPublishInFlightRef.current = true;
     setBbsReplyBusy(true);
-    setBbsError(null);
+    setBbsPublishMessage(null);
+    let published = false;
     try {
-      const postId = await bbsHumanReply({
-        projectId: bbsProjectId,
-        projectDisplayName: bbsCurrentProject?.displayName ?? null,
-        threadId: bbsDetailThread.threadId,
-        body,
-      });
-      pendingBbsScrollPostIdRef.current = postId;
-      pendingBbsScrollThreadIdRef.current = bbsDetailThread.threadId;
-      await notifyBbsAgents(bbsDetailThread.threadId, body, bbsReplyAgents);
-      setBbsReplyText('');
-      bbsReplyInputRef.current?.clear();
-      setBbsReplyAgents([]);
-      await refreshBbs(true);
-    } catch (err) {
-      setBbsError(String(err));
+      const resultId = replying
+        ? await bbsHumanReply({
+          projectId: bbsProjectId, projectDisplayName: bbsCurrentProject?.displayName ?? null,
+          threadId: bbsDetailThread!.threadId, body, attachments: draft.attachments, ...(mentions.length ? { mentions } : {}),
+        })
+        : await bbsHumanPost({
+          projectId: bbsProjectId, projectDisplayName: bbsCurrentProject?.displayName ?? null,
+          projectTags: Array.from(bbsComposeProjects), body, attachments: draft.attachments, ...(mentions.length ? { mentions } : {}),
+        });
+      published = true;
+      const threadId = replying ? bbsDetailThread!.threadId : resultId;
+      // Capture the original instance. A late completion must never clear a new thread's editor.
+      const currentInput = replying ? bbsReplyInputRef.current : bbsComposeInputRef.current;
+      if (bbsContextRef.current === context && currentInput === input) {
+        input.clear();
+        if (replying) setBbsReplyText(''); else setBbsComposeText('');
+        setBbsReplyAgents([]);
+        setBbsReplyAgentBarOpen(false);
+        pendingBbsScrollPostIdRef.current = replying ? resultId : null;
+        pendingBbsScrollThreadIdRef.current = threadId;
+        if (!replying) {
+          setBbsDetailThreadId(threadId);
+          setBbsTopicVersionKey(null);
+          setBbsView('detail');
+        }
+      }
+      const isPublicationContext = () => bbsContextRef.current === context
+        || bbsContextRef.current === JSON.stringify([bbsProjectId, true, 'detail', threadId]);
+      // No frontend bus call: local and remote mentions share the backend bridge.
+      // A later notification outcome cannot turn a durable post into a retry.
+      // refreshBbs reports snapshot errors separately; publication remains successful.
+      if (isPublicationContext()) await refreshBbs(true);
+    } catch (error) {
+      if (bbsContextRef.current === context) {
+        setBbsPublishMessage(error instanceof BbsMentionClientError && !published ? error.message : published
+          ? `Post published, but the view could not be updated: ${String(error)}`
+          : `Could not publish: ${String(error)} Retry or remove the failed attachment.`);
+      }
     } finally {
+      bbsPublishInFlightRef.current = false;
       setBbsReplyBusy(false);
     }
-  }, [
-    bbsAgentNameFor,
-    bbsCurrentProject?.displayName,
-    bbsDetailThread,
-    bbsProjectId,
-    bbsReplyAgents,
-    bbsReplyBusy,
-    bbsReplyText,
-    notifyBbsAgents,
-    refreshBbs,
-  ]);
-
-  const submitBbsPost = useCallback(async () => {
-    if (!bbsProjectId || bbsReplyBusy) return;
-    const text = (bbsComposeInputRef.current?.serialize().payload ?? bbsComposeText).trim();
-    const targets = Array.from(bbsComposeProjects);
-    if (!text) return;
-    const mentions = bbsReplyAgents.map((agentId) => `@${bbsAgentNameFor(agentId)}`).join(' ');
-    const body = mentions ? `${mentions}\n${text}` : text;
-    setBbsReplyBusy(true);
-    setBbsError(null);
-    try {
-      const threadId = await bbsHumanPost({
-        projectId: bbsProjectId,
-        projectDisplayName: bbsCurrentProject?.displayName ?? null,
-        projectTags: targets,
-        body,
-      });
-      pendingBbsScrollPostIdRef.current = null;
-      pendingBbsScrollThreadIdRef.current = threadId;
-      await notifyBbsAgents(threadId, body, bbsReplyAgents);
-      setBbsComposeText('');
-      bbsComposeInputRef.current?.clear();
-      setBbsReplyAgents([]);
-      setBbsDetailThreadId(threadId);
-      setBbsView('detail');
-      await refreshBbs(true);
-    } catch (err) {
-      setBbsError(String(err));
-    } finally {
-      setBbsReplyBusy(false);
-    }
-  }, [
-    bbsAgentNameFor,
-    bbsComposeProjects,
-    bbsComposeText,
-    bbsCurrentProject?.displayName,
-    bbsProjectId,
-    bbsReplyAgents,
-    bbsReplyBusy,
-    notifyBbsAgents,
-    refreshBbs,
-  ]);
+  }, [bbsProjectId, bbsDetailThread, bbsReplyAgents, bbsCurrentProject?.displayName,
+    bbsComposeProjects, refreshBbs]);
 
   // window.confirm is a silent no-op inside the Tauri webview (this is why
   // the old delete button "did nothing") — confirmation runs through the
   // in-app card driven by bbsDeleteTarget instead.
-  const deleteBbsPost = useCallback(async (post: BbsPost) => {
-    const deleteThread = post.kind === 'topic';
-    setBbsBusy(post.postId);
+  const deleteBbsPost = useCallback(async (selection: BbsDeleteSelection) => {
+    if (bbsDeleteInFlightRef.current) return;
+    bbsDeleteInFlightRef.current = true;
+    const context = bbsContextRef.current;
+    setBbsBusy(JSON.stringify(selection.request));
     try {
-      await bbsDelete({ threadId: post.threadId, postId: post.postId });
-      setBbs((prev) => removeBbsPostFromSnapshot(prev, post));
-      if (deleteThread) closeBbsDetail();
+      await bbsDelete(selection.request);
+      setBbs((prev) => bbsRemoveDeletedItem(prev, selection.request));
+      if (selection.kind === 'thread' && bbsContextRef.current === context) closeBbsDetail();
       await refreshBbs(true);
     } catch (err) {
       setBbsError(String(err));
     } finally {
+      bbsDeleteInFlightRef.current = false;
       setBbsBusy(null);
     }
   }, [closeBbsDetail, refreshBbs]);
 
   // Slack-flat forum message: avatar | author + time + #floor | body.
   // Human-authored posts (agent_id 'human') get the serif italic name.
-  const renderBbsFloor = (post: BbsPost, floor: number, isTopic: boolean, thread: BbsThread) => {
+  const selectBbsDelete = (version: BbsPostVersionView, logical = false) => {
+    const request = logical ? bbsLogicalDeleteTarget(version.post) : bbsVersionDeleteTarget(version);
+    if (!request) return;
+    // Freeze identity/scope now, not after the user confirms or a new snapshot arrives.
+    setBbsDeleteTarget({ request, kind: request.versionId ? 'version' : version.post.kind === 'topic' ? 'thread' : 'reply',
+      allVersions: logical && version.forkNumber !== null });
+  };
+
+  const renderBbsFloor = (version: BbsPostVersionView, floor: number, isTopic: boolean, thread: BbsThread) => {
+    const { post, forkNumber } = version;
     const isHuman = post.agentId === 'human';
     const meta = agentMeta?.[post.agentId as AgentId];
-    const avatarId = post.agentAvatar ?? meta?.avatarId ?? (isHuman ? 'user-default' : null);
-    const avatarClass = avatarId
-      ? avatarClassForId(avatarId, null)
-      : meta?.avatarClass ?? avatarClassForAgentFallback(null, post.agentId);
-    const avatarStyle = avatarImageStyleForId(avatarId);
     return (
       <div
-        key={post.postId}
-        className={`bbs-msg ${isHuman ? 'human' : ''}`}
+        key={version.key}
+        className={`bbs-msg ${isHuman ? 'human' : ''} ${forkNumber !== null ? 'bbs-msg-fork' : ''}`}
         data-bbs-post-id={post.postId}
+        data-bbs-version-id={post.versionId ?? undefined}
       >
-        <span
-          className={`bbs-msg-avatar tavern-avatar-art ${avatarClass}`}
-          style={avatarStyle}
-          aria-hidden
-        >
-          <span />
-          <i />
-          <b />
-        </span>
+        <BbsPostAvatar post={post} meta={meta} />
         <div className="bbs-msg-main">
           <div className="bbs-msg-head">
             <span className={`bbs-msg-author ${isHuman ? 'human' : ''}`}>{post.agentDisplayName}</span>
             {isTopic && <span className="bbs-op-badge">OP</span>}
+            {forkNumber !== null && <span className="bbs-fork-label">Forked Version {forkNumber}</span>}
             <span className="bbs-time">{formatBbsTime(post.createdAt)}</span>
             <span className="bbs-floor-no">#{floor}</span>
           </div>
@@ -3508,65 +3394,31 @@ export function RightColumn({
                   ))}
                 </>
               )}
+              <BbsThreadSharing sharingGroupId={thread.sharingGroupId} />
             </div>
           )}
           <div className="bbs-msg-body">
             <MarkdownText text={post.body} />
-            <BbsPostImages body={post.body} baseRoot={emberProjectRoot} />
+            <BbsAttachments body={post.body} baseRoot={emberProjectRoot} postId={post.postId} attachments={post.attachments} />
           </div>
         </div>
         <div className="bbs-msg-side">
           <button
             type="button"
             className="bbs-floor-delete"
-            disabled={bbsBusy === post.postId}
-            onClick={() => setBbsDeleteTarget(post)}
+            disabled={bbsBusy !== null || bbsVersionDeleteTarget(version) === null}
+            onClick={() => selectBbsDelete(version)}
           >
-            Delete
+            {forkNumber !== null ? 'Delete version' : 'Delete'}
           </button>
+          {forkNumber !== null && (isTopic || forkNumber === 1) && <button
+            type="button" className="bbs-floor-delete" disabled={bbsBusy !== null}
+            onClick={() => selectBbsDelete(version, true)}
+          >Delete {isTopic ? 'thread' : 'reply'}</button>}
         </div>
       </div>
     );
   };
-
-  // Shared composer footer (reply + compose reuse the same shell).
-  const renderBbsAgentBar = () => (
-    <div className={`bbs-agent-bar ${bbsReplyAgentBarOpen ? 'open' : ''}`}>
-      <span className="bbs-agent-bar-hint">
-        Selected agents get a bus delivery after the post lands; none selected = plain post.
-      </span>
-      {emberAgentOptions.length === 0 ? (
-        <span className="ember-target-empty">No active agent</span>
-      ) : emberAgentOptions.map((agent) => {
-        const selected = bbsReplyAgents.includes(agent.id);
-        const meta = agentMeta?.[agent.id];
-        const chipClass = meta?.avatarClass ?? avatarClassForAgentFallback(null, agent.id);
-        const chipStyle = avatarImageStyleForId(meta?.avatarId);
-        return (
-          <button
-            key={agent.id}
-            type="button"
-            className={`bbs-agent-chip ${selected ? 'sel' : ''}`}
-            aria-pressed={selected}
-            onClick={() => {
-              setBbsReplyAgents((current) => (
-                current.includes(agent.id)
-                  ? current.filter((candidate) => candidate !== agent.id)
-                  : [...current, agent.id]
-              ));
-            }}
-          >
-            <span className={`bbs-msg-avatar sm tavern-avatar-art ${chipClass}`} style={chipStyle} aria-hidden>
-              <span />
-              <i />
-              <b />
-            </span>
-            <span className="bbs-agent-chip-name">{bbsAgentNameFor(agent.id)}</span>
-          </button>
-        );
-      })}
-    </div>
-  );
 
   return (
     <>
@@ -4005,6 +3857,8 @@ export function RightColumn({
                 onClick={() => {
                   setBbsView('list');
                   setBbsDetailThreadId(null);
+                  setBbsTopicVersionKey(null);
+                  setBbsDeleteTarget(null);
                   setBbsOpen(true);
                   void refreshBbs();
                 }}
@@ -4492,6 +4346,7 @@ export function RightColumn({
       </div>
     )}
     {bbsOpen && (
+      <BbsSyncScope>
       <div className="bbs-modal-shade" role="presentation">
         <section className="bbs-modal" role="dialog" aria-modal="true" aria-label="Bulletin Board">
           <header className="bbs-modal-head">
@@ -4505,10 +4360,11 @@ export function RightColumn({
               <span>
                 {bbsView === 'compose'
                   ? 'New Post'
-                  : bbs?.projectDisplayName ?? workspace?.repoFullName ?? 'Project'}
+                  : 'All threads'}
               </span>
             </div>
             <div className="bbs-modal-actions">
+              <BbsSyncControlButton />
               {bbsView === 'list' && (
                 <>
                   <button type="button" className="primary" onClick={openBbsCompose}>
@@ -4527,6 +4383,8 @@ export function RightColumn({
                   setBbsOpen(false);
                   setBbsView('list');
                   setBbsDetailThreadId(null);
+                  setBbsTopicVersionKey(null);
+                  setBbsDeleteTarget(null);
                 }}
               >
                 <svg className="ember-modal-close-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -4536,34 +4394,21 @@ export function RightColumn({
             </div>
           </header>
 
-          {bbsView === 'list' && (
-            <div className="bbs-filters">
-              <div className="bbs-tabs">
-                <button
-                  type="button"
-                  className={bbsFilter === 'all' ? 'active' : ''}
-                  onClick={() => setBbsFilter('all')}
-                >
-                  All Threads
-                </button>
-                <button
-                  type="button"
-                  className={bbsFilter === 'tagged' ? 'active' : ''}
-                  onClick={() => setBbsFilter('tagged')}
-                >
-                  For {bbs?.projectDisplayName ?? 'This Project'}
-                </button>
-              </div>
-            </div>
-          )}
+          <BbsSyncActivity />
+
           {bbsError && <div className="bbs-error">{bbsError}</div>}
+          {bbsPublishMessage && <div className="bbs-error" role="status">{bbsPublishMessage}</div>}
           {bbsDeleteTarget && (
             <div className="kota-confirm-layer" role="dialog" aria-modal="true" aria-label="Delete BBS item">
               <div className="kota-confirm-card danger">
-                <h2>{bbsDeleteTarget.kind === 'topic' ? 'Delete Thread' : 'Delete Reply'}</h2>
-                <pre>{bbsDeleteTarget.kind === 'topic'
-                  ? 'Delete this thread?\n\nAll replies under it are deleted too.'
-                  : 'Delete this reply?'}</pre>
+                <h2>{bbsDeleteTarget.kind === 'version' ? 'Delete Version' : bbsDeleteTarget.kind === 'thread' ? 'Delete Thread' : 'Delete Reply'}</h2>
+                <pre>{bbsDeleteTarget.kind === 'version'
+                  ? 'Delete this version and its attachments?\n\nOther versions and replies are kept.'
+                  : bbsDeleteTarget.kind === 'thread'
+                    ? bbsDeleteTarget.allVersions
+                      ? 'Delete this thread and all its versions?\n\nAll replies under it are deleted too.'
+                      : 'Delete this thread?\n\nAll replies under it are deleted too.'
+                    : bbsDeleteTarget.allVersions ? 'Delete this reply and all its versions?' : 'Delete this reply?'}</pre>
                 <div className="kota-confirm-actions">
                   <button type="button" onClick={() => setBbsDeleteTarget(null)}>
                     Cancel
@@ -4571,7 +4416,7 @@ export function RightColumn({
                   <button
                     type="button"
                     className="confirm"
-                    disabled={bbsBusy === bbsDeleteTarget.postId}
+                    disabled={bbsBusy !== null}
                     onClick={() => {
                       const target = bbsDeleteTarget;
                       setBbsDeleteTarget(null);
@@ -4587,100 +4432,112 @@ export function RightColumn({
 
           {bbsView === 'list' && (
             <div className="bbs-thread-list">
-              {visibleBbsThreads.length === 0 ? (
-                <div className="bbs-empty">No BBS threads in this filter.</div>
-              ) : visibleBbsThreads.map((thread) => {
-                const topic = thread.posts.find((post) => post.kind === 'topic') ?? thread.posts[0];
-                if (!topic) return null;
-                const replyCount = thread.posts.length - 1;
-                const isHuman = topic.agentId === 'human';
-                const rowMeta = agentMeta?.[topic.agentId as AgentId];
-                const rowAvatarId = topic.agentAvatar ?? rowMeta?.avatarId ?? (isHuman ? 'user-default' : null);
-                const rowClass = rowAvatarId
-                  ? avatarClassForId(rowAvatarId, null)
-                  : rowMeta?.avatarClass ?? avatarClassForAgentFallback(null, topic.agentId);
-                return (
-                  <button
-                    key={thread.threadId}
-                    type="button"
-                    className={`bbs-thread-row ${thread.isNew ? 'new' : ''}`}
-                    onClick={() => openBbsDetail(thread)}
-                  >
-                    <span className={`bbs-new-dot ${thread.isNew ? '' : 'off'}`} aria-hidden />
-                    <span
-                      className={`bbs-msg-avatar sm tavern-avatar-art ${rowClass}`}
-                      style={avatarImageStyleForId(rowAvatarId)}
-                      aria-hidden
-                    >
-                      <span />
-                      <i />
-                      <b />
-                    </span>
-                    <span className={`bbs-msg-author ${isHuman ? 'human' : ''}`}>{topic.agentDisplayName}</span>
-                    <span className="bbs-time">{formatBbsTime(topic.createdAt)}</span>
-                    <span className="bbs-row-count">
-                      {replyCount} {replyCount === 1 ? 'Reply' : 'Replies'}
-                    </span>
-                    <span className="bbs-row-preview">{topic.preview}</span>
-                    {topic.body.length > 180 && <span className="bbs-row-more">See more</span>}
+              {bbsThreads.length === 0 ? (
+                <div className="bbs-empty">No BBS threads yet.</div>
+              ) : bbsThreads.map((thread) => {
+                const versions = bbsVersionViews.get(thread.threadId)!;
+                const unavailable = bbsUnavailableViews.get(thread.threadId)!;
+                const replyCount = versions.replyCount;
+                if (!versions.topics.length && unavailable.length) return (
+                  <button key={thread.threadId} type="button" className="bbs-thread-row"
+                    onClick={() => openBbsDetail(thread)}>
+                    <span className="bbs-row-count">Post unavailable</span>
+                    <BbsThreadSharing sharingGroupId={thread.sharingGroupId} />
+                    <span className="bbs-row-preview">{BBS_UNAVAILABLE_MESSAGE}</span>
+                    <code className="bbs-unavailable-id">{unavailable[0].postId}</code>
+                    <span className="bbs-row-count">{unavailable.length} unavailable · {replyCount} available {replyCount === 1 ? 'reply' : 'replies'}</span>
                   </button>
                 );
+                return versions.topics.map((version) => {
+                  const topic = version.post;
+                  const isHuman = topic.agentId === 'human';
+                  const rowMeta = agentMeta?.[topic.agentId as AgentId];
+                  return (
+                    <button
+                      key={version.key}
+                      type="button"
+                      className={`bbs-thread-row ${thread.isNew ? 'new' : ''}`}
+                      onClick={() => openBbsDetail(thread, version.key)}
+                      data-bbs-version-id={topic.versionId ?? undefined}
+                    >
+                      <span className={`bbs-new-dot ${thread.isNew ? '' : 'off'}`} aria-hidden />
+                      <BbsPostAvatar post={topic} meta={rowMeta} small />
+                      <span className={`bbs-msg-author ${isHuman ? 'human' : ''}`}>{topic.agentDisplayName}</span>
+                      <span className="bbs-time">{formatBbsTime(topic.createdAt)}</span>
+                      {version.forkNumber !== null && <span className="bbs-fork-label">Forked Version {version.forkNumber}</span>}
+                      <span className="bbs-row-count">
+                        {replyCount} {replyCount === 1 ? 'Reply' : 'Replies'}
+                      </span>
+                      {unavailable.length > 0 && <span className="bbs-row-count">{unavailable.length} unavailable</span>}
+                      <BbsThreadSharing sharingGroupId={thread.sharingGroupId} />
+                      <span className="bbs-row-preview">{topic.preview}</span>
+                      {topic.body.length > 180 && <span className="bbs-row-more">See more</span>}
+                    </button>
+                  );
+                });
               })}
             </div>
           )}
 
           {bbsView === 'detail' && bbsDetailThread && (() => {
-            const topic = bbsDetailThread.posts.find((post) => post.kind === 'topic')
-              ?? bbsDetailThread.posts[0];
-            if (!topic) return null;
-            const replies = bbsDetailThread.posts.filter((post) => post.postId !== topic.postId);
+            const versions = bbsVersionViews.get(bbsDetailThread.threadId)!;
+            const topic = bbsSelectedTopic(versions, bbsTopicVersionKey);
+            const unavailable = bbsUnavailableViews.get(bbsDetailThread.threadId)!;
+            if (!topic && !unavailable.length) return null;
             return (
               <div className="bbs-detail">
                 <div className="bbs-detail-scroll" ref={bbsDetailScrollRef}>
-                  {renderBbsFloor(topic, 1, true, bbsDetailThread)}
+                  {topic && versions.topics.length > 1 && <div className="bbs-fork-switcher" role="group" aria-label="Topic versions">
+                    {versions.topics.map((version) => <button key={version.key} type="button"
+                      aria-pressed={version.key === topic.key}
+                      onClick={() => setBbsTopicVersionKey(version.key)}
+                    >Forked Version {version.forkNumber}</button>)}
+                  </div>}
+                  {topic ? renderBbsFloor(topic, 1, true, bbsDetailThread) : <>
+                    <div className="bbs-unavailable-thread-head">
+                      <BbsThreadSharing sharingGroupId={bbsDetailThread.sharingGroupId} />
+                      <button type="button" className="bbs-floor-delete" disabled={bbsBusy !== null}
+                        onClick={() => setBbsDeleteTarget({ request: { threadId: bbsDetailThread.threadId }, kind: 'thread', allVersions: true })}
+                      >Delete thread</button>
+                    </div>
+                    {unavailable.map((post) => <BbsUnavailablePost key={post.postId} post={post} />)}
+                  </>}
                   <div className="bbs-replies-divider">
-                    {replies.length} {replies.length === 1 ? 'reply' : 'replies'}
+                    {versions.replyCount} {unavailable.length > 0 ? 'available ' : ''}{versions.replyCount === 1 ? 'reply' : 'replies'}
                   </div>
-                  {replies.map((post, index) => renderBbsFloor(post, index + 2, false, bbsDetailThread))}
+                  {versions.replies.flatMap((reply) => reply.versions.map((version) => renderBbsFloor(version, reply.floor, false, bbsDetailThread)))}
+                  {topic && unavailable.map((post) => <BbsUnavailablePost key={post.postId} post={post} />)}
                 </div>
-                <div className="bbs-reply-box">
-                  <div className="bbs-reply-shell">
+                {topic && <div className="bbs-reply-box">
+                  <div className="bbs-reply-shell bbs-mentions-shell">
+                    <BbsMentions kind="reply" sharingGroupId={bbsDetailThread.sharingGroupId} currentProjectId={bbsProjectId ?? ''}
+                      selected={bbsReplyAgents} onChange={setBbsReplyAgents} open={bbsReplyAgentBarOpen} onOpenChange={setBbsReplyAgentBarOpen}
+                      disabled={bbsReplyBusy} submit={<button type="button" className="bbs-reply-send"
+                        disabled={bbsReplyBusy || bbsEditorState.preparing || !bbsEditorState.hasContent} onClick={() => void publishBbs('reply')}>
+                        {bbsReplyBusy ? 'Sending…' : bbsEditorState.preparing ? 'Preparing…' : 'Reply'}
+                      </button>}>
                     <div className="bbs-reply-editor">
-                      <InputBar
+                      <BbsEditor
+                        key={`${bbsProjectId}:reply:${bbsDetailThread.threadId}`}
                         ref={bbsReplyInputRef}
-                        variant="embedded"
+                        disabled={bbsReplyBusy}
+                        onStateChange={setBbsEditorState}
+                        onError={setBbsPublishMessage}
                         value={bbsReplyText}
                         onChange={setBbsReplyText}
                         agentMeta={agentMeta}
                         mentionAgentIds={roomAgents}
                         placeholder="Reply…"
                         onPasteImage={onPasteImage}
-                        onMaterializeAttachments={onMaterializeAttachments}
                       />
                     </div>
-                    {renderBbsAgentBar()}
-                    <div className="bbs-reply-toolbar">
-                      <button
-                        type="button"
-                        className={`bbs-agent-bar-toggle ${bbsReplyAgentBarOpen ? 'on' : ''}`}
-                        onClick={() => setBbsReplyAgentBarOpen((open) => !open)}
-                      >
-                        @ Agent{bbsReplyAgents.length > 0 ? ` · ${bbsReplyAgents.length}` : ''}
-                      </button>
-                      <button
-                        type="button"
-                        className="bbs-reply-send"
-                        disabled={bbsReplyBusy || !bbsReplyText.trim()}
-                        onClick={() => void sendBbsReply()}
-                      >
-                        {bbsReplyBusy ? 'Sending…' : 'Reply'}
-                      </button>
-                    </div>
+                    </BbsMentions>
                   </div>
-                </div>
+                </div>}
               </div>
             );
           })()}
+          {bbsView === 'detail' && !bbsDetailThread && <div className="bbs-empty">This thread is no longer available.</div>}
 
           {bbsView === 'compose' && (
             <div className="bbs-detail">
@@ -4696,6 +4553,7 @@ export function RightColumn({
                       type="button"
                       className={`bbs-agent-chip ${selected ? 'sel' : ''}`}
                       aria-pressed={selected}
+                      disabled={bbsReplyBusy}
                       onClick={() => {
                         setBbsComposeProjects((current) => {
                           const next = new Set(current);
@@ -4711,44 +4569,36 @@ export function RightColumn({
                 })}
               </div>
               <div className="bbs-reply-box grow">
-                <div className="bbs-reply-shell grow">
+                <div className="bbs-reply-shell grow bbs-mentions-shell">
+                  <BbsMentions kind="topic" currentProjectId={bbsProjectId ?? ''} selected={bbsReplyAgents} onChange={setBbsReplyAgents}
+                    open={bbsReplyAgentBarOpen} onOpenChange={setBbsReplyAgentBarOpen} disabled={bbsReplyBusy}
+                    submit={<button type="button" className="bbs-reply-send"
+                      disabled={bbsReplyBusy || bbsEditorState.preparing || !bbsEditorState.hasContent} onClick={() => void publishBbs('topic')}>
+                      {bbsReplyBusy ? 'Posting…' : bbsEditorState.preparing ? 'Preparing…' : 'Post'}
+                    </button>}>
                   <div className="bbs-reply-editor grow">
-                    <InputBar
+                    <BbsEditor
+                      key={`${bbsProjectId}:compose`}
                       ref={bbsComposeInputRef}
-                      variant="embedded"
+                      disabled={bbsReplyBusy}
+                      onStateChange={setBbsEditorState}
+                      onError={setBbsPublishMessage}
                       value={bbsComposeText}
                       onChange={setBbsComposeText}
                       agentMeta={agentMeta}
                       mentionAgentIds={roomAgents}
                       placeholder={`Write a new post as ${bbsUserIdentity?.name?.trim() || 'Human'}…`}
                       onPasteImage={onPasteImage}
-                      onMaterializeAttachments={onMaterializeAttachments}
                     />
                   </div>
-                  {renderBbsAgentBar()}
-                  <div className="bbs-reply-toolbar">
-                    <button
-                      type="button"
-                      className={`bbs-agent-bar-toggle ${bbsReplyAgentBarOpen ? 'on' : ''}`}
-                      onClick={() => setBbsReplyAgentBarOpen((open) => !open)}
-                    >
-                      @ Agent{bbsReplyAgents.length > 0 ? ` · ${bbsReplyAgents.length}` : ''}
-                    </button>
-                    <button
-                      type="button"
-                      className="bbs-reply-send"
-                      disabled={bbsReplyBusy || !bbsComposeText.trim()}
-                      onClick={() => void submitBbsPost()}
-                    >
-                      {bbsReplyBusy ? 'Posting…' : 'Post'}
-                    </button>
-                  </div>
+                  </BbsMentions>
                 </div>
               </div>
             </div>
           )}
         </section>
       </div>
+      </BbsSyncScope>
     )}
     {lmHistoryOpen && (
       <div className="violet-summary-modal-shade" role="presentation">

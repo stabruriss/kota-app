@@ -1,0 +1,65 @@
+/* BBS-only roster layout B. Existing editor, room composer and bus bubbles are untouched. */
+.bbs-mentions-panel { min-width: 0; background: rgba(0,0,0,.12); border: 1px solid rgba(218,214,204,.14); border-radius: var(--r-sm); overflow: hidden; }
+.bbs-mentions-panel[hidden] { display: none; }
+.bbs-mentions-panel svg, .bbs-mentions-summary svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+.bbs-mentions-panel button, .bbs-mentions-summary button { font-family: var(--font-sans); cursor: pointer; }
+.bbs-mentions-panel button:disabled, .bbs-mentions-summary button:disabled { opacity: .42; cursor: default; }
+.bbs-mentions-panel button:focus-visible, .bbs-mentions-summary button:focus-visible { outline: 2px solid rgb(216,139,106); outline-offset: 2px; }
+.bbs-mentions-head { display: flex; align-items: center; padding: 8px 11px; color: var(--text-2); font-size: 11px; }
+.bbs-mentions-head strong { font-weight: 700; }
+.bbs-mentions-head button { display: inline-flex; margin-left: auto; padding: 4px; border: 0; border-radius: 3px; color: var(--text-4); background: none; }
+.bbs-mentions-devices { display: flex; align-items: stretch; gap: 6px; padding: 0 10px 10px; overflow-x: auto; scrollbar-width: thin; }
+.bbs-mentions-devices button { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; min-height: 29px; white-space: nowrap; border: 1px solid rgba(218,214,204,.16); border-radius: var(--r-sm); background: none; color: var(--text-3); font-size: 11px; }
+.bbs-mentions-devices button[aria-pressed="true"] { border-color: rgba(216,139,106,.34); background: rgba(216,139,106,.07); color: rgb(223,181,156); }
+.bbs-mentions-devices small { color: var(--text-4); font-size: 9px; }
+.bbs-mentions-count { color: rgb(216,161,127); font-size: 10px; margin-left: 3px; }
+.bbs-mentions-offline { display: block; width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: rgb(108,103,94); }
+.bbs-mentions-projects { max-height: 184px; padding: 0 12px; overflow: auto; scrollbar-width: thin; overscroll-behavior: contain; }
+.bbs-mentions-project { display: grid; grid-template-columns: 117px minmax(0,1fr); gap: 12px; padding: 10px 0; border-top: 1px solid rgba(218,214,204,.07); }
+.bbs-mentions-project-head { display: flex; align-items: flex-start; gap: 7px; padding-top: 5px; color: rgb(189,176,159); font-size: 11px; }
+.bbs-mentions-project-head svg { color: rgb(142,122,101); margin-top: 2px; }
+.bbs-mentions-project-head strong { display: block; font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
+.bbs-mentions-project-head small { display: block; color: var(--text-4); margin-top: 2px; font-size: 9px; }
+.bbs-mentions-agents { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px; min-width: 0; }
+.bbs-mentions-agent { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; min-height: 29px; gap: 6px; padding: 2px 8px 2px 3px; border: 1px solid rgba(218,214,204,.16); border-radius: 18px; background: none; color: var(--text-2); }
+.bbs-mentions-agent[aria-checked="true"] { border-color: rgba(216,139,106,.4); background: rgba(216,139,106,.1); color: rgb(223,192,171); }
+.bbs-mentions-agent-name { font-size: 11px; overflow-wrap: anywhere; }
+.bbs-mentions-agent .bbs-mentions-check { visibility: hidden; width: 11px; height: 11px; }
+.bbs-mentions-agent[aria-checked="true"] .bbs-mentions-check { visibility: visible; color: rgb(230,181,143); stroke-width: 2.3; }
+.bbs-mentions-avatar, .bbs-mentions-avatar.tavern-avatar-art { display: inline-flex; position: relative; flex: 0 0 21px; width: 21px; height: 21px; border: 1px solid rgba(218,214,204,.13); border-radius: 50%; overflow: hidden; align-items: center; justify-content: center; }
+.bbs-mentions-letter { color: rgb(193,185,172); background: rgb(36,37,41); font-size: 9px; }
+.bbs-mentions-avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+/* Keep Reply/Post reachable in a short WebView with the inline picker open.
+   The editor keeps its DOM position; oversized chrome scrolls, never clips. */
+.bbs-mentions-shell { max-height: max(180px, calc(100dvh - 250px)); overflow-y: auto; scrollbar-width: thin; overscroll-behavior: contain; }
+.bbs-mentions-shell > .bbs-mentions-panel, .bbs-mentions-shell > .bbs-mentions-summary, .bbs-mentions-shell > .bbs-reply-toolbar { flex-shrink: 0; }
+.bbs-mentions-shell > .bbs-reply-editor.grow { min-height: 140px; }
+.bbs-mentions-shell > .bbs-reply-toolbar { position: sticky; bottom: 0; z-index: 1; padding-top: 5px; background: rgb(21,22,24); }
+.bbs-mentions-footer { display: flex; align-items: center; gap: 12px; min-height: 37px; padding: 6px 12px; border-top: 1px solid rgba(218,214,204,.14); color: var(--text-3); font-size: 10px; }
+.bbs-mentions-clear { padding: 3px 0; border: 0; background: none; color: var(--text-4); font-size: 10px; }
+.bbs-mentions-done { margin-left: auto; padding: 3px 12px; border: 1px solid rgba(218,214,204,.16); border-radius: var(--r-sm); background: rgba(218,214,204,.08); color: var(--text-2); font-size: 11px; }
+.bbs-mentions-message { display: flex; gap: 12px; align-items: center; margin: 0; padding: 9px 12px; color: var(--text-3); font-size: 11px; }
+.bbs-mentions-message button, .bbs-mentions-more { display: block; padding: 5px 6px; border: 0; background: none; color: rgb(216,161,127); font-size: 10px; }
+.bbs-mentions-warning { margin: 0; padding: 7px 12px; color: rgb(209,165,139); font-size: 10px; background: rgba(216,139,106,.04); }
+.bbs-mentions-summary { margin: 0 1px; padding: 1px 0 1px 10px; max-height: 110px; overflow: auto; scrollbar-width: thin; border-left: 2px solid rgb(141,101,78); }
+.bbs-mentions-group { display: flex; align-items: flex-start; gap: 13px; margin: 4px 0; }
+.bbs-mentions-route { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 192px; max-width: 240px; margin-top: 3px; color: var(--text-3); font-size: 10px; overflow-wrap: anywhere; }
+.bbs-mentions-route svg { color: var(--text-4); width: 12px; height: 12px; }
+.bbs-mentions-route .bbs-mentions-slash { color: rgb(104,97,88); }
+.bbs-mentions-route > span:last-child { color: rgb(199,178,158); }
+.bbs-mentions-names { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; gap: 5px; }
+.bbs-mentions-names button { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 7px; border: 1px solid rgba(216,139,106,.2); border-radius: 15px; background: rgba(216,139,106,.04); color: rgb(208,182,164); font-size: 11px; overflow-wrap: anywhere; }
+.bbs-mentions-names svg { width: 10px; height: 10px; color: rgb(164,141,125); }
+.bbs-mentions-scope { color: var(--text-4); font-size: 10px; }
+@media (max-width: 640px) {
+  .bbs-mentions-devices small { display: none; }
+  .bbs-mentions-devices button { padding: 3px 7px; font-size: 10px; }
+  .bbs-mentions-project { grid-template-columns: 1fr; gap: 8px; padding: 8px 0; }
+  .bbs-mentions-project-head { align-items: center; padding-top: 0; }
+  .bbs-mentions-project-head small { display: none; }
+  .bbs-mentions-group { display: block; margin: 4px 0 7px; }
+  .bbs-mentions-route { margin: 0 0 3px; max-width: none; min-width: 0; }
+  .bbs-mentions-summary { max-height: 137px; }
+  .bbs-mentions-scope { font-size: 9px; }
+}
+@media (prefers-reduced-motion: reduce) { .bbs-mentions-panel *, .bbs-mentions-summary * { animation: none !important; transition: none !important; } }

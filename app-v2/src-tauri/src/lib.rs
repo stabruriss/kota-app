@@ -5,9 +5,13 @@
 //! rendering (modules declared below but empty). M6 brings Violet log
 //! tailers and Dreams.
 
+mod adapter_sync;
+mod agent_directory;
 pub mod agent_bus;
 pub mod bartender;
 pub mod bbs;
+pub mod bbs_sync;
+mod claude_native_images;
 pub mod laughing_man;
 pub mod ember;
 mod integrations;
@@ -917,7 +921,10 @@ fn system_prompt_reset(request: SystemPromptReadRequest) -> Result<SystemPromptR
     system_prompt_read_template(&request.path, true)
 }
 
-fn system_prompt_read_template(path: &str, overwrite: bool) -> Result<SystemPromptReadResult, String> {
+fn system_prompt_read_template(
+    path: &str,
+    overwrite: bool,
+) -> Result<SystemPromptReadResult, String> {
     let template = known_system_prompt_template(path)
         .ok_or_else(|| format!("unsupported system prompt template: {}", path))?;
     let path = ensure_system_prompt_template(template, overwrite)?;
@@ -1154,14 +1161,23 @@ fn account_user_identity_load() -> Result<AccountUserIdentity, String> {
 }
 
 #[tauri::command]
-fn account_user_identity_save(identity: AccountUserIdentity) -> Result<AccountUserIdentity, String> {
-    let previous_name = load_account_user_identity()
-        .unwrap_or_else(|_| default_account_user_identity())
-        .name;
-    let saved = save_account_user_identity(identity)?;
-    if previous_name.trim() != saved.name.trim() {
-        regenerate_all_project_adapters_for_account_context_async("account user identity save");
-    }
+async fn account_user_identity_save(
+    identity: AccountUserIdentity,
+) -> Result<AccountUserIdentity, String> {
+    let (saved, roots) = adapter_sync::submit(move || {
+        let before = load_account_user_identity()
+            .ok()
+            .map(|identity| identity.name);
+        let saved = save_account_user_identity(identity)?;
+        let roots = if before.as_deref() == Some(saved.name.as_str()) {
+            Vec::new()
+        } else {
+            registered_adapter_projects()?
+        };
+        Ok((saved, roots))
+    })
+    .await?;
+    sync_saved_account_projects(roots).await?;
     Ok(saved)
 }
 
@@ -1172,42 +1188,62 @@ fn account_rules_list() -> Result<Vec<AccountRuleDraft>, String> {
 }
 
 #[tauri::command]
-fn account_rule_save(request: AccountRuleSaveRequest) -> Result<Vec<AccountRuleDraft>, String> {
-    ensure_default_account_rules(false)?;
-    save_account_rule_file(&request)?;
-    if let Err(err) = regenerate_all_project_adapters_for_account_rules() {
-        eprintln!("Kota adapter regeneration after account rule save failed: {err}");
-    }
-    read_account_rule_drafts()
+async fn account_rule_save(
+    request: AccountRuleSaveRequest,
+) -> Result<Vec<AccountRuleDraft>, String> {
+    let (saved, roots) = adapter_sync::submit(move || {
+        let saved: Result<Vec<AccountRuleDraft>, String> = (|| {
+            ensure_default_account_rules(false)?;
+            save_account_rule_file(&request)?;
+            read_account_rule_drafts()
+        })();
+        Ok((saved?, registered_adapter_projects()?))
+    })
+    .await?;
+    sync_saved_account_projects(roots).await?;
+    Ok(saved)
 }
 
 #[tauri::command]
-fn account_rule_delete(request: AccountRuleDeleteRequest) -> Result<Vec<AccountRuleDraft>, String> {
-    ensure_default_account_rules(false)?;
-    let file_name = sanitize_rule_file_name(&request.file_name)?;
-    if bundled_account_rule_content(&file_name).is_some() {
-        return Err(
+async fn account_rule_delete(
+    request: AccountRuleDeleteRequest,
+) -> Result<Vec<AccountRuleDraft>, String> {
+    let (saved, roots) = adapter_sync::submit(move || {
+        let saved: Result<Vec<AccountRuleDraft>, String> = (|| {
+            ensure_default_account_rules(false)?;
+            let file_name = sanitize_rule_file_name(&request.file_name)?;
+            if bundled_account_rule_content(&file_name).is_some() {
+                return Err(
             "Kota default rules cannot be deleted. Use Reset to Factory to restore defaults."
                 .into(),
         );
-    }
-    let path = account_rules_dir().join(file_name);
-    if path.exists() {
-        fs::remove_file(&path).map_err(|err| format!("remove {}: {err}", path.display()))?;
-    }
-    if let Err(err) = regenerate_all_project_adapters_for_account_rules() {
-        eprintln!("Kota adapter regeneration after account rule delete failed: {err}");
-    }
-    read_account_rule_drafts()
+            }
+            let path = account_rules_dir().join(file_name);
+            if path.exists() {
+                fs::remove_file(&path)
+                    .map_err(|err| format!("remove {}: {err}", path.display()))?;
+            }
+            read_account_rule_drafts()
+        })();
+        Ok((saved?, registered_adapter_projects()?))
+    })
+    .await?;
+    sync_saved_account_projects(roots).await?;
+    Ok(saved)
 }
 
 #[tauri::command]
-fn account_rules_reset_defaults() -> Result<Vec<AccountRuleDraft>, String> {
-    reset_account_rules_to_factory()?;
-    if let Err(err) = regenerate_all_project_adapters_for_account_rules() {
-        eprintln!("Kota adapter regeneration after account rule reset failed: {err}");
-    }
-    read_account_rule_drafts()
+async fn account_rules_reset_defaults() -> Result<Vec<AccountRuleDraft>, String> {
+    let (saved, roots) = adapter_sync::submit(move || {
+        let saved: Result<Vec<AccountRuleDraft>, String> = (|| {
+            reset_account_rules_to_factory()?;
+            read_account_rule_drafts()
+        })();
+        Ok((saved?, registered_adapter_projects()?))
+    })
+    .await?;
+    sync_saved_account_projects(roots).await?;
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -1222,29 +1258,41 @@ fn project_rules_list(request: ProjectRulesRequest) -> Result<Vec<AccountRuleDra
 }
 
 #[tauri::command]
-fn project_rule_save(request: ProjectRuleSaveRequest) -> Result<Vec<AccountRuleDraft>, String> {
-    let rules_dir = project_rules_dir_from_request(
-        request.project_root.as_deref(),
-        request.rules_dir.as_deref(),
-    )?;
-    save_rule_file_in_dir(&rules_dir, &request.rule)?;
-    regenerate_project_adapters_for_rules_request(request.project_root.as_deref(), &rules_dir);
-    read_rule_drafts_from_dir(&rules_dir, false)
+async fn project_rule_save(
+    request: ProjectRuleSaveRequest,
+) -> Result<Vec<AccountRuleDraft>, String> {
+    adapter_sync::submit(move || {
+        let rules_dir = project_rules_dir_from_request(
+            request.project_root.as_deref(),
+            request.rules_dir.as_deref(),
+        )?;
+        save_rule_file_in_dir(&rules_dir, &request.rule)?;
+        regenerate_project_adapters_for_rules_request(request.project_root.as_deref(), &rules_dir)
+            .map_err(|err| format!("Source saved, but adapter sync failed: {err}"))?;
+        read_rule_drafts_from_dir(&rules_dir, false)
+    })
+    .await
 }
 
 #[tauri::command]
-fn project_rule_delete(request: ProjectRuleDeleteRequest) -> Result<Vec<AccountRuleDraft>, String> {
-    let rules_dir = project_rules_dir_from_request(
-        request.project_root.as_deref(),
-        request.rules_dir.as_deref(),
-    )?;
-    let file_name = sanitize_rule_file_name(&request.file_name)?;
-    let path = rules_dir.join(file_name);
-    if path.exists() {
-        fs::remove_file(&path).map_err(|err| format!("remove {}: {err}", path.display()))?;
-    }
-    regenerate_project_adapters_for_rules_request(request.project_root.as_deref(), &rules_dir);
-    read_rule_drafts_from_dir(&rules_dir, false)
+async fn project_rule_delete(
+    request: ProjectRuleDeleteRequest,
+) -> Result<Vec<AccountRuleDraft>, String> {
+    adapter_sync::submit(move || {
+        let rules_dir = project_rules_dir_from_request(
+            request.project_root.as_deref(),
+            request.rules_dir.as_deref(),
+        )?;
+        let file_name = sanitize_rule_file_name(&request.file_name)?;
+        let path = rules_dir.join(file_name);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|err| format!("remove {}: {err}", path.display()))?;
+        }
+        regenerate_project_adapters_for_rules_request(request.project_root.as_deref(), &rules_dir)
+            .map_err(|err| format!("Source saved, but adapter sync failed: {err}"))?;
+        read_rule_drafts_from_dir(&rules_dir, false)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1254,48 +1302,70 @@ fn account_skills_list() -> Result<Vec<AccountSkillDraft>, String> {
 }
 
 #[tauri::command]
-fn account_skill_delete(request: AccountSkillRequest) -> Result<Vec<AccountSkillDraft>, String> {
-    ensure_default_account_skills(false)?;
-    let skill_id = sanitize_skill_id(&request.skill_id)?;
-    if bundled_account_skill(&skill_id).is_some() {
-        return Err("Kota default skills cannot be deleted.".into());
-    }
-    let path = account_skills_dir().join(&skill_id);
-    if path.exists() {
-        remove_account_skill_dir(&path)?;
-    }
-    read_account_skill_drafts()
+async fn account_skill_delete(
+    request: AccountSkillRequest,
+) -> Result<Vec<AccountSkillDraft>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_default_account_skills(false)?;
+        let skill_id = sanitize_skill_id(&request.skill_id)?;
+        if bundled_account_skill(&skill_id).is_some() {
+            return Err("Kota default skills cannot be deleted.".into());
+        }
+        let path = account_skills_dir().join(&skill_id);
+        if path.exists() {
+            remove_account_skill_dir(&path)?;
+        }
+        sync_saved_skill_pool(&skill_id)?;
+        read_account_skill_drafts()
+    })
+    .await
+    .map_err(|error| format!("join account_skill_delete: {error}"))?
 }
 
 #[tauri::command]
-fn account_skill_import_archive(
+async fn account_skill_import_archive(
     request: AccountSkillImportArchiveRequest,
 ) -> Result<AccountSkillImportResult, String> {
-    ensure_default_account_skills(false)?;
-    let imported = decode_account_skill_archive_payload(&request.data_base64)?;
-    let skill_id = import_account_skill_archive(&request.file_name, &imported)?;
-    account_skill_import_result(&skill_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_default_account_skills(false)?;
+        let imported = decode_account_skill_archive_payload(&request.data_base64)?;
+        let skill_id = import_account_skill_archive(&request.file_name, &imported)?;
+        sync_saved_skill_pool(&skill_id)?;
+        account_skill_import_result(&skill_id)
+    })
+    .await
+    .map_err(|error| format!("join account_skill_import_archive: {error}"))?
 }
 
 #[tauri::command]
-fn account_skill_import_folder(
+async fn account_skill_import_folder(
     request: AccountSkillImportFolderRequest,
 ) -> Result<AccountSkillImportResult, String> {
-    ensure_default_account_skills(false)?;
-    let skill_id = import_account_skill_folder(&request.folder_name, request.files)?;
-    account_skill_import_result(&skill_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_default_account_skills(false)?;
+        let skill_id = import_account_skill_folder(&request.folder_name, request.files)?;
+        sync_saved_skill_pool(&skill_id)?;
+        account_skill_import_result(&skill_id)
+    })
+    .await
+    .map_err(|error| format!("join account_skill_import_folder: {error}"))?
 }
 
 #[tauri::command]
-fn account_skill_import_from_picker() -> Result<AccountSkillImportPickerResult, String> {
-    ensure_default_account_skills(false)?;
-    let Some(path) = pick_account_skill_import_path()? else {
-        return Ok(AccountSkillImportPickerResult { result: None });
-    };
-    let skill_id = import_account_skill_path(&path)?;
-    Ok(AccountSkillImportPickerResult {
-        result: Some(account_skill_import_result(&skill_id)?),
+async fn account_skill_import_from_picker() -> Result<AccountSkillImportPickerResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_default_account_skills(false)?;
+        let Some(path) = pick_account_skill_import_path()? else {
+            return Ok(AccountSkillImportPickerResult { result: None });
+        };
+        let skill_id = import_account_skill_path(&path)?;
+        sync_saved_skill_pool(&skill_id)?;
+        Ok(AccountSkillImportPickerResult {
+            result: Some(account_skill_import_result(&skill_id)?),
+        })
     })
+    .await
+    .map_err(|error| format!("join account_skill_import_from_picker: {error}"))?
 }
 
 #[tauri::command]
@@ -1333,36 +1403,50 @@ fn hero_avatar_delete(request: HeroAvatarDeleteRequest) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn tavern_incarnate_hero(
+async fn tavern_incarnate_hero(
     app: AppHandle,
-    manager: State<'_, IntegrationManager>,
     request: TavernIncarnateHeroRequest,
 ) -> Result<TavernIncarnateHeroResult, String> {
-    let ctx =
-        resolve_incarnation_context(&manager, request.project_root.as_deref(), &request.agent_id)?;
-    save_profile_for_new_incarnation(&ctx, &request)?;
-    materialize_tavern_incarnation(&app, &manager, request, ctx).map_err(|err| err.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        let ctx = resolve_incarnation_context(
+            &manager,
+            request.project_root.as_deref(),
+            &request.agent_id,
+        )?;
+        save_profile_for_new_incarnation(&ctx, &request)?;
+        materialize_tavern_incarnation(&app, &manager, request, ctx).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("join tavern_incarnate_hero: {err}"))?
 }
 
 #[tauri::command]
-fn project_agent_load_detail(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_load_detail(
+    app: AppHandle,
     request: ProjectAgentRequest,
 ) -> Result<ProjectAgentDetail, String> {
-    let started = Instant::now();
-    let requested_root = request.project_root.as_deref().unwrap_or("<active>");
-    let result =
-        load_project_agent_detail(&manager, request.project_root.as_deref(), &request.agent_id);
-    if let Err(err) = &result {
-        kota_debug_log(&format!(
-            "[hydration] detail failed requested_root={} agent={} elapsed_ms={} error={}",
-            requested_root,
-            request.agent_id,
-            started.elapsed().as_millis(),
-            err
-        ));
-    }
-    result
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        let started = Instant::now();
+        let requested_root = request.project_root.as_deref().unwrap_or("<active>");
+        let result =
+            load_project_agent_detail(&manager, request.project_root.as_deref(), &request.agent_id);
+        if let Err(err) = &result {
+            kota_debug_log(&format!(
+                "[hydration] detail failed requested_root={} agent={} elapsed_ms={} error={}",
+                requested_root,
+                request.agent_id,
+                started.elapsed().as_millis(),
+                err
+            ));
+        }
+        result
+    })
+    .await
+    .map_err(|err| format!("join project_agent_load_detail: {err}"))?
 }
 
 #[tauri::command]
@@ -1374,78 +1458,111 @@ fn project_agent_commend(
 }
 
 #[tauri::command]
-fn project_agent_resolve_launch(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_resolve_launch(
+    app: AppHandle,
     request: ProjectAgentRequest,
 ) -> Result<ProjectAgentLaunchResolution, String> {
-    let launch =
-        resolve_project_agent_launch(&manager, request.project_root.as_deref(), &request.agent_id)?;
-    if claude_resume_target_availability(&launch) == ResumeTargetAvailability::Unavailable {
-        return Ok(ProjectAgentLaunchResolution::SessionUnavailable);
-    }
-    Ok(ProjectAgentLaunchResolution::Ready { request: launch })
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        let launch = resolve_project_agent_launch(
+            &manager,
+            request.project_root.as_deref(),
+            &request.agent_id,
+        )?;
+        if claude_resume_target_availability(&launch) == ResumeTargetAvailability::Unavailable {
+            return Ok(ProjectAgentLaunchResolution::SessionUnavailable);
+        }
+        Ok(ProjectAgentLaunchResolution::Ready { request: launch })
+    })
+    .await
+    .map_err(|err| format!("join project_agent_resolve_launch: {err}"))?
 }
 
 #[tauri::command]
-fn project_agent_start_fresh_session(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_start_fresh_session(
+    app: AppHandle,
     request: ProjectAgentRequest,
 ) -> Result<ProjectAgentFreshSessionResult, String> {
-    start_fresh_project_agent_session(&manager, request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        start_fresh_project_agent_session(&manager, request)
+    })
+    .await
+    .map_err(|err| format!("join project_agent_start_fresh_session: {err}"))?
 }
 
 #[tauri::command]
-fn project_agent_clear_session_metadata(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_clear_session_metadata(
+    app: AppHandle,
     request: ProjectAgentRequest,
 ) -> Result<ProjectAgentDetail, String> {
-    clear_project_agent_session_metadata_request(&manager, request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        clear_project_agent_session_metadata_request(&manager, request)
+    })
+    .await
+    .map_err(|err| format!("join project_agent_clear_session_metadata: {err}"))?
 }
 
 #[tauri::command]
-fn agent_bus_send(
+async fn agent_bus_send(
     app: AppHandle,
-    manager: State<'_, IntegrationManager>,
-    pty: State<'_, PtyManager>,
-    agent_bus: State<'_, AgentBusManager>,
     request: agent_bus::AgentBusSendRequest,
 ) -> Result<agent_bus::AgentBusSendResult, String> {
-    let project_root = resolve_project_root_for_listing(&manager, request.project_root.as_deref())?;
-    let target_agent_id = agent_bus
-        .resolve_target_agent_id(&project_root, &request.target)
-        .map_err(|err| err.to_string())?;
-    let launch_request = resolve_project_agent_launch(
-        &manager,
-        Some(&path_string(&project_root)),
-        &target_agent_id,
-    )
-    .ok();
-    agent_bus
-        .send_request(&app, &pty, &project_root, request, launch_request)
-        .map_err(|err| err.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+        let pty = app.state::<PtyManager>();
+        let agent_bus = app.state::<AgentBusManager>();
+
+        let project_root =
+            resolve_project_root_for_listing(&manager, request.project_root.as_deref())?;
+        let target_agent_id = agent_bus
+            .resolve_target_agent_id(&project_root, &request.target)
+            .map_err(|err| err.to_string())?;
+        let launch_request = resolve_project_agent_launch(
+            &manager,
+            Some(&path_string(&project_root)),
+            &target_agent_id,
+        )
+        .ok();
+        agent_bus
+            .send_request(&app, &pty, &project_root, request, launch_request)
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("join agent_bus_send: {err}"))?
 }
 
 #[tauri::command]
-fn agent_bus_retry_delivery(
+async fn agent_bus_retry_delivery(
     app: AppHandle,
-    manager: State<'_, IntegrationManager>,
-    pty: State<'_, PtyManager>,
-    agent_bus: State<'_, AgentBusManager>,
     request: agent_bus::AgentBusRetryDeliveryRequest,
 ) -> Result<agent_bus::AgentBusRetryDeliveryResult, String> {
-    let project_root = resolve_project_root_for_listing(&manager, request.project_root.as_deref())?;
-    let target_agent_id = agent_bus
-        .resolve_target_agent_id(&project_root, &request.target_agent_id)
-        .map_err(|err| err.to_string())?;
-    let launch_request = resolve_project_agent_launch(
-        &manager,
-        Some(&path_string(&project_root)),
-        &target_agent_id,
-    )
-    .ok();
-    agent_bus
-        .retry_delivery(&app, &pty, &project_root, request, launch_request)
-        .map_err(|err| err.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+        let pty = app.state::<PtyManager>();
+        let agent_bus = app.state::<AgentBusManager>();
+
+        let project_root =
+            resolve_project_root_for_listing(&manager, request.project_root.as_deref())?;
+        let target_agent_id = agent_bus
+            .resolve_target_agent_id(&project_root, &request.target_agent_id)
+            .map_err(|err| err.to_string())?;
+        let launch_request = resolve_project_agent_launch(
+            &manager,
+            Some(&path_string(&project_root)),
+            &target_agent_id,
+        )
+        .ok();
+        agent_bus
+            .retry_delivery(&app, &pty, &project_root, request, launch_request)
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("join agent_bus_retry_delivery: {err}"))?
 }
 
 #[tauri::command]
@@ -1508,12 +1625,16 @@ fn ember_schedule_save(
 }
 
 #[tauri::command]
-fn ember_scheduler_tick(
+async fn ember_scheduler_tick(
     app: AppHandle,
     request: ember::EmberSchedulerTickRequest,
 ) -> Result<ember::EmberSchedulerTickResult, String> {
-    ember::scheduler_tick(&app, &request.project_roots, &request.working_agent_ids)
-        .map_err(|err| err.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        ember::scheduler_tick(&app, &request.project_roots, &request.working_agent_ids)
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("join ember_scheduler_tick: {err}"))?
 }
 
 #[tauri::command]
@@ -1583,54 +1704,86 @@ fn ember_prepare_dreams(
 }
 
 #[tauri::command]
-fn project_agent_save_detail(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_save_detail(
+    app: AppHandle,
     request: ProjectAgentSaveRequest,
 ) -> Result<ProjectAgentDetail, String> {
-    save_project_agent_detail(&manager, request)
+    adapter_sync::submit(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        save_project_agent_detail(&manager, request)
+    })
+    .await
 }
 
 #[tauri::command]
-fn project_agent_archive(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_archive(
+    app: AppHandle,
     request: ProjectAgentLifecycleRequest,
 ) -> Result<ProjectAgentLifecycleResult, String> {
-    archive_project_agent(&manager, request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        archive_project_agent(&manager, request)
+    })
+    .await
+    .map_err(|err| format!("join project_agent_archive: {err}"))?
 }
 
 #[tauri::command]
-fn project_agent_call_back(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_call_back(
+    app: AppHandle,
     request: ProjectAgentRequest,
 ) -> Result<ProjectAgentDetail, String> {
-    let ctx =
-        resolve_incarnation_context(&manager, request.project_root.as_deref(), &request.agent_id)?;
-    set_project_agent_status(
-        &manager,
-        request.project_root.as_deref(),
-        &request.agent_id,
-        "active",
-        None,
-    )?;
-    violet::preserve_project_agent_active_identity(&ctx.project_root, &request.agent_id)?;
-    refresh_laughing_man_project_catalog(&manager);
-    load_project_agent_detail(&manager, request.project_root.as_deref(), &request.agent_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        let ctx = resolve_incarnation_context(
+            &manager,
+            request.project_root.as_deref(),
+            &request.agent_id,
+        )?;
+        set_project_agent_status(
+            &manager,
+            request.project_root.as_deref(),
+            &request.agent_id,
+            "active",
+            None,
+        )?;
+        violet::preserve_project_agent_active_identity(&ctx.project_root, &request.agent_id)?;
+        refresh_laughing_man_project_catalog(&manager);
+        load_project_agent_detail(&manager, request.project_root.as_deref(), &request.agent_id)
+    })
+    .await
+    .map_err(|err| format!("join project_agent_call_back: {err}"))?
 }
 
 #[tauri::command]
-fn project_agent_dismiss(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_dismiss(
+    app: AppHandle,
     request: ProjectAgentLifecycleRequest,
 ) -> Result<ProjectAgentLifecycleResult, String> {
-    dismiss_project_agent(&manager, request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        dismiss_project_agent(&manager, request)
+    })
+    .await
+    .map_err(|err| format!("join project_agent_dismiss: {err}"))?
 }
 
 #[tauri::command]
-fn project_agent_list_archived(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_list_archived(
+    app: AppHandle,
     project_root: Option<String>,
 ) -> Result<Vec<ProjectAgentDetail>, String> {
-    list_project_agents(&manager, project_root.as_deref(), true)
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        list_project_agents(&manager, project_root.as_deref(), true)
+    })
+    .await
+    .map_err(|err| format!("join project_agent_list_archived: {err}"))?
 }
 
 #[tauri::command]
@@ -1659,11 +1812,14 @@ fn project_agent_layout_save(
 }
 
 #[tauri::command]
-fn project_agent_invite_to_tavern(
-    manager: State<'_, IntegrationManager>,
+async fn project_agent_invite_to_tavern(
+    app: AppHandle,
     request: ProjectAgentInviteRequest,
 ) -> Result<ProjectAgentInviteResult, String> {
-    invite_project_agent_to_tavern(&manager, request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+        invite_project_agent_to_tavern(&manager, request)
+    }).await.map_err(|err| format!("join project_agent_invite_to_tavern: {err}"))?
 }
 
 #[tauri::command]
@@ -2257,25 +2413,34 @@ fn normalize_account_user_identity(mut identity: AccountUserIdentity) -> Account
 fn load_account_user_identity() -> Result<AccountUserIdentity, String> {
     let path = account_user_identity_path();
     if !path.exists() {
+        // Only the sync worker owns the observed-file catalog; UI reads keep
+        // their existing first-use default behavior outside that thread.
+        if adapter_sync::account_identity_was_present() {
+            return Err(format!(
+                "account identity missing; preserve existing adapters: {}",
+                path.display()
+            ));
+        }
         return Ok(default_account_user_identity());
     }
     let bytes = fs::read(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
-    let identity: AccountUserIdentity = serde_json::from_slice(&bytes)
-        .map_err(|err| format!("parse {}: {err}", path.display()))?;
+    let identity: AccountUserIdentity =
+        serde_json::from_slice(&bytes).map_err(|err| format!("parse {}: {err}", path.display()))?;
     Ok(normalize_account_user_identity(identity))
 }
 
-fn save_account_user_identity(identity: AccountUserIdentity) -> Result<AccountUserIdentity, String> {
+fn save_account_user_identity(
+    identity: AccountUserIdentity,
+) -> Result<AccountUserIdentity, String> {
     let identity = normalize_account_user_identity(identity);
     let path = account_user_identity_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("create {}: {err}", parent.display()))?;
     }
-    fs::write(
+    adapter_sync::write_if_changed(
         &path,
-        serde_json::to_vec_pretty(&identity).map_err(|err| err.to_string())?,
-    )
-    .map_err(|err| format!("write {}: {err}", path.display()))?;
+        &serde_json::to_vec_pretty(&identity).map_err(|err| err.to_string())?,
+    )?;
     Ok(identity)
 }
 
@@ -2709,7 +2874,9 @@ fn write_user_avatar_index(dir: &Path, items: &[StoredUserHeroAvatar]) -> Result
         &path,
         serde_json::to_vec_pretty(items).map_err(|err| err.to_string())?,
     )
-    .map_err(|err| format!("write {}: {err}", path.display()))
+    .map_err(|err| format!("write {}: {err}", path.display()))?;
+    bbs_sync::roster::runtime::local_changed();
+    Ok(())
 }
 
 fn load_user_hero_avatars() -> Result<Vec<UserHeroAvatar>, String> {
@@ -3018,6 +3185,7 @@ fn tavern_display_name_key(name: &str) -> String {
         .to_lowercase()
 }
 
+#[derive(Clone)]
 struct IncarnationContext {
     project_root: PathBuf,
     source_dir: PathBuf,
@@ -3121,19 +3289,21 @@ fn materialize_tavern_incarnation(
     let skill_projection = project_account_skills(&ctx.cwd, cli, &shell.skills)?;
 
     let shell_path = ctx.cwd.join("SHELL.yaml");
-    fs::write(&shell_path, compile_shell_yaml_text(&shell))
-        .map_err(|err| format!("write {}: {err}", shell_path.display()))?;
+    adapter_sync::write_if_changed(&shell_path, compile_shell_yaml_text(&shell).as_bytes())?;
 
     let session_id = generated_session_id_for_cli(cli);
     let agent_yaml = compile_agent_yaml(&request, &shell, cli, session_id.as_deref());
-    fs::write(ctx.cwd.join("agent.yaml"), agent_yaml)
-        .map_err(|err| format!("write agent.yaml for {}: {err}", request.agent_id))?;
+    adapter_sync::write_if_changed(&ctx.cwd.join("agent.yaml"), agent_yaml.as_bytes())?;
 
     let adapter_name = adapter_file_for_cli(cli);
     let adapter_path = ctx.cwd.join(adapter_name);
-    let adapter = compile_provider_adapter(&request, &ctx, cli, &skill_projection)?;
-    fs::write(&adapter_path, adapter)
-        .map_err(|err| format!("write {}: {err}", adapter_path.display()))?;
+    let compiled_request = request.clone();
+    let compiled_context = ctx.clone();
+    let output_path = adapter_path.clone();
+    adapter_sync::call(move || {
+        let adapter = compile_provider_adapter(&compiled_request, &compiled_context, cli)?;
+        adapter_sync::write_if_changed(&output_path, adapter.as_bytes()).map(|_| ())
+    })?;
     let launch_cwd = launch_cwd_for_cli(cli, &ctx, &request.agent_id)?;
     append_incarnation_credit_events(
         &ctx,
@@ -3176,12 +3346,7 @@ fn materialize_tavern_incarnation(
             })
             .map_err(|err| err.to_string())?;
     }
-    if let Err(err) = regenerate_project_adapters_in_root(&ctx.project_root) {
-        eprintln!(
-            "Kota adapter regeneration after incarnation failed in {}: {err}",
-            ctx.project_root.display()
-        );
-    }
+    refresh_project_adapters_after_lifecycle(&ctx.project_root, "agent created");
 
     Ok(TavernIncarnateHeroResult {
         request: spawn_request,
@@ -3446,7 +3611,38 @@ fn project_account_skills(
     cli: pty::agent::AgentCli,
     skills: &[String],
 ) -> Result<SkillProjection, String> {
-    let account_skills = kota_home_dir().join("skills");
+    let cwd = cwd.to_path_buf();
+    let skills = skills.to_vec();
+    adapter_sync::call(move || {
+        if cwd.join("SHELL.yaml").is_file() {
+            let (shell, cli) = read_skill_config(&cwd)?;
+            project_account_skills_inner(&cwd, cli, &shell.skills)
+        } else if !cwd.join("agent.yaml").exists() {
+            // Initial incarnation, before either source file is materialized.
+            project_account_skills_inner(&cwd, cli, &skills)
+        } else {
+            Err(format!(
+                "missing SHELL.yaml in {}; preserved skills",
+                cwd.display()
+            ))
+        }
+    })
+}
+
+fn project_account_skills_inner(
+    cwd: &Path,
+    cli: pty::agent::AgentCli,
+    skills: &[String],
+) -> Result<SkillProjection, String> {
+    project_account_skills_from_pool(cwd, cli, skills, &account_skills_dir())
+}
+
+fn project_account_skills_from_pool(
+    cwd: &Path,
+    cli: pty::agent::AgentCli,
+    skills: &[String],
+    account_skills: &Path,
+) -> Result<SkillProjection, String> {
     let active_dir = skill_projection_dir_for_cli(cwd, cli);
     let inactive_dir = inactive_skill_projection_dir_for_cli(cwd, cli);
     let requested = normalized_skill_names(skills);
@@ -3464,7 +3660,17 @@ fn project_account_skills(
             continue;
         };
         let source = account_skills.join(&skill_id);
-        if !source.is_dir() {
+        let available = match fs::metadata(source.join("SKILL.md")) {
+            Ok(metadata) => metadata.is_file(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(format!("read skill {}: {error}", source.display())),
+        };
+        if !available {
+            let link = active_dir.join(&skill_id);
+            if is_kota_skill_projection_link(&link, &[account_skills], &[])? {
+                fs::remove_file(&link)
+                    .map_err(|error| format!("remove {}: {error}", link.display()))?;
+            }
             missing.push(skill_id);
             continue;
         }
@@ -3485,8 +3691,7 @@ fn project_account_skills(
     let missing_path = cwd.join("missing-skills.txt");
     let legacy_missing_path = cwd.join(".kota").join("missing-skills.txt");
     if !missing.is_empty() {
-        fs::write(&missing_path, missing.join("\n"))
-            .map_err(|err| format!("write missing-skills.txt: {err}"))?;
+        adapter_sync::write_if_changed(&missing_path, missing.join("\n").as_bytes())?;
         if legacy_missing_path.exists() {
             fs::remove_file(&legacy_missing_path)
                 .map_err(|err| format!("remove {}: {err}", legacy_missing_path.display()))?;
@@ -3502,6 +3707,105 @@ fn project_account_skills(
     }
 
     Ok(SkillProjection { matched, missing })
+}
+
+fn read_skill_config(cwd: &Path) -> Result<(ShellYaml, pty::agent::AgentCli), String> {
+    let path = cwd.join("SHELL.yaml");
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let shell = parse_shell_yaml(&text)?;
+    let identity = read_yaml_mapping(&cwd.join("agent.yaml"))?;
+    let cli = cli_from_project_agent_files(cwd, &shell, &identity)?;
+    Ok((shell, cli))
+}
+
+fn sync_agent_skills(key: &adapter_sync::AgentKey) -> Result<(), String> {
+    debug_assert!(adapter_sync::on_worker());
+    let cwd = key.project.join(".agent-workspaces").join(&key.agent);
+    let (shell, cli) = read_skill_config(&cwd)?;
+    project_account_skills_inner(&cwd, cli, &shell.skills).map(|_| ())
+}
+
+#[derive(Default)]
+struct SkillReferrers {
+    agents: Vec<adapter_sync::AgentKey>,
+    errors: Vec<String>,
+}
+
+fn skill_pool_referrers(ids: Option<&BTreeSet<String>>) -> Result<SkillReferrers, String> {
+    skill_pool_referrers_in(&registered_adapter_projects()?, ids)
+}
+
+fn skill_pool_referrers_in(
+    projects: &[PathBuf],
+    ids: Option<&BTreeSet<String>>,
+) -> Result<SkillReferrers, String> {
+    let mut result = SkillReferrers::default();
+    for project in projects {
+        let entries = match fs::read_dir(project.join(".agent-workspaces")) {
+            Ok(entries) => entries,
+            Err(error) => {
+                result
+                    .errors
+                    .push(format!("{}: {error}", project.display()));
+                continue;
+            }
+        };
+        for entry in entries {
+            let cwd = entry.map_err(|error| error.to_string())?.path();
+            if !cwd.is_dir() || !cwd.join("agent.yaml").is_file() {
+                continue;
+            }
+            let Some(agent) = cwd.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let path = cwd.join("SHELL.yaml");
+            let shell = match fs::read_to_string(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|text| parse_shell_yaml(&text))
+            {
+                Ok(shell) => shell,
+                Err(error) => {
+                    result.errors.push(format!("{}: {error}", path.display()));
+                    continue;
+                }
+            };
+            if normalized_skill_names(&shell.skills)
+                .iter()
+                .any(|skill| ids.is_none_or(|ids| ids.contains(*skill)))
+            {
+                result.agents.push(adapter_sync::AgentKey {
+                    project: project.clone(),
+                    agent: agent.to_string(),
+                });
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn sync_saved_skill_pool(skill_id: &str) -> Result<(), String> {
+    let ids = BTreeSet::from([skill_id.to_string()]);
+    let references = adapter_sync::call(move || {
+        adapter_sync::refresh_skill_pool_watch();
+        skill_pool_referrers(Some(&ids))
+    })
+    .map_err(|error| format!("Skill pool changed, but projection sync failed: {error}"))?;
+    let mut errors = references.errors;
+    for key in references.agents {
+        let label = format!("{}/{}", key.project.display(), key.agent);
+        if let Err(error) = adapter_sync::call(move || sync_agent_skills(&key)) {
+            errors.push(format!("{label}: {error}"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Skill pool changed, but projection sync failed: {}",
+            errors.join("; ")
+        ))
+    }
 }
 
 fn skill_projection_dir_for_cli(cwd: &Path, cli: pty::agent::AgentCli) -> PathBuf {
@@ -3596,15 +3900,39 @@ fn compile_provider_adapter(
     request: &TavernIncarnateHeroRequest,
     ctx: &IncarnationContext,
     cli: pty::agent::AgentCli,
-    skills: &SkillProjection,
 ) -> Result<String, String> {
-    let account_rules = collect_rule_files(&account_rules_dir())?;
-    let project_rules = collect_rule_files(&ctx.rules_dir)?;
-    let teammates = collect_project_teammates(ctx, &request.agent_id)?;
-    let account_user = load_account_user_identity().unwrap_or_else(|err| {
-        eprintln!("Kota account user identity load failed while compiling adapter: {err}");
-        default_account_user_identity()
-    });
+    let inputs = load_adapter_inputs(ctx, &request.agent_id)?;
+    compile_provider_adapter_with_inputs(request, ctx, cli, &inputs)
+}
+
+struct AdapterInputs {
+    account_rules: Vec<RuleFile>,
+    project_rules: Vec<RuleFile>,
+    teammates: Vec<TeammateInfo>,
+    account_user: AccountUserIdentity,
+}
+
+fn load_adapter_inputs(ctx: &IncarnationContext, agent_id: &str) -> Result<AdapterInputs, String> {
+    Ok(AdapterInputs {
+        account_rules: collect_rule_files(&account_rules_dir())?,
+        project_rules: collect_rule_files(&ctx.rules_dir)?,
+        teammates: collect_project_teammates(ctx, agent_id)?,
+        account_user: load_account_user_identity()?,
+    })
+}
+
+fn compile_provider_adapter_with_inputs(
+    request: &TavernIncarnateHeroRequest,
+    ctx: &IncarnationContext,
+    cli: pty::agent::AgentCli,
+    inputs: &AdapterInputs,
+) -> Result<String, String> {
+    let AdapterInputs {
+        account_rules,
+        project_rules,
+        teammates,
+        account_user,
+    } = inputs;
     let teammate_rows = compile_runtime_teammate_rows(&account_user, &teammates, &request.agent_id);
     let project_label = ctx
         .project_id
@@ -3631,17 +3959,6 @@ fn compile_provider_adapter(
     } else {
         ".agents/skills"
     };
-    let matched_skills = if skills.matched.is_empty() {
-        "none".into()
-    } else {
-        skills.matched.join(", ")
-    };
-    let missing_skills = if skills.missing.is_empty() {
-        None
-    } else {
-        Some(skills.missing.join(", "))
-    };
-
     Ok([
         "All relative paths are relative to your agent CWD unless stated otherwise.".into(),
         String::new(),
@@ -3740,17 +4057,11 @@ fn compile_provider_adapter(
         String::new(),
         "The Bulletin Board is for cross-project coordination threads.".into(),
         "Do not edit BBS storage files directly unless the user explicitly asks for low-level maintenance.".into(),
-        "When a BBS wrapper prompt asks you to post or reply, use `kota-bbs new`, `kota-bbs reply`, or `kota-bbs show`.".into(),
-        String::new(),
-        "- Cross-project files: `$KOTA_HOME/Handoffs` (normally `~/Kota/Handoffs/`).".into(),
+        "When asked to post or reply on the BBS, first run `kota-bbs help`.".into(),
         String::new(),
         "### Skills".into(),
-        "- Kota skill pool: `$KOTA_HOME/skills`. Add a valid skill directory there to make it available in Kota configuration; enable this agent's persistent skills through `SHELL.yaml skills:`, then restart the agent if the provider CLI does not hot-reload skills.".into(),
+        "- Kota skill pool: `$KOTA_HOME/skills`. Add a valid skill directory there to make it available for all Kota agents; enable an agent's persistent skills through its `SHELL.yaml skills:`.".into(),
         format!("- Skills projection: `{}`", skill_dir),
-        format!("- Matched skills: {}", matched_skills),
-        missing_skills
-            .map(|missing| format!("- Missing skills: {}", missing))
-            .unwrap_or_default(),
         String::new(),
         "### Teammates".into(),
         teammate_rows,
@@ -3762,7 +4073,7 @@ fn compile_provider_adapter(
         "- Same-project agent messages use the local agent bus.".into(),
         "- Send to a teammate with `kota-agent-bus send --to <AKA-or-agent-id> --intent handoff <<'EOF'`.".into(),
         "- Put the message body on stdin. Include concrete files, current state, and the requested next action.".into(),
-        "- The room will show the message as your normal agent bubble with an `@target` badge when Kota is running.".into(),
+        "- The user already sees your bus replies in the room (your bubble with an `@target` badge). Reply on the bus or in the room, not both; add a separate room note only when the user needs something the bus reply does not say.".into(),
         "- Use room chat for user-facing decisions and BBS for cross-project coordination.".into(),
         String::new(),
         "### Bartender".into(),
@@ -3771,8 +4082,7 @@ fn compile_provider_adapter(
         "### Ember".into(),
         "- Create, view, update, or delete project scheduled prompts with `kota-ember`.".into(),
         "- Prompt bodies are provided on stdin. Targets use agent AKA, agent id, or the configured account human name (`<your-name>` in examples).".into(),
-        "- Use `--in`, `--at`, `--idle`, or supported `--cron` expressions; unsupported cron is rejected rather than guessed.".into(),
-        "- Examples: `kota-ember add --to Gem --in 2h <<'EOF'`, `kota-ember add --to '<your-name>' --at \"2026-06-08 17:30\" <<'EOF'`, `kota-ember list`, `kota-ember show <schedule-id>`, `kota-ember update <schedule-id> --at \"2026-06-08 17:30\"`, `kota-ember delete <schedule-id>`.".into(),
+        "- Before using `kota-ember`, run `kota-ember --help` for the current commands, options, and supported scheduling syntax.".into(),
         String::new(),
         "### System Agents".into(),
         "- Violet - materializes native logs into chathistory and summaries.".into(),
@@ -4888,7 +5198,9 @@ fn collect_project_teammates(
     {
         let entry = entry.map_err(|err| err.to_string())?;
         let path = entry.path();
-        if !path.is_dir() || !path.join("agent.yaml").is_file() {
+        if !path.is_dir()
+            || (!path.join("agent.yaml").is_file() && !path.join("SHELL.yaml").is_file())
+        {
             continue;
         }
         let Some(agent_id) = path
@@ -4897,7 +5209,7 @@ fn collect_project_teammates(
         else {
             continue;
         };
-        let agent_yaml = read_yaml_mapping(&path.join("agent.yaml")).unwrap_or_default();
+        let agent_yaml = read_yaml_mapping(&path.join("agent.yaml"))?;
         let status = yaml_string(&agent_yaml, "status").unwrap_or_else(|| "active".into());
         if status.eq_ignore_ascii_case("archived") || status.eq_ignore_ascii_case("deleted") {
             continue;
@@ -5207,6 +5519,9 @@ fn install_kota_skill_link<T: AsRef<Path>>(
         let target_matches = fs::read_link(link)
             .map(|current| current == target.as_ref())
             .unwrap_or(false);
+        if meta.file_type().is_symlink() && target_matches {
+            return Ok(true);
+        }
         if meta.file_type().is_symlink()
             && (target_matches
                 || is_kota_skill_projection_link(link, absolute_roots, relative_prefixes)?)
@@ -5546,7 +5861,24 @@ fn load_project_agent_detail(
     requested_project_root: Option<&str>,
     agent_id: &str,
 ) -> Result<ProjectAgentDetail, String> {
+    load_project_agent_detail_with_repairs(manager, requested_project_root, agent_id, true)
+}
+
+fn load_project_agent_detail_with_repairs(
+    manager: &IntegrationManager,
+    requested_project_root: Option<&str>,
+    agent_id: &str,
+    repair: bool,
+) -> Result<ProjectAgentDetail, String> {
     let ctx = resolve_incarnation_context(manager, requested_project_root, agent_id)?;
+    load_project_agent_detail_in_context(ctx, agent_id, repair)
+}
+
+fn load_project_agent_detail_in_context(
+    ctx: IncarnationContext,
+    agent_id: &str,
+    repair: bool,
+) -> Result<ProjectAgentDetail, String> {
     if !ctx.cwd.exists() {
         return Err(format!(
             "project agent workspace not found: {}",
@@ -5558,22 +5890,35 @@ fn load_project_agent_detail(
     let agent_yaml_path = ctx.cwd.join("agent.yaml");
     let agent_yaml = read_yaml_mapping(&agent_yaml_path).unwrap_or_default();
     let shell_path = ctx.cwd.join("SHELL.yaml");
-    let shell_text = fs::read_to_string(&shell_path).unwrap_or_default();
-    let mut shell = if shell_text.trim().is_empty() {
-        ShellYaml::default()
+    let (shell, cli) = if repair {
+        let shell_cwd = ctx.cwd.clone();
+        let normalized_path = shell_path.clone();
+        let projection_ctx = ctx.clone();
+        let hydration_agent = agent_id.to_string();
+        adapter_sync::call(move || {
+            let identity = read_yaml_mapping(&shell_cwd.join("agent.yaml"))?;
+            let shell_text = fs::read_to_string(&normalized_path)
+                .map_err(|error| format!("read {}: {error}", normalized_path.display()))?;
+            let mut shell = parse_shell_yaml(&shell_text)?;
+            let cli = cli_from_project_agent_files(&shell_cwd, &shell, &identity)?;
+            normalize_shell_for_cli(&mut shell, cli);
+            persist_normalized_shell_if_changed(&normalized_path, &shell_text, &shell)?;
+            ensure_project_projections(&projection_ctx)?;
+            if let Err(error) = project_account_skills_inner(&shell_cwd, cli, &shell.skills) {
+                kota_debug_log(&format!(
+                    "[adapter-sync] agent={hydration_agent} hydration skills: {error}"
+                ));
+            }
+            Ok((shell, cli))
+        })?
     } else {
-        parse_shell_yaml(&shell_text)?
+        let shell_text = fs::read_to_string(&shell_path)
+            .map_err(|error| format!("read {}: {error}", shell_path.display()))?;
+        let mut shell = parse_shell_yaml(&shell_text)?;
+        let cli = cli_from_project_agent_files(&ctx.cwd, &shell, &agent_yaml)?;
+        normalize_shell_for_cli(&mut shell, cli);
+        (shell, cli)
     };
-    let cli = cli_from_project_agent_files(&ctx.cwd, &shell, &agent_yaml)?;
-    normalize_shell_for_cli(&mut shell, cli);
-    persist_normalized_shell_if_changed(&shell_path, &shell_text, &shell)?;
-    ensure_project_projections(&ctx)?;
-    if let Err(err) = project_account_skills(&ctx.cwd, cli, &shell.skills) {
-        eprintln!(
-            "Kota skill projection refresh while loading {} failed: {err}",
-            agent_id
-        );
-    }
     let adapter_path = existing_adapter_path(&ctx.cwd, cli);
     let adapter_text = fs::read_to_string(&adapter_path).unwrap_or_default();
     let ghost = extract_adapter_ghost(&adapter_text).unwrap_or_else(|| {
@@ -5827,16 +6172,11 @@ fn save_project_agent_detail(
         } else {
             adapter_text
         };
-        fs::write(&adapter_path, adapter_text)
-            .map_err(|err| format!("write {}: {err}", adapter_path.display()))?;
+        adapter_sync::write_if_changed(&adapter_path, adapter_text.as_bytes())?;
     }
     if ghost_changed || name_changed || shell_changed || skills_changed {
-        if let Err(err) = regenerate_project_adapters_in_root(&ctx.project_root) {
-            eprintln!(
-                "Kota adapter regeneration after project agent save failed in {}: {err}",
-                ctx.project_root.display()
-            );
-        }
+        regenerate_project_adapters_in_root(&ctx.project_root)
+            .map_err(|err| format!("Source saved, but adapter sync failed: {err}"))?;
     }
     if name_changed {
         laughing_man::refresh_selected_agent_metadata(
@@ -5849,137 +6189,260 @@ fn save_project_agent_detail(
     load_project_agent_detail(manager, request.project_root.as_deref(), &request.agent_id)
 }
 
-fn regenerate_all_project_adapters_for_account_rules() -> Result<(), String> {
-    let workspaces = kota_home_dir().join("Workspaces");
-    if !workspaces.exists() {
-        return Ok(());
-    }
+async fn sync_saved_account_projects(roots: Vec<PathBuf>) -> Result<(), String> {
     let mut errors = Vec::new();
-    for entry in
-        fs::read_dir(&workspaces).map_err(|err| format!("read {}: {err}", workspaces.display()))?
-    {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if path.file_name().and_then(|name| name.to_str()) == Some("bbs") {
-            continue;
-        }
-        if !path.join(".agent-workspaces").is_dir() {
-            continue;
-        }
-        if let Err(err) = regenerate_project_adapters_in_root(&path) {
-            errors.push(format!("{}: {err}", path.display()));
+    for root in roots {
+        let label = root.display().to_string();
+        if let Err(error) =
+            adapter_sync::submit(move || sync_project_adapters(&root).into_result()).await
+        {
+            errors.push(format!("{label}: {error}"));
         }
     }
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("; "))
+        Err(format!(
+            "Source saved, but adapter sync failed: {}",
+            errors.join("; ")
+        ))
     }
 }
 
-fn regenerate_all_project_adapters_for_account_context_async(reason: &'static str) {
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Err(err) = regenerate_all_project_adapters_for_account_rules() {
-            eprintln!("Kota adapter regeneration after {reason} failed: {err}");
+fn registered_adapter_projects() -> Result<Vec<PathBuf>, String> {
+    let workspaces = kota_home_dir().join("Workspaces");
+    if !workspaces.exists() {
+        return Ok(Vec::new());
+    }
+    let mut roots = Vec::new();
+    for entry in fs::read_dir(&workspaces).map_err(|err| err.to_string())? {
+        let root = entry.map_err(|err| err.to_string())?.path();
+        if root.join(".agent-workspaces").is_dir() {
+            roots.push(root);
         }
-    });
+    }
+    roots.sort();
+    Ok(roots)
 }
 
-fn regenerate_project_adapters_for_rules_request(project_root: Option<&str>, rules_dir: &Path) {
+fn regenerate_project_adapters_for_rules_request(
+    project_root: Option<&str>,
+    rules_dir: &Path,
+) -> Result<(), String> {
     let root = project_root
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| rules_dir.parent().map(Path::to_path_buf));
     let Some(root) = root else {
-        return;
+        return Ok(());
     };
-    if let Err(err) = regenerate_project_adapters_in_root(&root) {
-        eprintln!(
-            "Kota adapter regeneration after project rule change failed for {}: {err}",
-            root.display()
-        );
-    }
+    regenerate_project_adapters_in_root(&root)
 }
 
 fn regenerate_workspace_adapters_best_effort(
     workspace: &integrations::WorkspaceProject,
     reason: &str,
 ) {
-    let project_root = Path::new(&workspace.local_root);
-    if let Err(err) = regenerate_project_adapters_in_root(project_root) {
-        eprintln!(
-            "Kota adapter regeneration after {reason} failed in {}: {err}",
-            project_root.display()
-        );
-    }
+    adapter_sync::mark_project(PathBuf::from(&workspace.local_root), reason);
 }
 
 fn regenerate_project_adapters_in_root(project_root: &Path) -> Result<(), String> {
-    let agents_root = project_root.join(".agent-workspaces");
-    if !agents_root.exists() {
-        return Ok(());
-    }
-    let mut errors = Vec::new();
-    for entry in fs::read_dir(&agents_root)
-        .map_err(|err| format!("read {}: {err}", agents_root.display()))?
-    {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let cwd = entry.path();
-        if !cwd.is_dir() || !cwd.join("agent.yaml").is_file() || !cwd.join("SHELL.yaml").is_file() {
-            continue;
-        }
-        let Some(agent_id) = cwd
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
-            continue;
-        };
-        if let Err(err) = regenerate_one_project_adapter(project_root, &agent_id) {
-            errors.push(format!("{agent_id}: {err}"));
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
+    let root = project_root.to_path_buf();
+    adapter_sync::call(move || sync_project_adapters(&root).into_result())
+}
+
+// The lifecycle mutation has already succeeded. A different agent's invalid
+// config must not turn that completed operation into a reported failure.
+fn refresh_project_adapters_after_lifecycle(project_root: &Path, reason: &str) {
+    if let Err(error) = regenerate_project_adapters_in_root(project_root) {
+        kota_debug_log(&format!(
+            "[adapter-sync] project={} reason={reason} error={error}",
+            project_root.display()
+        ));
     }
 }
 
-fn regenerate_one_project_adapter(project_root: &Path, agent_id: &str) -> Result<(), String> {
+#[derive(Default)]
+struct ProjectAdapterSyncResult {
+    agents: BTreeMap<String, Result<(), String>>,
+    input_error: Option<String>,
+}
+
+impl ProjectAdapterSyncResult {
+    fn into_result(self) -> Result<(), String> {
+        let mut errors: Vec<String> = self.input_error.into_iter().collect();
+        errors.extend(
+            self.agents.into_iter().filter_map(|(agent, result)| {
+                result.err().map(|error| format!("{agent}: {error}"))
+            }),
+        );
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+fn sync_context(project_root: &Path) -> IncarnationContext {
+    IncarnationContext {
+        cwd: project_root.to_path_buf(),
+        worktree_root: project_root.to_path_buf(),
+        project_root: project_root.to_path_buf(),
+        source_dir: project_root.to_path_buf(),
+        shared_dir: project_memory_dir(project_root),
+        rules_dir: project_rules_dir(project_root),
+        project_id: project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        project_remote: None,
+        project_base_ref: "HEAD".into(),
+    }
+}
+
+fn sync_project_adapters(project_root: &Path) -> ProjectAdapterSyncResult {
+    debug_assert!(adapter_sync::on_worker());
+    for attempt in 0..3 {
+        adapter_sync::take_project(project_root);
+        let result = sync_project_adapters_once(project_root);
+        adapter_sync::process_pending_events();
+        // A mark during compilation belongs to a new run, including when a
+        // launch is waiting for this result. Never return an older cached OK.
+        if !adapter_sync::take_project(project_root) {
+            return result;
+        }
+        if attempt == 2 {
+            adapter_sync::mark_project(project_root.to_path_buf(), "changed during sync");
+            return ProjectAdapterSyncResult {
+                input_error: Some("project inputs kept changing during sync; retry queued".into()),
+                ..result
+            };
+        }
+    }
+    unreachable!()
+}
+
+fn sync_project_adapters_once(project_root: &Path) -> ProjectAdapterSyncResult {
+    adapter_sync::register_project(project_root);
+    let mut result = ProjectAdapterSyncResult::default();
+    let root = project_root.join(".agent-workspaces");
+    if !root.exists() {
+        return result;
+    }
+    let run = (|| -> Result<(), String> {
+        let inputs = load_adapter_inputs(&sync_context(project_root), "")?;
+        for entry in fs::read_dir(&root).map_err(|err| format!("read {}: {err}", root.display()))? {
+            let cwd = entry.map_err(|err| err.to_string())?.path();
+            if !cwd.is_dir() || !cwd.join("agent.yaml").is_file() {
+                continue;
+            }
+            let Some(agent) = cwd.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            result.agents.insert(
+                agent.to_string(),
+                sync_one_project_adapter(project_root, agent, &inputs),
+            );
+        }
+        Ok(())
+    })();
+    result.input_error = run.err();
+    result
+}
+
+pub(crate) fn sync_adapter_before_launch(
+    root: &Path,
+    agent: &str,
+    adapter: Option<&Path>,
+) -> Result<(), String> {
+    // Legacy/dev launches without a materialized incarnation have no generated
+    // adapter contract. Normal project agents always have this metadata file.
+    if !root
+        .join(".agent-workspaces")
+        .join(agent)
+        .join("agent.yaml")
+        .is_file()
+    {
+        return Ok(());
+    }
+    let root = root.to_path_buf();
+    let agent = agent.to_string();
+    let adapter = adapter.map(Path::to_path_buf);
+    adapter_sync::call(move || {
+        let mut ctx = sync_context(&root);
+        ctx.cwd = root.join(".agent-workspaces").join(&agent);
+        let projection_error = ensure_project_projections(&ctx).err();
+        let mut result = sync_project_adapters(&root);
+        let error = projection_error
+            .or(result.input_error.take())
+            .or_else(|| result.agents.remove(&agent).and_then(Result::err));
+        if let Some(error) = error {
+            let usable = adapter
+                .as_ref()
+                .is_some_and(|path| fs::read(path).is_ok_and(|bytes| !bytes.is_empty()));
+            if usable {
+                kota_debug_log(&format!(
+                    "[adapter-sync] project={} agent={} using existing adapter: {}",
+                    root.display(),
+                    agent,
+                    error
+                ));
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Ok(())
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdapterIdentity {
+    display_name: String,
+    source_hero_id: String,
+    status: String,
+    legacy_shell: Option<String>,
+}
+
+fn adapter_identity_fields(yaml: &serde_yaml::Mapping, agent_id: &str) -> AdapterIdentity {
+    AdapterIdentity {
+        display_name: yaml_string(yaml, "display-name")
+            .or_else(|| yaml_string(yaml, "displayName"))
+            .unwrap_or_else(|| agent_id.to_string()),
+        source_hero_id: yaml_string(yaml, "recruited-from")
+            .or_else(|| yaml_nested_string(yaml, &["source", "hero-id"]))
+            .unwrap_or_else(|| "unknown".into()),
+        status: yaml_string(yaml, "status")
+            .unwrap_or_else(|| "active".into())
+            .to_ascii_lowercase(),
+        legacy_shell: yaml_string(yaml, "shell"),
+    }
+}
+
+fn sync_one_project_adapter(
+    project_root: &Path,
+    agent_id: &str,
+    inputs: &AdapterInputs,
+) -> Result<(), String> {
     let cwd = project_root.join(".agent-workspaces").join(agent_id);
     let agent_yaml_path = cwd.join("agent.yaml");
     let agent_yaml = read_yaml_mapping(&agent_yaml_path)?;
-    let shell_path = cwd.join("SHELL.yaml");
-    let mut shell = fs::read_to_string(&shell_path)
-        .ok()
-        .and_then(|text| serde_yaml::from_str::<ShellYaml>(&text).ok())
-        .unwrap_or_default();
-    let cli = cli_from_project_agent_files(&cwd, &shell, &agent_yaml)?;
-    normalize_shell_for_cli(&mut shell, cli);
-    let status = yaml_string(&agent_yaml, "status").unwrap_or_else(|| "active".into());
-    if status.eq_ignore_ascii_case("archived") || status.eq_ignore_ascii_case("deleted") {
+    let identity = adapter_identity_fields(&agent_yaml, agent_id);
+    if identity.status == "archived" || identity.status == "deleted" {
         return Ok(());
     }
-    let display_name = yaml_string(&agent_yaml, "display-name")
-        .or_else(|| yaml_string(&agent_yaml, "displayName"))
-        .unwrap_or_else(|| agent_id.to_string());
-    let source_hero_id = yaml_string(&agent_yaml, "recruited-from")
-        .or_else(|| yaml_nested_string(&agent_yaml, &["source", "hero-id"]))
-        .unwrap_or_else(|| "unknown".into());
+    let shell_path = cwd.join("SHELL.yaml");
+    let mut shell = parse_shell_yaml(
+        &fs::read_to_string(&shell_path)
+            .map_err(|err| format!("read {}: {err}", shell_path.display()))?,
+    )?;
+    let cli = cli_from_project_agent_files(&cwd, &shell, &agent_yaml)?;
+    normalize_shell_for_cli(&mut shell, cli);
+    let display_name = identity.display_name;
+    let source_hero_id = identity.source_hero_id;
     let adapter_path = existing_adapter_path(&cwd, cli);
-    let adapter_text = fs::read_to_string(&adapter_path).unwrap_or_default();
-    let ghost = extract_adapter_ghost(&adapter_text)
-        .or_else(|| {
-            load_tavern_hero_profile(&tavern_hero_dir(&source_hero_id))
-                .ok()
-                .flatten()
-                .map(|profile| profile.ghost)
-        })
-        .unwrap_or_default();
+    let original = read_optional_adapter(&adapter_path)?;
+    let ghost = ghost_for_sync(original.as_deref(), &source_hero_id)?;
     let ctx = IncarnationContext {
         cwd: cwd.clone(),
         worktree_root: cwd.join("project-files"),
@@ -5993,8 +6456,8 @@ fn regenerate_one_project_adapter(project_root: &Path, agent_id: &str) -> Result
         project_remote: None,
         project_base_ref: "HEAD".into(),
     };
-    let skills = project_account_skills(&cwd, cli, &shell.skills)?;
-    let request = TavernIncarnateHeroRequest {
+    project_account_skills_inner(&cwd, cli, &shell.skills)?;
+    let mut request = TavernIncarnateHeroRequest {
         agent_id: agent_id.to_string(),
         template_id: source_hero_id,
         display_name,
@@ -6021,9 +6484,29 @@ fn regenerate_one_project_adapter(project_root: &Path, agent_id: &str) -> Result
             record: None,
         },
     };
-    let adapter = compile_provider_adapter(&request, &ctx, cli, &skills)?;
-    fs::write(&adapter_path, adapter)
-        .map_err(|err| format!("write {}: {err}", adapter_path.display()))
+    adapter_sync::update_adapter(&adapter_path, |observed| {
+        request.profile.ghost = ghost_for_sync(observed, &request.template_id)?;
+        compile_provider_adapter_with_inputs(&request, &ctx, cli, inputs)
+    })
+    .map(|_| ())
+}
+
+fn read_optional_adapter(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("read {}: {err}", path.display())),
+    }
+}
+
+fn ghost_for_sync(adapter: Option<&str>, hero: &str) -> Result<String, String> {
+    if let Some(adapter) = adapter {
+        return extract_adapter_ghost(adapter)
+            .ok_or_else(|| "existing adapter has no valid Ghost section; preserved file".into());
+    }
+    Ok(load_tavern_hero_profile(&tavern_hero_dir(hero))?
+        .map(|profile| profile.ghost)
+        .unwrap_or_default())
 }
 
 pub(crate) fn resolve_project_agent_launch(
@@ -6112,14 +6595,12 @@ fn resolve_project_agent_launch_with_mode(
     agent_id: &str,
     mode: ProjectAgentLaunchMode,
 ) -> Result<pty::agent::AgentSpawnRequest, String> {
-    let detail = load_project_agent_detail(manager, requested_project_root, agent_id)?;
+    let detail = load_project_agent_detail_with_repairs(manager, requested_project_root, agent_id, false)?;
     if detail.status == "archived" {
         return Err(format!("agent is archived: {}", detail.display_name));
     }
     let ctx = resolve_incarnation_context(manager, requested_project_root, agent_id)?;
     ensure_incarnation_project_files_worktree(&ctx, agent_id)?;
-    ensure_project_projections(&ctx)?;
-    let _ = project_account_skills(&ctx.cwd, detail.cli, &detail.skills)?;
     let launch_cwd = launch_cwd_for_cli(detail.cli, &ctx, agent_id)?;
     let reset_pending = project_agent_session_reset_pending(&ctx.cwd);
     let session_id = if mode == ProjectAgentLaunchMode::Fresh {
@@ -6303,35 +6784,39 @@ fn dismiss_project_agent(
     let _ = detail;
     violet::preserve_project_agent_left_identity(&ctx.project_root, &request.agent_id)?;
 
-    if ctx.worktree_root.join(".git").exists() && ctx.source_dir.join(".git").exists() {
-        let worktree_string = path_string(&ctx.worktree_root);
-        if run_git_plain(
-            &ctx.source_dir,
-            &["worktree", "remove", "--force", &worktree_string],
-        )
-        .is_err()
-            && ctx.worktree_root.exists()
-        {
-            fs::remove_dir_all(&ctx.worktree_root)
-                .map_err(|err| format!("remove {}: {err}", ctx.worktree_root.display()))?;
+    adapter_sync::remove_after_forgetting(ctx.project_root.clone(), Some(request.agent_id.clone()), || {
+        if ctx.worktree_root.join(".git").exists() && ctx.source_dir.join(".git").exists() {
+            let worktree_string = path_string(&ctx.worktree_root);
+            if run_git_plain(
+                &ctx.source_dir,
+                &["worktree", "remove", "--force", &worktree_string],
+            )
+            .is_err()
+                && ctx.worktree_root.exists()
+            {
+                fs::remove_dir_all(&ctx.worktree_root)
+                    .map_err(|err| format!("remove {}: {err}", ctx.worktree_root.display()))?;
+            }
+        } else if ctx.cwd.join(".git").exists() && ctx.source_dir.join(".git").exists() {
+            let cwd_string = path_string(&ctx.cwd);
+            if run_git_plain(
+                &ctx.source_dir,
+                &["worktree", "remove", "--force", &cwd_string],
+            )
+            .is_err()
+                && ctx.cwd.exists()
+            {
+                fs::remove_dir_all(&ctx.cwd)
+                    .map_err(|err| format!("remove {}: {err}", ctx.cwd.display()))?;
+            }
         }
-    } else if ctx.cwd.join(".git").exists() && ctx.source_dir.join(".git").exists() {
-        let cwd_string = path_string(&ctx.cwd);
-        if run_git_plain(
-            &ctx.source_dir,
-            &["worktree", "remove", "--force", &cwd_string],
-        )
-        .is_err()
-            && ctx.cwd.exists()
-        {
+        if ctx.cwd.exists() {
             fs::remove_dir_all(&ctx.cwd)
                 .map_err(|err| format!("remove {}: {err}", ctx.cwd.display()))?;
         }
-    }
-    if ctx.cwd.exists() {
-        fs::remove_dir_all(&ctx.cwd)
-            .map_err(|err| format!("remove {}: {err}", ctx.cwd.display()))?;
-    }
+        Ok(())
+    })?;
+    refresh_project_adapters_after_lifecycle(&ctx.project_root, "agent dismissed");
     refresh_laughing_man_project_catalog(manager);
 
     Ok(ProjectAgentLifecycleResult {
@@ -6598,15 +7083,28 @@ fn set_project_agent_status(
     archived_at: Option<&str>,
 ) -> Result<(), String> {
     let ctx = resolve_incarnation_context(manager, requested_project_root, agent_id)?;
+    let status = status.to_string();
+    let archived_at = archived_at.map(str::to_string);
+    adapter_sync::call(move || persist_project_agent_status(&ctx, &status, archived_at.as_deref()))
+}
+
+fn persist_project_agent_status(
+    ctx: &IncarnationContext,
+    status: &str,
+    archived_at: Option<&str>,
+) -> Result<(), String> {
+    debug_assert!(adapter_sync::on_worker());
     let agent_yaml_path = ctx.cwd.join("agent.yaml");
-    let mut agent_yaml = read_yaml_mapping(&agent_yaml_path).unwrap_or_default();
+    let mut agent_yaml = read_yaml_mapping(&agent_yaml_path)?;
     yaml_set_string(&mut agent_yaml, "status", status);
     if let Some(archived_at) = archived_at {
         yaml_set_string(&mut agent_yaml, "archived-at", archived_at);
     } else {
         yaml_remove(&mut agent_yaml, "archived-at");
     }
-    write_yaml_mapping(&agent_yaml_path, &agent_yaml)
+    write_yaml_mapping(&agent_yaml_path, &agent_yaml)?;
+    refresh_project_adapters_after_lifecycle(&ctx.project_root, "agent status saved");
+    Ok(())
 }
 
 fn invite_project_agent_to_tavern(
@@ -6804,22 +7302,20 @@ fn resolve_project_root_for_listing(
 }
 
 fn read_yaml_mapping(path: &Path) -> Result<serde_yaml::Mapping, String> {
-    if !path.exists() {
-        return Ok(serde_yaml::Mapping::new());
-    }
     let value = serde_yaml::from_str::<serde_yaml::Value>(
         &fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?,
     )
     .map_err(|err| format!("parse {}: {err}", path.display()))?;
-    Ok(value.as_mapping().cloned().unwrap_or_default())
+    value
+        .as_mapping()
+        .filter(|mapping| !mapping.is_empty())
+        .cloned()
+        .ok_or_else(|| format!("{} must contain a nonempty YAML mapping", path.display()))
 }
 
 fn write_yaml_mapping(path: &Path, mapping: &serde_yaml::Mapping) -> Result<(), String> {
-    fs::write(
-        path,
-        serde_yaml::to_string(mapping).map_err(|err| err.to_string())?,
-    )
-    .map_err(|err| format!("write {}: {err}", path.display()))
+    let content = serde_yaml::to_string(mapping).map_err(|err| err.to_string())?;
+    adapter_sync::atomic_replace(path, content.as_bytes())
 }
 
 fn yaml_key(key: &str) -> serde_yaml::Value {
@@ -8438,11 +8934,9 @@ fn pi_models_dev_model_options<'a>(
     let root = fetch_models_dev_root()?;
     let mut out = Vec::new();
     for provider_id in provider_ids {
-        let Some(options) = models_dev_model_options_from_root(
-            &root,
-            &provider_id,
-            Some(&provider_id),
-        ) else {
+        let Some(options) =
+            models_dev_model_options_from_root(&root, &provider_id, Some(&provider_id))
+        else {
             continue;
         };
         out.extend(options);
@@ -9581,16 +10075,21 @@ async fn pty_nl_translate(
 //   I-26 GIT_AUTHOR_EMAIL = "{agent_id}@kota.local"
 
 #[tauri::command]
-fn pty_agent_spawn(
+async fn pty_agent_spawn(
     app: tauri::AppHandle,
-    manager: State<'_, PtyManager>,
     request: pty::agent::AgentSpawnRequest,
 ) -> Result<pty::agent::AgentRoute, String> {
-    let agent_id = request.agent_id.clone();
-    manager.agent_spawn(&app, request).map_err(|err| {
-        kota_debug_log(&format!("[agent:{agent_id}] spawn failed: {err}"));
-        err.to_string()
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<PtyManager>();
+
+        let agent_id = request.agent_id.clone();
+        manager.agent_spawn(&app, request).map_err(|err| {
+            kota_debug_log(&format!("[agent:{agent_id}] spawn failed: {err}"));
+            err.to_string()
+        })
     })
+    .await
+    .map_err(|err| format!("join pty_agent_spawn: {err}"))?
 }
 
 #[tauri::command]
@@ -9606,15 +10105,20 @@ fn pty_agent_write(
 }
 
 #[tauri::command]
-fn pty_agent_submit_prompt(
+async fn pty_agent_submit_prompt(
     app: tauri::AppHandle,
-    manager: State<'_, PtyManager>,
     agent_id: String,
     input: String,
 ) -> Result<(), String> {
-    manager
-        .agent_submit_prompt(&app, agent_id, input)
-        .map_err(|err| err.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<PtyManager>();
+
+        manager
+            .agent_submit_prompt(&app, agent_id, input)
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("join pty_agent_submit_prompt: {err}"))?
 }
 
 #[tauri::command]
@@ -9787,6 +10291,90 @@ async fn workspace_status(app: tauri::AppHandle) -> Result<integrations::Workspa
 }
 
 #[tauri::command]
+async fn bbs_sync_status(
+    manager: State<'_, bbs_sync::manager::Manager>,
+) -> Result<bbs_sync::public::Status, bbs_sync::public::Error> {
+    Ok(manager.status())
+}
+#[tauri::command]
+async fn bbs_sync_diagnostics(
+    manager: State<'_, bbs_sync::manager::Manager>,
+) -> Result<bbs_sync::public::Diagnostics, bbs_sync::public::Error> {
+    Ok(manager.diagnostics())
+}
+#[tauri::command]
+async fn bbs_sync_invitation(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::public::InvitationRequest,
+) -> Result<bbs_sync::control::InvitationResult, bbs_sync::public::Error> {
+    manager.invitation(request).await
+}
+#[tauri::command]
+async fn bbs_sync_join(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::public::JoinRequest,
+) -> Result<(), bbs_sync::public::Error> {
+    manager.join(request).await
+}
+#[tauri::command]
+async fn bbs_sync_disconnect(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::public::Command,
+) -> Result<(), bbs_sync::public::Error> {
+    manager.disconnect(request).await
+}
+#[tauri::command]
+async fn bbs_sync_rename(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::public::RenameRequest,
+) -> Result<(), bbs_sync::public::Error> {
+    manager.rename(request).await
+}
+#[tauri::command]
+async fn bbs_sync_remove(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::public::RemoveRequest,
+) -> Result<(), bbs_sync::public::Error> {
+    manager.remove(request).await
+}
+#[tauri::command]
+async fn bbs_sync_start(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::public::Command,
+) -> Result<(), bbs_sync::public::Error> {
+    manager.start(request).await
+}
+#[tauri::command]
+async fn bbs_sync_cancel(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::public::Command,
+) -> Result<(), bbs_sync::public::Error> {
+    manager.cancel(request).await
+}
+#[tauri::command]
+async fn bbs_sync_avatar_read(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::public::AvatarRequest,
+) -> Result<String, bbs_sync::public::Error> {
+    manager.avatar(request).await
+}
+
+#[tauri::command]
+async fn bbs_roster_read(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::roster::public::ReadRequest,
+) -> Result<bbs_sync::roster::public::Page, bbs_sync::roster::public::Error> {
+    manager.roster_page(request)
+}
+#[tauri::command]
+async fn bbs_roster_avatar_read(
+    manager: State<'_, bbs_sync::manager::Manager>,
+    request: bbs_sync::roster::public::AvatarRequest,
+) -> Result<String, bbs_sync::roster::public::Error> {
+    manager.roster_avatar(request).await
+}
+
+#[tauri::command]
 async fn bbs_snapshot(request: bbs::BbsProjectRequest) -> Result<bbs::BbsSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
         bbs::snapshot(&request.project_id, request.project_display_name.as_deref())
@@ -9817,8 +10405,12 @@ async fn bbs_ignore_post(request: bbs::BbsPostStateRequest) -> Result<(), String
 #[tauri::command]
 async fn bbs_delete(request: bbs::BbsDeleteRequest) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        bbs::delete_item(&request.thread_id, request.post_id.as_deref())
-            .map_err(|err| err.to_string())
+        bbs::delete_item(
+            &request.thread_id,
+            request.post_id.as_deref(),
+            request.version_id.as_deref(),
+        )
+        .map_err(|err| err.to_string())
     })
     .await
     .map_err(|err| format!("join bbs_delete: {err}"))?
@@ -9842,6 +10434,20 @@ struct VioletFileRefRequest {
 struct VioletFileRefResolveResult {
     path: String,
     is_dir: bool,
+}
+
+#[tauri::command]
+async fn claude_native_images_for_event(
+    request: claude_native_images::ClaudeNativeImagesRequest,
+) -> BTreeMap<String, String> {
+    let Some(home_dir) = dirs::home_dir() else {
+        return BTreeMap::new();
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        claude_native_images::images_for_event(&home_dir, &request)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Read a local image into a data URL for inline previews.
@@ -9995,58 +10601,19 @@ fn account_dreams_open() -> Result<(), String> {
     open_system_path(&path, false)
 }
 
-fn laughing_man_project_list(manager: &IntegrationManager) -> Vec<laughing_man::LmProjectInfo> {
-    let Ok(workspaces) = manager.list_workspaces() else {
-        return Vec::new();
-    };
-    workspaces
-        .into_iter()
-        .map(|workspace| {
-            let agents = workspace
-                .agents
-                .iter()
-                .filter_map(|agent| {
-                    let yaml = PathBuf::from(&agent.cwd).join("agent.yaml");
-                    let agent_yaml = read_yaml_mapping(&yaml).unwrap_or_default();
-                    let status = yaml_string(&agent_yaml, "status").unwrap_or_else(|| "active".into());
-                    if !laughing_man_agent_status_visible(&status) {
-                        return None;
-                    }
-                    let name = yaml_string(&agent_yaml, "display-name")
-                        .or_else(|| yaml_string(&agent_yaml, "displayName"))
-                        .unwrap_or_else(|| agent.agent_id.clone());
-                    Some((agent.agent_id.clone(), name))
-                })
-                .collect();
-            laughing_man::LmProjectInfo {
-                project_id: workspace.project_id.clone(),
-                project_root: workspace.local_root.clone(),
-                project_name: display_workspace_project_name(&workspace),
-                agents,
-            }
-        })
-        .collect()
-}
-
-fn laughing_man_agent_status_visible(status: &str) -> bool {
-    !matches!(
-        status.trim().to_lowercase().as_str(),
-        "archived" | "deleted" | "dismissed"
-    )
+fn laughing_man_project_list(_manager: &IntegrationManager) -> Vec<laughing_man::LmProjectInfo> {
+    crate::agent_directory::collect(&kota_home_dir())
+        .map(|directory| directory.projects.into_iter().map(|project| laughing_man::LmProjectInfo {
+            project_id: project.id,
+            project_root: project.root.display().to_string(),
+            project_name: project.name,
+            agents: project.agents.into_iter().map(|agent| (agent.id, agent.name)).collect(),
+        }).collect())
+        .unwrap_or_default()
 }
 
 fn refresh_laughing_man_project_catalog(manager: &IntegrationManager) {
     laughing_man::refresh_project_catalog(laughing_man_project_list(manager));
-}
-
-fn display_workspace_project_name(workspace: &integrations::WorkspaceProject) -> String {
-    let repo_name = workspace
-        .repo_full_name
-        .trim()
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|value| !value.trim().is_empty());
-    bbs::display_project_name_with_fallback(&workspace.project_id, repo_name)
 }
 
 fn start_laughing_man_if_enabled(app: &AppHandle) {
@@ -10113,7 +10680,11 @@ fn try_start_laughing_man(app: &AppHandle) -> Result<(), String> {
     let _ = laughing_man::set_enabled(true);
     let manager_state = app.state::<laughing_man::LaughingManManager>();
     manager_state
-        .start(app.clone(), laughing_man_project_list_fn(app), laughing_man_deliver_fn(app))
+        .start(
+            app.clone(),
+            laughing_man_project_list_fn(app),
+            laughing_man_deliver_fn(app),
+        )
         .map_err(|err| err.to_string())
 }
 
@@ -10190,6 +10761,12 @@ const LM_STANDBY_README_MD: &str =
     include_str!("../../../relays/laughing-man-cloudflare/README.md");
 const LM_STANDBY_INDEX_TS: &str =
     include_str!("../../../relays/laughing-man-cloudflare/src/index.ts");
+const LM_STANDBY_BBS_GROUP_REDUCER_TS: &str =
+    include_str!("../../../relays/laughing-man-cloudflare/src/bbs_group_reducer.ts");
+const LM_STANDBY_BBS_AUTH_TS: &str =
+    include_str!("../../../relays/laughing-man-cloudflare/src/bbs_auth.ts");
+const LM_STANDBY_BBS_GROUP_TS: &str =
+    include_str!("../../../relays/laughing-man-cloudflare/src/bbs_group.ts");
 const LM_STANDBY_COMMON_BIN_PATHS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 const LM_STANDBY_NPM_NOT_FOUND: &str = "npm not found in /opt/homebrew/bin or /usr/local/bin";
 
@@ -10265,6 +10842,9 @@ fn write_lm_standby_worker_template(worker_dir: &Path, relay_id: &str) -> Result
         ("tsconfig.json", LM_STANDBY_TSCONFIG_JSON),
         ("README.md", LM_STANDBY_README_MD),
         ("src/index.ts", LM_STANDBY_INDEX_TS),
+        ("src/bbs_group_reducer.ts", LM_STANDBY_BBS_GROUP_REDUCER_TS),
+        ("src/bbs_auth.ts", LM_STANDBY_BBS_AUTH_TS),
+        ("src/bbs_group.ts", LM_STANDBY_BBS_GROUP_TS),
     ];
     for (relative, content) in files {
         let path = worker_dir.join(relative);
@@ -10430,7 +11010,12 @@ fn deploy_lm_standby_worker(app: &AppHandle) -> Result<LmStandbyDeployResult, St
         emit_lm_standby_deploy_event(app, "check", "error", LM_STANDBY_NPM_NOT_FOUND, None);
         return Err(LM_STANDBY_NPM_NOT_FOUND.into());
     }
-    run_lm_standby_shell(app, &worker_dir, "install", "npm install --no-audit --no-fund")?;
+    run_lm_standby_shell(
+        app,
+        &worker_dir,
+        "install",
+        "npm install --no-audit --no-fund",
+    )?;
 
     if run_lm_standby_shell(app, &worker_dir, "auth", "npx wrangler whoami --json").is_err() {
         emit_lm_standby_deploy_event(
@@ -10510,16 +11095,13 @@ async fn lm_standby_connect(
             return Err(message);
         }
     };
+    if result.is_ok() {
+        app.state::<bbs_sync::manager::Manager>().pairing_changed();
+    }
     let start_result = try_start_laughing_man(&app);
     match (result, start_result) {
         (Ok(_), Ok(())) => {
-            emit_lm_standby_deploy_event(
-                &app,
-                "connect",
-                "info",
-                "24/7 Standby connected.",
-                None,
-            );
+            emit_lm_standby_deploy_event(&app, "connect", "info", "24/7 Standby connected.", None);
             Ok(manager.status())
         }
         (Ok(_), Err(err)) => {
@@ -10556,6 +11138,9 @@ async fn lm_standby_disconnect(
     })
     .await
     .map_err(|err| format!("join lm_standby_disconnect: {err}"))?;
+    if result.is_ok() {
+        app.state::<bbs_sync::manager::Manager>().pairing_changed();
+    }
     let start_result = try_start_laughing_man(&app);
     match (result, start_result) {
         (Ok(_), Ok(())) => Ok(manager.status()),
@@ -10606,7 +11191,7 @@ async fn lm_send_ember_reminder(
 
 /// Human (account user identity) replies from the BBS panel.
 #[tauri::command]
-async fn bbs_human_reply(request: bbs::BbsHumanReplyRequest) -> Result<String, String> {
+async fn bbs_human_reply(request: bbs::BbsHumanReplyRequest) -> Result<String, bbs::mentions::PublishError> {
     tauri::async_runtime::spawn_blocking(move || {
         let identity =
             load_account_user_identity().unwrap_or_else(|_| default_account_user_identity());
@@ -10616,15 +11201,15 @@ async fn bbs_human_reply(request: bbs::BbsHumanReplyRequest) -> Result<String, S
             identity.name,
             identity.avatar_id,
         );
-        bbs::reply_as(&author, &request.thread_id, request.body).map_err(|err| err.to_string())
+        bbs::publish_human_reply(&author, request)
     })
     .await
-    .map_err(|err| format!("join bbs_human_reply: {err}"))?
+    .map_err(|_| bbs::mentions::PublishError::Message("BBS reply could not complete.".into()))?
 }
 
 /// Human (account user identity) creates a new thread from the BBS panel.
 #[tauri::command]
-async fn bbs_human_post(request: bbs::BbsHumanPostRequest) -> Result<String, String> {
+async fn bbs_human_post(request: bbs::BbsHumanPostRequest) -> Result<String, bbs::mentions::PublishError> {
     tauri::async_runtime::spawn_blocking(move || {
         let identity =
             load_account_user_identity().unwrap_or_else(|_| default_account_user_identity());
@@ -10634,11 +11219,21 @@ async fn bbs_human_post(request: bbs::BbsHumanPostRequest) -> Result<String, Str
             identity.name,
             identity.avatar_id,
         );
-        bbs::create_thread_as(&author, request.project_tags, false, request.body)
-            .map_err(|err| err.to_string())
+        bbs::publish_human_post(&author, request)
     })
     .await
-    .map_err(|err| format!("join bbs_human_post: {err}"))?
+    .map_err(|_| bbs::mentions::PublishError::Message("BBS post could not complete.".into()))?
+}
+
+#[tauri::command]
+async fn bbs_validate_attachments(
+    attachments: Vec<bbs::BbsAttachmentSource>,
+) -> Result<Vec<bbs::BbsAttachmentValidation>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        bbs::validate_attachments(&attachments).map_err(|err| format!("{err:#}"))
+    })
+    .await
+    .map_err(|err| format!("join bbs_validate_attachments: {err}"))?
 }
 
 #[tauri::command]
@@ -10677,6 +11272,7 @@ async fn workspace_open_project(
         let workspace = manager
             .open_workspace_project(project_id)
             .map_err(|err| err.to_string())?;
+        regenerate_workspace_adapters_best_effort(&workspace, "workspace open");
         Ok(workspace)
     })
     .await
@@ -10704,25 +11300,35 @@ fn workspace_archive_project(
 }
 
 #[tauri::command]
-fn workspace_resume_project(
-    manager: State<'_, IntegrationManager>,
+async fn workspace_resume_project(
+    app: AppHandle,
     project_id: String,
 ) -> Result<integrations::WorkspaceProject, String> {
-    let workspace = manager
-        .resume_workspace_project(project_id)
-        .map_err(|err| err.to_string())?;
-    regenerate_workspace_adapters_best_effort(&workspace, "workspace resume");
-    Ok(workspace)
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+
+        let workspace = manager
+            .resume_workspace_project(project_id)
+            .map_err(|err| err.to_string())?;
+        regenerate_workspace_adapters_best_effort(&workspace, "workspace resume");
+        Ok(workspace)
+    })
+    .await
+    .map_err(|err| format!("join workspace_resume_project: {err}"))?
 }
 
 #[tauri::command]
-fn workspace_remove_project(
-    manager: State<'_, IntegrationManager>,
+async fn workspace_remove_project(
+    app: AppHandle,
     request: integrations::WorkspaceProjectLifecycleRequest,
 ) -> Result<integrations::WorkspaceProjectLifecycleResult, String> {
-    manager
-        .remove_workspace_project(request)
-        .map_err(|err| err.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<IntegrationManager>()
+            .remove_workspace_project(request)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("join workspace_remove_project: {error}"))?
 }
 
 #[tauri::command]
@@ -12402,6 +13008,8 @@ pub fn run() {
         .manage(AgentBusManager::default())
         .manage(TemporalContextManager::default())
         .manage(EmberManager::default())
+        .manage(bbs_sync::manager::Manager::account())
+        .manage(bbs::notify::Service::account())
         .manage(laughing_man::LaughingManManager::default())
         .manage(violet::VioletWatchManager::default())
         .setup(|app| {
@@ -12429,6 +13037,19 @@ pub fn run() {
             if let Err(err) = bbs::ensure_account_layout() {
                 eprintln!("Kota BBS layout setup failed: {err}");
             }
+            let sync_app = app.handle().clone();
+            let roster_app = app.handle().clone();
+            app.state::<bbs_sync::manager::Manager>().setup(
+                std::sync::Arc::new(move || {
+                    let _ = sync_app.emit("bbs-sync://changed", ());
+                }),
+                std::sync::Arc::new(move || {
+                    let _ = roster_app.emit("bbs-roster://changed", ());
+                }),
+            );
+            app.state::<bbs::notify::Service>().start(
+                app.handle().clone(), app.state::<bbs_sync::manager::Manager>().inner().clone(),
+            );
             if let Err(err) = bbs::install_cli_shim() {
                 eprintln!("Kota BBS CLI shim setup failed: {err}");
             }
@@ -12454,6 +13075,7 @@ pub fn run() {
                     }
                 }
             }
+            adapter_sync::start_watchers();
             if let Some(workspace) = app.state::<IntegrationManager>().workspace_status().active {
                 regenerate_workspace_adapters_best_effort(&workspace, "app startup");
             }
@@ -12507,12 +13129,26 @@ pub fn run() {
             github_create_repo,
             workspace_prepare_github_project,
             workspace_status,
+            bbs_sync_status,
+            bbs_sync_diagnostics,
+            bbs_sync_invitation,
+            bbs_sync_join,
+            bbs_sync_disconnect,
+            bbs_sync_rename,
+            bbs_sync_remove,
+            bbs_sync_start,
+            bbs_sync_cancel,
+            bbs_sync_avatar_read,
+            bbs_roster_read,
+            bbs_roster_avatar_read,
             bbs_snapshot,
             bbs_mark_processed,
             bbs_ignore_post,
             bbs_delete,
             bbs_human_reply,
             bbs_human_post,
+            bbs_validate_attachments,
+            claude_native_images_for_event,
             file_image_data_url,
             violet_resolve_file_ref,
             violet_open_file_ref,
@@ -12621,6 +13257,8 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            app_handle.state::<bbs::notify::Service>().shutdown();
+            app_handle.state::<bbs_sync::manager::Manager>().shutdown();
             app_handle
                 .state::<IntegrationManager>()
                 .shutdown_storage_measurement();
@@ -12631,6 +13269,69 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_template_exports_all_sources_and_preserves_bbs_migrations() {
+        let keep = std::env::var_os("KOTA_BBS_TEST_TEMPLATE_OUTPUT");
+        let root = keep.as_ref().map(PathBuf::from).unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kota-worker-template-{}", Uuid::new_v4()))
+        });
+        assert!(!root.exists(), "template test must own a new directory");
+        write_lm_standby_worker_template(&root, "test-bbs-template").unwrap();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../relays/laughing-man-cloudflare/src");
+        let names = |path: &Path| -> BTreeSet<std::ffi::OsString> {
+            fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|entry| entry.extension().and_then(|ext| ext.to_str()) == Some("ts"))
+                .map(|entry| entry.file_name().unwrap().to_os_string())
+                .collect()
+        };
+        let expected = names(&repository);
+        assert_eq!(names(&root.join("src")), expected);
+        for source in &expected {
+            assert_eq!(
+                fs::read(root.join("src").join(source)).unwrap(),
+                fs::read(repository.join(source)).unwrap(),
+                "stale embedded Worker source"
+            );
+        }
+        let index = fs::read_to_string(root.join("src/index.ts")).unwrap();
+        let relay_versions = index
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("const RELAY_VERSION = '")?
+                    .strip_suffix("';")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            relay_versions,
+            [laughing_man::STANDBY_RECOMMENDED_VERSION],
+            "exported Worker and App must advertise the same release"
+        );
+        let config: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(root.join("wrangler.jsonc")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["migrations"][0],
+            serde_json::json!({ "tag": "v1", "new_sqlite_classes": ["RelayState"] })
+        );
+        assert_eq!(
+            config["migrations"][1],
+            serde_json::json!({ "tag": "v2", "new_sqlite_classes": ["BbsGroup"] })
+        );
+        assert!(config["durable_objects"]["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|binding| binding["name"] == "BBS_GROUP" && binding["class_name"] == "BbsGroup"));
+        if keep.is_none() {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_string()).collect()
@@ -12652,7 +13353,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_adapter_includes_minimal_cross_project_file_guidance() {
+    fn provider_adapter_uses_bbs_help_instead_of_handoffs_guidance() {
         let root = temp_dir("adapter-handoffs");
         let ctx = IncarnationContext {
             project_root: root.clone(),
@@ -12688,20 +13389,13 @@ mod tests {
                 record: None,
             },
         };
-        let adapter = compile_provider_adapter(
-            &request,
-            &ctx,
-            pty::agent::AgentCli::Codex,
-            &SkillProjection {
-                matched: Vec::new(),
-                missing: Vec::new(),
-            },
-        )
-        .unwrap();
+        let adapter =
+            compile_provider_adapter(&request, &ctx, pty::agent::AgentCli::Codex).unwrap();
 
-        assert!(adapter.contains(
-            "- Cross-project files: `$KOTA_HOME/Handoffs` (normally `~/Kota/Handoffs/`)."
-        ));
+        assert!(
+            adapter.contains("When asked to post or reply on the BBS, first run `kota-bbs help`.")
+        );
+        assert!(!adapter.contains("- Cross-project files:"));
         assert!(adapter.contains("The Bulletin Board is for cross-project coordination threads."));
         assert!(adapter.contains(
             "- Use room chat for user-facing decisions and BBS for cross-project coordination."
@@ -12712,9 +13406,9 @@ mod tests {
         assert!(!adapter.contains("Bulletin Board handoff entrypoints"));
 
         let bbs = adapter.find("### Bulletin Board").unwrap();
-        let files = adapter.find("- Cross-project files:").unwrap();
+        let help = adapter.find("first run `kota-bbs help`").unwrap();
         let skills = adapter.find("### Skills").unwrap();
-        assert!(bbs < files && files < skills);
+        assert!(bbs < help && help < skills);
 
         let _ = fs::remove_dir_all(root);
     }

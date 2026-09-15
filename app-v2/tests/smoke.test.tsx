@@ -616,9 +616,9 @@ describe('M1 · canvas shell landmarks', () => {
     expect(screen.getByTestId('ribbon-filter-clear')).toBeInTheDocument();
     expect(screen.getByTestId('ribbon-filter-clear')).toBeEnabled();
     expect(screen.getByTestId('ribbon-filter-clear')).toHaveAttribute('data-chat-filter-mode', 'all');
-    expect(screen.getByTestId('ribbon-filter-clear')).toHaveAccessibleName('Toggle chat filter. Current: All chats.');
-    expect(screen.getByText('Click to toggle')).toBeInTheDocument();
-    expect(screen.getByText('Every agent · current')).toBeInTheDocument();
+    expect(screen.getByTestId('ribbon-filter-clear')).toHaveAccessibleName('Message Filter: All Agents');
+    expect(screen.getByTestId('ribbon-filter-clear')).toHaveAttribute('data-show-agent-to-agent-messages', 'true');
+    expect(screen.queryByText('Click to toggle')).not.toBeInTheDocument();
     expect(screen.queryByTestId('ribbon-shortcuts')).not.toBeInTheDocument();
   });
 
@@ -1809,43 +1809,438 @@ describe('W3+W5 · composer target picker', () => {
       label: 'a local image link',
       markdown: '[local mock](/tmp/kota-image-preview.png)',
       path: '/tmp/kota-image-preview.png',
+      alt: 'local mock',
     },
     {
       label: 'an angle-wrapped Markdown image',
       markdown: '![local mock](</tmp/kota image preview.png>)',
       path: '/tmp/kota image preview.png',
+      alt: 'local mock',
     },
-  ])('previews and opens $label', async ({ markdown, path }) => {
-    const resolveSpy = vi.spyOn(ptyClient, 'violetResolveFileRef').mockResolvedValue({
-      path,
-      isDir: false,
+    {
+      label: 'a local composer attachment path',
+      markdown: '/tmp/kota-test/project-memory/attachments/composer/att_mock/original.png',
+      path: '/tmp/kota-test/project-memory/attachments/composer/att_mock/original.png',
+      alt: 'original.png',
+    },
+  ])('previews and opens $label', async ({ markdown, path, alt }) => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    try {
+      const resolveSpy = vi.spyOn(ptyClient, 'violetResolveFileRef').mockResolvedValue({
+        path,
+        isDir: false,
+      });
+      vi.spyOn(ptyClient, 'fileImageDataUrl').mockResolvedValue('data:image/png;base64,aW1hZ2U=');
+      const nativeSpy = vi.spyOn(ptyClient, 'claudeNativeImagesForEvent');
+      const openSpy = vi.spyOn(ptyClient, 'violetOpenFileRef').mockResolvedValue();
+
+      const { container } = render(
+        <MarkdownText
+          text={markdown}
+          projectRoot="/tmp/kota-test"
+          enableLocalFileRefs
+        />,
+      );
+
+      const preview = await screen.findByRole('button', { name: alt });
+      expect(preview).toHaveAttribute('src', 'data:image/png;base64,aW1hZ2U=');
+      expect(container).not.toHaveTextContent(markdown);
+      expect(container).not.toHaveTextContent('!');
+      expect(resolveSpy).toHaveBeenCalledWith({
+        projectRoot: '/tmp/kota-test',
+        path,
+      });
+      expect(nativeSpy).not.toHaveBeenCalled();
+
+      await userEvent.click(preview);
+      expect(openSpy).toHaveBeenCalledWith({
+        projectRoot: '/tmp/kota-test',
+        path,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  describe('local file context menus', () => {
+    const selectText = (element: Node) => {
+      const selection = window.getSelection()!;
+      const range = document.createRange();
+      range.selectNode(element);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return selection;
+    };
+
+    const renderFilePill = async () => {
+      window.getSelection()?.removeAllRanges();
+      vi.spyOn(ptyClient, 'violetResolveFileRef').mockResolvedValue({
+        path: '/tmp/kota-test/src/main.ts',
+        isDir: false,
+      });
+      render(
+        <MarkdownText
+          text={'Review `src/main.ts:42` in context.'}
+          projectRoot="/tmp/kota-test"
+          enableLocalFileRefs
+        />,
+      );
+      return screen.findByRole('link', { name: 'src/main.ts:42' });
+    };
+
+    it.each([
+      { gesture: 'right click', button: 2, ctrlKey: false },
+      { gesture: 'Control-click', button: 0, ctrlKey: true },
+    ])('handles repeated WebKit $gesture after automatic word selection', async ({ button, ctrlKey }) => {
+      const pill = await renderFilePill();
+      const openSpy = vi.spyOn(ptyClient, 'violetOpenFileRef').mockResolvedValue();
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          fireEvent.mouseDown(pill, { button, ctrlKey });
+          // WebKit selects the clicked word between mousedown and contextmenu.
+          const selection = selectText(pill);
+          fireEvent.contextMenu(pill, { button: 2, ctrlKey });
+
+          expect(within(screen.getByRole('menu')).getAllByRole('menuitem')
+            .map((item) => item.textContent?.trim())).toEqual([
+            'Open Default App', 'Reveal in Finder', 'Copy Full Path',
+          ]);
+          expect(selection.isCollapsed).toBe(true);
+          if (ctrlKey) fireEvent.click(pill, { button: 0, ctrlKey: true });
+          expect(openSpy).not.toHaveBeenCalled();
+          fireEvent.keyDown(document, { key: 'Escape' });
+          expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+        }
+      } finally {
+        window.getSelection()?.removeAllRanges();
+      }
     });
-    vi.spyOn(ptyClient, 'fileImageDataUrl').mockResolvedValue('data:image/png;base64,aW1hZ2U=');
-    const openSpy = vi.spyOn(ptyClient, 'violetOpenFileRef').mockResolvedValue();
 
-    const { container } = render(
-      <MarkdownText
-        text={markdown}
-        projectRoot="/tmp/kota-test"
-        enableLocalFileRefs
-      />,
-    );
+    it('preserves the native menu for text selected before the right click', async () => {
+      const pill = await renderFilePill();
+      const selection = selectText(pill.closest('p')!);
+      const selectedText = selection.toString();
+      try {
+        fireEvent.mouseDown(pill, { button: 2 });
+        const event = new MouseEvent('contextmenu', { button: 2, bubbles: true, cancelable: true });
+        fireEvent(pill, event);
 
-    const preview = await screen.findByRole('button', { name: 'local mock' });
-    expect(preview).toHaveAttribute('src', 'data:image/png;base64,aW1hZ2U=');
-    expect(container).not.toHaveTextContent(markdown);
-    expect(container).not.toHaveTextContent('!');
-    expect(resolveSpy).toHaveBeenCalledWith({
-      projectRoot: '/tmp/kota-test',
-      path,
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+        expect(event.defaultPrevented).toBe(false);
+        expect(selection.isCollapsed).toBe(false);
+        expect(selection.toString()).toBe(selectedText);
+      } finally {
+        selection.removeAllRanges();
+      }
     });
 
-    await userEvent.click(preview);
-    expect(openSpy).toHaveBeenCalledWith({
-      projectRoot: '/tmp/kota-test',
-      path,
+    it('opens a menu without a mouse press and leaves the selection intact', async () => {
+      const pill = await renderFilePill();
+      const selection = selectText(pill);
+      const selectedText = selection.toString();
+      try {
+        fireEvent.contextMenu(pill);
+
+        expect(screen.getByRole('menu')).toBeInTheDocument();
+        expect(selection.toString()).toBe(selectedText);
+      } finally {
+        selection.removeAllRanges();
+      }
     });
   });
+
+  it('loads an inline image only when its reserved preview approaches the viewport', async () => {
+    let observerCallback: IntersectionObserverCallback | null = null;
+    let observerInstance: IntersectionObserver | null = null;
+    let observerRootMargin = '';
+    let observedTarget: Element | null = null;
+
+    class TestIntersectionObserver implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin: string;
+      readonly thresholds: readonly number[] = [0];
+
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        observerCallback = callback;
+        this.rootMargin = options?.rootMargin ?? '0px';
+        observerRootMargin = this.rootMargin;
+        observerInstance = this;
+      }
+
+      disconnect() {}
+      observe(target: Element) { observedTarget = target; }
+      takeRecords(): IntersectionObserverEntry[] { return []; }
+      unobserve() {}
+    }
+
+    vi.stubGlobal('IntersectionObserver', TestIntersectionObserver);
+    try {
+      const path = '/tmp/kota-lazy-image-preview.png';
+      vi.spyOn(ptyClient, 'violetResolveFileRef').mockResolvedValue({ path, isDir: false });
+      const imageSpy = vi.spyOn(ptyClient, 'fileImageDataUrl')
+        .mockResolvedValue('data:image/png;base64,bGF6eQ==');
+
+      const { container } = render(
+        <MarkdownText
+          text={path}
+          projectRoot="/tmp/kota-test"
+          enableLocalFileRefs
+        />,
+      );
+
+      await waitFor(() => expect(observedTarget).not.toBeNull());
+      expect(observerRootMargin).toBe('480px 0px');
+      expect(imageSpy).not.toHaveBeenCalled();
+      expect(container.querySelector('.violet-inline-image-preview-placeholder')).not.toBeNull();
+
+      act(() => {
+        observerCallback?.([
+          {
+            isIntersecting: true,
+            target: observedTarget!,
+          } as IntersectionObserverEntry,
+        ], observerInstance!);
+      });
+
+      const preview = await screen.findByRole('button', { name: 'kota-lazy-image-preview.png' });
+      expect(preview).toHaveAttribute('loading', 'lazy');
+      expect(preview).toHaveAttribute('decoding', 'async');
+      expect(imageSpy).toHaveBeenCalledOnce();
+      expect(imageSpy).toHaveBeenCalledWith(path);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('previews the first nine local images and leaves the tenth as a path', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    try {
+      const paths = Array.from(
+        { length: 10 },
+        (_, index) => `/tmp/kota-image-preview-limit-${index + 1}.png`,
+      );
+      const resolveSpy = vi.spyOn(ptyClient, 'violetResolveFileRef')
+        .mockImplementation(async (request) => ({ path: request.path, isDir: false }));
+      const imageSpy = vi.spyOn(ptyClient, 'fileImageDataUrl')
+        .mockResolvedValue('data:image/png;base64,bGltaXQ=');
+
+      const { container } = render(
+        <MarkdownText
+          text={paths.join('\n')}
+          projectRoot="/tmp/kota-test"
+          enableLocalFileRefs
+        />,
+      );
+
+      await waitFor(() => expect(resolveSpy).toHaveBeenCalledTimes(10));
+      await waitFor(() => expect(imageSpy).toHaveBeenCalledTimes(9));
+      expect(container.querySelectorAll('.violet-inline-image-preview')).toHaveLength(9);
+      expect(imageSpy).not.toHaveBeenCalledWith(paths[9]);
+      expect(screen.getByText(paths[9]!)).toHaveClass('violet-file-ref', 'image');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('loads one shared Claude native-image event near the viewport and replaces its markers', async () => {
+    type Observed = {
+      callback: IntersectionObserverCallback;
+      observer: IntersectionObserver;
+      target: Element | null;
+    };
+    const observed: Observed[] = [];
+
+    class TestIntersectionObserver implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin: string;
+      readonly thresholds: readonly number[] = [0];
+      readonly record: Observed;
+
+      constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        this.rootMargin = options?.rootMargin ?? '0px';
+        this.record = { callback, observer: this, target: null };
+        observed.push(this.record);
+      }
+
+      disconnect() {}
+      observe(target: Element) { this.record.target = target; }
+      takeRecords(): IntersectionObserverEntry[] { return []; }
+      unobserve() {}
+    }
+
+    vi.stubGlobal('IntersectionObserver', TestIntersectionObserver);
+    try {
+      let resolveNativeImages!: (images: ptyClient.ClaudeNativeImageDataUrls) => void;
+      const nativeImages = new Promise<ptyClient.ClaudeNativeImageDataUrls>((resolve) => {
+        resolveNativeImages = resolve;
+      });
+      const nativeSpy = vi.spyOn(ptyClient, 'claudeNativeImagesForEvent')
+        .mockReturnValue(nativeImages);
+      const nativeMessage = {
+        shell: 'claude',
+        sourcePath: '/Users/test/.claude/projects/mock-agent/session.jsonl',
+        nativeEventId: '11111111-1111-4111-8111-111111111111:0',
+      };
+
+      const { container } = render(
+        <>
+          <MarkdownText
+            text="[Image #61] [Image #62] compare"
+            projectRoot="/tmp/kota-test"
+            enableLocalFileRefs
+            nativeMessage={nativeMessage}
+          />
+          <MarkdownText
+            text="[Image #61] [Image #62] compare"
+            projectRoot="/tmp/kota-test"
+            enableLocalFileRefs
+            nativeMessage={nativeMessage}
+          />
+        </>,
+      );
+
+      await waitFor(() => expect(observed.filter((item) => item.target)).toHaveLength(4));
+      expect(observed.every((item) => item.observer.rootMargin === '480px 0px')).toBe(true);
+      expect(nativeSpy).not.toHaveBeenCalled();
+      expect(container.querySelector('.violet-inline-image-preview-placeholder')).toBeNull();
+      expect(screen.getAllByText('[Image #61]')).toHaveLength(2);
+
+      act(() => {
+        for (const item of observed) {
+          item.callback([{
+            isIntersecting: true,
+            target: item.target!,
+          } as IntersectionObserverEntry], item.observer);
+        }
+      });
+      await waitFor(() => expect(nativeSpy).toHaveBeenCalledOnce());
+      expect(nativeSpy).toHaveBeenCalledWith({
+        sourcePath: nativeMessage.sourcePath,
+        nativeEventId: nativeMessage.nativeEventId,
+        maxImages: 2,
+      });
+
+      act(() => resolveNativeImages({
+        '61': 'data:image/jpeg;base64,bmF0aXZlLTE=',
+        '62': 'data:image/jpeg;base64,bmF0aXZlLTI=',
+      }));
+      expect(await screen.findAllByRole('img', { name: '[Image #61]' })).toHaveLength(2);
+      expect(screen.getAllByRole('img', { name: '[Image #62]' })).toHaveLength(2);
+      expect(screen.queryAllByText('[Image #61]')).toHaveLength(0);
+      expect(screen.queryAllByText('[Image #62]')).toHaveLength(0);
+      expect(nativeSpy).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps a text-only Claude image-label reference unchanged without a preview placeholder', async () => {
+    class ImmediateIntersectionObserver {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+      disconnect() {}
+      observe(target: Element) {
+        this.callback([{
+          isIntersecting: true,
+          target,
+        } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+      }
+    }
+
+    vi.stubGlobal('IntersectionObserver', ImmediateIntersectionObserver);
+    try {
+      const nativeSpy = vi.spyOn(ptyClient, 'claudeNativeImagesForEvent').mockResolvedValue({});
+      const { container } = render(
+        <MarkdownText
+          text="I only mentioned [Image #777] here"
+          projectRoot="/tmp/kota-test"
+          enableLocalFileRefs
+          nativeMessage={{
+            shell: 'claude',
+            sourcePath: '/Users/test/.claude/projects/mock-agent/text-only.jsonl',
+            nativeEventId: '22222222-2222-4222-8222-222222222222:0',
+          }}
+        />,
+      );
+
+      await waitFor(() => expect(nativeSpy).toHaveBeenCalledOnce());
+      expect(container).toHaveTextContent('I only mentioned [Image #777] here');
+      expect(container.querySelector('img')).toBeNull();
+      expect(container.querySelector('.violet-inline-image-preview-placeholder')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not read Claude native logs when viewport observation is unavailable', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    try {
+      const nativeSpy = vi.spyOn(ptyClient, 'claudeNativeImagesForEvent').mockResolvedValue({
+        '61': 'data:image/png;base64,c2hvdWxkLW5vdC1sb2Fk',
+      });
+      const { container } = render(
+        <MarkdownText
+          text="[Image #61] lazy-only label"
+          projectRoot="/tmp/kota-test"
+          enableLocalFileRefs
+          nativeMessage={{
+            shell: 'claude',
+            sourcePath: '/Users/test/.claude/projects/mock-agent/no-observer.jsonl',
+            nativeEventId: '44444444-4444-4444-8444-444444444444:0',
+          }}
+        />,
+      );
+
+      await act(async () => Promise.resolve());
+      expect(nativeSpy).not.toHaveBeenCalled();
+      expect(container).toHaveTextContent('[Image #61] lazy-only label');
+      expect(container.querySelector('img')).toBeNull();
+      expect(container.querySelector('.violet-inline-image-preview-placeholder')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(['codex', 'pi', 'kimi', 'opencode', 'composer'])(
+    'never requests Claude native images for a %s message',
+    async (shell) => {
+      class ImmediateIntersectionObserver {
+        constructor(private readonly callback: IntersectionObserverCallback) {}
+        disconnect() {}
+        observe(target: Element) {
+          this.callback([{
+            isIntersecting: true,
+            target,
+          } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+        }
+      }
+
+      vi.stubGlobal('IntersectionObserver', ImmediateIntersectionObserver);
+      try {
+        const nativeSpy = vi.spyOn(ptyClient, 'claudeNativeImagesForEvent').mockResolvedValue({
+          '61': 'data:image/png;base64,c2hvdWxkLW5vdC1sb2Fk',
+        });
+        const { container } = render(
+          <MarkdownText
+            text="[Image #61] ordinary label"
+            projectRoot="/tmp/kota-test"
+            enableLocalFileRefs
+            nativeMessage={{
+              shell,
+              sourcePath: `/Users/test/.claude/projects/mock-agent/${shell}.jsonl`,
+              nativeEventId: `33333333-3333-4333-8333-33333333333${shell.length}:0`,
+            }}
+          />,
+        );
+
+        await act(async () => Promise.resolve());
+        expect(nativeSpy).not.toHaveBeenCalled();
+        expect(container).toHaveTextContent('[Image #61] ordinary label');
+        expect(container.querySelector('img')).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it('leaves standalone and escaped exclamation marks as text', () => {
     const resolveSpy = vi.spyOn(ptyClient, 'violetResolveFileRef');
@@ -2726,28 +3121,28 @@ describe('W3+W5 · composer target picker', () => {
       privacy: false,
     });
     emitVioletComposerSent({
-      projectRoot: '/tmp/kotatest1',
+      projectRoot: '/tmp/river-archive',
       text: '再来一个',
       targetAgentIds: ['agent-764ad85d1e'],
       privacy: false,
     });
 
     expect(violetComposerSentHistory('/tmp/kota-test').map((item) => item.text)).toEqual(['kota prompt']);
-    expect(violetComposerSentHistory('/tmp/kotatest1').map((item) => item.text)).toEqual(['再来一个']);
+    expect(violetComposerSentHistory('/tmp/river-archive').map((item) => item.text)).toEqual(['再来一个']);
     expect(violetComposerSentHistory(null)).toEqual([]);
   });
 
   it('clears local composer echoes when switching project roots', async () => {
     const { rerender } = render(
       <VioletRoomPanel
-        projectRoot="/tmp/kotatest1"
+        projectRoot="/tmp/river-archive"
         agentIds={['agent-764ad85d1e']}
       />,
     );
 
     act(() => {
       emitVioletComposerSent({
-        projectRoot: '/tmp/kotatest1',
+        projectRoot: '/tmp/river-archive',
         text: '再来一个',
         targetAgentIds: ['agent-764ad85d1e'],
         privacy: false,
@@ -3488,32 +3883,32 @@ describe('W3+W5 · composer target picker', () => {
     expect(screen.getByTestId('group-chat-overlay')).toHaveClass('chat-filter-active');
     expect(chip(alice)).toHaveClass('chat-filter-target');
     expect(screen.getByTestId('ribbon-filter-clear')).toHaveAttribute('data-chat-filter-mode', 'filter');
-    expect(screen.getByTestId('ribbon-filter-clear')).toHaveAccessibleName('Toggle chat filter. Current: Filtered.');
-    expect(screen.getByText('Selected agents · current')).toBeInTheDocument();
+    expect(screen.getByTestId('ribbon-filter-clear')).toHaveAccessibleName('Message Filter: Selected Agent');
+    expect(screen.getByRole('radio', { name: 'Selected Agent' })).toHaveAttribute('aria-checked', 'true');
 
     await act(async () => {});
     act(() => {
       emitVioletComposerSent({
-        projectRoot: '/tmp/kota-dev',
+        projectRoot: '/tmp/kota-test',
         text: 'direct to filtered alice',
         targetAgentIds: [alice],
         privacy: false,
       });
       emitVioletComposerSent({
-        projectRoot: '/tmp/kota-dev',
+        projectRoot: '/tmp/kota-test',
         text: 'broadcast to both filtered agents',
         targetAgentIds: [alice, bob],
         privacy: false,
       });
       emitVioletComposerSent({
-        projectRoot: '/tmp/kota-dev',
+        projectRoot: '/tmp/kota-test',
         text: 'direct to filtered bob',
         targetAgentIds: [bob],
         privacy: false,
       });
       window.dispatchEvent(new CustomEvent('violet://room/synced', {
         detail: {
-          request: { projectRoot: null, agentIds: [alice, bob] },
+          request: { projectRoot: '/tmp/kota-test', agentIds: [alice, bob] },
           state: {
             messages: [
               {

@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type Event, type UnlistenFn } from '@tauri-apps/api/event';
+import { bbsMentionError } from './bbs-mentions';
 import {
   INITIAL_SCROLLBACK,
   mockRunCommand,
@@ -1327,24 +1328,66 @@ export interface EmberDreamConsolidateState {
 
 export type BbsPostState = 'new' | 'processed' | 'ignored' | 'none' | string;
 
+export interface BbsAttachmentSource {
+  path: string;
+  name?: string;
+}
+
+export interface BbsAttachment {
+  id: string;
+  name: string;
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+  /** Read-time projection only; never persisted into post Markdown. */
+  localPath: string;
+  available: boolean;
+}
+
+export interface BbsAttachmentValidation extends BbsAttachmentSource {
+  name: string;
+  sizeBytes: number;
+}
+
+/** Immutable origin snapshot for a received version, not a local hero lookup. */
+export type BbsSyncAvatar =
+  | { kind: 'builtin'; id: string }
+  | { kind: 'image'; sha256: string; ext: string; localPath: string | null; available: boolean }
+  | { kind: 'none' };
+
 export interface BbsPost {
   postId: string;
   threadId: string;
+  /** Backend SHA-256 of the original Markdown bytes; never derived in the UI. */
+  versionId?: string | null;
   projectId: string;
   projectDisplayName: string;
   agentId: string;
   agentDisplayName: string;
   agentAvatar?: string | null;
+  /** Only absence preserves the existing local avatar resolution. */
+  syncAvatar?: BbsSyncAvatar;
   createdAt: string;
   kind: 'topic' | 'reply' | string;
   body: string;
+  attachments?: BbsAttachment[];
   preview: string;
   state: BbsPostState;
   external: boolean;
 }
 
+/** A received eligibility notice, never a Markdown post or a content version. */
+export interface BbsUnavailablePost {
+  postId: string;
+  reason: 'too_large_to_sync';
+  /** Missing when the bounded source metadata cannot establish the role. */
+  kind?: 'topic' | 'reply';
+}
+
 export interface BbsThread {
   threadId: string;
+  /** Public eligibility projection; meaningful only for the current group. */
+  sharingGroupId?: string | null;
   visibility: 'targeted' | 'broadcast' | string;
   projectTags: string[];
   projectTagLabels: string[];
@@ -1355,6 +1398,8 @@ export interface BbsThread {
   isNew: boolean;
   relevant: boolean;
   posts: BbsPost[];
+  /** Older backends omit this field. Real posts always take display priority. */
+  unavailablePosts?: BbsUnavailablePost[];
 }
 
 export interface BbsSnapshot {
@@ -1378,6 +1423,8 @@ export interface BbsPostStateRequest {
 export interface BbsDeleteRequest {
   threadId: string;
   postId?: string | null;
+  /** Only an explicit Fork deletion supplies this; omission stays logical. */
+  versionId?: string | null;
 }
 
 export interface WorkspaceProjectLifecycleRequest {
@@ -2315,6 +2362,8 @@ export interface BbsHumanReplyRequest {
   projectDisplayName?: string | null;
   threadId: string;
   body: string;
+  attachments?: BbsAttachmentSource[];
+  mentions?: import('./types/bbs-roster').BbsMentionTarget[];
 }
 
 export interface BbsHumanPostRequest {
@@ -2322,16 +2371,25 @@ export interface BbsHumanPostRequest {
   projectDisplayName?: string | null;
   projectTags: string[];
   body: string;
+  attachments?: BbsAttachmentSource[];
+  mentions?: import('./types/bbs-roster').BbsMentionTarget[];
+}
+
+export async function bbsValidateAttachments(attachments: readonly BbsAttachmentSource[]): Promise<BbsAttachmentValidation[]> {
+  if (!useTauriRuntime()) throw new Error('BBS attachments require the Kota runtime.');
+  return invoke<BbsAttachmentValidation[]>('bbs_validate_attachments', { attachments });
 }
 
 export async function bbsHumanReply(request: BbsHumanReplyRequest): Promise<string> {
   if (!useTauriRuntime()) throw new Error('BBS requires the Kota runtime.');
-  return invoke<string>('bbs_human_reply', { request });
+  try { return await invoke<string>('bbs_human_reply', { request }); }
+  catch (error) { throw bbsMentionError(error) ?? error; }
 }
 
 export async function bbsHumanPost(request: BbsHumanPostRequest): Promise<string> {
   if (!useTauriRuntime()) throw new Error('BBS requires the Kota runtime.');
-  return invoke<string>('bbs_human_post', { request });
+  try { return await invoke<string>('bbs_human_post', { request }); }
+  catch (error) { throw bbsMentionError(error) ?? error; }
 }
 
 export interface AccountDreamsStatus {
@@ -2528,6 +2586,21 @@ export async function lmStandbyDeleteQueued(id: string): Promise<LmStandbyQueueI
 export async function lmSendEmberReminder(request: LmEmberReminderRequest): Promise<void> {
   if (!useTauriRuntime()) throw new Error('Laughing Man requires the Kota runtime.');
   await invoke('lm_send_ember_reminder', { request });
+}
+
+export interface ClaudeNativeImagesRequest {
+  sourcePath: string;
+  nativeEventId: string;
+  maxImages?: number;
+}
+
+export type ClaudeNativeImageDataUrls = Record<string, string>;
+
+export async function claudeNativeImagesForEvent(
+  request: ClaudeNativeImagesRequest,
+): Promise<ClaudeNativeImageDataUrls> {
+  if (!useTauriRuntime()) return {};
+  return invoke<ClaudeNativeImageDataUrls>('claude_native_images_for_event', { request });
 }
 
 export async function fileImageDataUrl(path: string): Promise<string> {

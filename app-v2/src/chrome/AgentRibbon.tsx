@@ -15,6 +15,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -47,9 +48,11 @@ export interface AgentRibbonProps {
   privateAgents?: ReadonlySet<AgentId>;
   chatFilterActive?: boolean;
   chatFilterTargetAgents?: readonly AgentId[];
+  showAgentToAgentMessages?: boolean;
   unreadAgentIds?: ReadonlySet<AgentId>;
   onOpenAgent: (id: AgentId) => void;
   onToggleChatFilter?: () => void;
+  onShowAgentToAgentMessagesChange?: (show: boolean) => void;
   workingHeroes?: readonly WorkingHero[];
   onIncarnateHero?: (hero: WorkingHero) => void;
   onAddAgent?: () => void;
@@ -86,9 +89,11 @@ export function AgentRibbon({
   privateAgents,
   chatFilterActive,
   chatFilterTargetAgents = [],
+  showAgentToAgentMessages = true,
   unreadAgentIds = EMPTY_AGENT_ID_SET,
   onOpenAgent,
   onToggleChatFilter,
+  onShowAgentToAgentMessagesChange,
   workingHeroes = [],
   onIncarnateHero,
   onAddAgent,
@@ -309,6 +314,8 @@ export function AgentRibbon({
             <ChatFilterToggleButton
               active={!!chatFilterActive}
               onClick={onToggleChatFilter}
+              showAgentToAgentMessages={showAgentToAgentMessages}
+              onShowAgentToAgentMessagesChange={onShowAgentToAgentMessagesChange}
             />
           }
           testId="ribbon-row-on"
@@ -592,35 +599,145 @@ function RibbonRow({
 function ChatFilterToggleButton({
   active,
   onClick,
+  showAgentToAgentMessages,
+  onShowAgentToAgentMessagesChange,
 }: {
   active: boolean;
   onClick?: () => void;
+  showAgentToAgentMessages: boolean;
+  onShowAgentToAgentMessagesChange?: (show: boolean) => void;
 }) {
-  const currentMode = active ? 'Filtered' : 'All chats';
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const pointerInsideRef = useRef(false);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const panelId = useId();
+  const currentMode = active ? 'Selected Agent' : 'All Agents';
+  const cancelClose = () => {
+    if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  };
+  const openPanel = () => {
+    cancelClose();
+    setOpen(true);
+  };
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [open]);
+
   return (
-    <button
-      type="button"
-      className={`ribbon-filter-clear ${active ? 'active' : ''}`}
-      onClick={(event) => {
-        event.stopPropagation();
-        onClick?.();
+    <div
+      ref={wrapRef}
+      className={`ribbon-message-filter ${open ? 'open' : ''}`}
+      onMouseEnter={() => {
+        pointerInsideRef.current = true;
+        openPanel();
       }}
-      aria-label={`Toggle chat filter. Current: ${currentMode}.`}
-      data-chat-filter-mode={active ? 'filter' : 'all'}
-      data-testid="ribbon-filter-clear"
+      onMouseLeave={() => {
+        pointerInsideRef.current = false;
+        cancelClose();
+        if (!wrapRef.current?.contains(document.activeElement)) {
+          closeTimerRef.current = setTimeout(() => setOpen(false), 200);
+        }
+      }}
+      onFocus={openPanel}
+      onBlur={(event) => {
+        // WebKit can blur to null before a pointer click focuses the next button.
+        if (!pointerInsideRef.current && !event.currentTarget.contains(event.relatedTarget)) {
+          cancelClose();
+          setOpen(false);
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+        triggerRef.current?.focus();
+        cancelClose();
+        setOpen(false);
+      }}
     >
-      <span className="ribbon-filter-tooltip" role="tooltip">
-        <b>Click to toggle</b>
-        <span className={active ? 'current' : ''}>
-          <strong>Filtered</strong>
-          <em>{active ? 'Selected agents · current' : 'Selected agents'}</em>
-        </span>
-        <span className={!active ? 'current' : ''}>
-          <strong>All chats</strong>
-          <em>{!active ? 'Every agent · current' : 'Every agent'}</em>
-        </span>
-      </span>
-    </button>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`ribbon-filter-clear ${active ? 'active' : ''}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          openPanel();
+          onClick?.();
+        }}
+        aria-label={`Message Filter: ${currentMode}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={panelId}
+        data-chat-filter-mode={active ? 'filter' : 'all'}
+        data-show-agent-to-agent-messages={showAgentToAgentMessages}
+        data-testid="ribbon-filter-clear"
+      />
+      {open && (
+        <section className="ribbon-filter-tooltip" id={panelId} role="dialog" aria-labelledby={`${panelId}-title`}>
+          <h2 id={`${panelId}-title`}>Message Filter</h2>
+          <div className="ribbon-filter-modes" role="radiogroup" aria-label="Message scope">
+            {[{ value: true, label: 'Selected Agent' }, { value: false, label: 'All Agents' }].map((option) => (
+              <button
+                key={option.label}
+                type="button"
+                role="radio"
+                aria-checked={active === option.value}
+                tabIndex={active === option.value ? 0 : -1}
+                data-mode={option.value ? 'filter' : 'all'}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (active !== option.value) onClick?.();
+                }}
+                onKeyDown={(event) => {
+                  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const next = event.key === 'Home' ? true : event.key === 'End' ? false : !option.value;
+                  if (next !== active) onClick?.();
+                  event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(
+                    `[data-mode="${next ? 'filter' : 'all'}"]`,
+                  )?.focus();
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <div className="ribbon-filter-separator" />
+          <button
+            type="button"
+            className="ribbon-filter-agent-bus"
+            aria-pressed={showAgentToAgentMessages}
+            onClick={(event) => {
+              event.stopPropagation();
+              onShowAgentToAgentMessagesChange?.(!showAgentToAgentMessages);
+            }}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 3.8h11v8H8l-3.6 3v-3H3z" />
+              <path d="M17 8.5h4v8h-1.5v3L16 16.5h-6v-2" />
+            </svg>
+            <span>Show Agent to Agent Msg</span>
+            <span className="ribbon-filter-check" aria-hidden="true">
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m2 6 2.5 2.5L10 3" /></svg>
+            </span>
+          </button>
+        </section>
+      )}
+    </div>
   );
 }
 

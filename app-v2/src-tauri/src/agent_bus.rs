@@ -184,7 +184,7 @@ impl AgentBusManager {
             .map(normalize_agent_ref)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("agent bus send requires senderAgentId"))?;
-        let target = resolve_agent_identity(project_root, &request.target)?;
+        let target = resolve_send_target(project_root, &sender_agent_id, &request)?;
         let sender = resolve_agent_identity(project_root, &sender_agent_id).ok();
         let actor_name = request
             .sender_name
@@ -403,6 +403,13 @@ impl AgentBusManager {
             violet::emit_room_changed(app, project_root, "actor-message", changed_paths);
         }
         Ok(result)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_bbs_notice_for_test(
+        &self, project_root: &Path, record: ActorMessageRecord, key: &str,
+    ) -> Result<ActorNoticeResult> {
+        self.persist_actor_notice(project_root, record, Some(key)).map(|(result, _)| result)
     }
 
     fn persist_actor_notice(
@@ -977,6 +984,25 @@ fn dispatch_failed_dir(project_root: &Path) -> PathBuf {
         .join("failed")
 }
 
+fn resolve_send_target(
+    project_root: &Path,
+    sender: &str,
+    request: &AgentBusSendRequest,
+) -> Result<AgentIdentity> {
+    let target = resolve_agent_identity(project_root, &request.target)?;
+    // Structured BBS destinations are IDs. If the intended agent vanished
+    // after bridge validation, the legacy name resolver must not redirect the
+    // notice to another agent whose AKA happens to match that old ID.
+    if sender == "bbs"
+        && request.intent.as_deref() == Some("bbs-thread")
+        && request.event_id.as_deref().is_some_and(|id| id.starts_with("bbs-mention:"))
+        && target.agent_id != request.target
+    {
+        bail!("BBS notification target changed");
+    }
+    Ok(target)
+}
+
 fn resolve_agent_identity(project_root: &Path, raw: &str) -> Result<AgentIdentity> {
     let wanted = normalize_agent_ref(raw).to_lowercase();
     if wanted.is_empty() {
@@ -1215,6 +1241,23 @@ fn current_target_triple_guess() -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_bbs_target_cannot_fall_back_to_another_agents_matching_name() {
+        let account = crate::agent_directory::tests::Account::new();
+        let root = account.project("p", false);
+        account.agent("p", "intended", "display-name: Intended\n");
+        account.agent("p", "other", "display-name: intended\n");
+        let mut request: AgentBusSendRequest = serde_json::from_value(serde_json::json!({
+            "target":"intended", "text":"notice", "intent":"bbs-thread",
+            "eventId":format!("bbs-mention:{}", "a".repeat(64))
+        })).unwrap();
+        assert_eq!(resolve_send_target(&root, "bbs", &request).unwrap().agent_id, "intended");
+        account.agent("p", "intended", "display-name: Intended\nstatus: archived\n");
+        assert!(resolve_send_target(&root, "bbs", &request).is_err());
+        request.event_id = Some("ordinary-bus-message".into());
+        assert_eq!(resolve_send_target(&root, "bbs", &request).unwrap().agent_id, "other");
+    }
 
     #[test]
     fn terminal_message_uses_structured_envelope() {

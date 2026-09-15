@@ -1,8 +1,8 @@
 [package]
 name = "kota-v2"
-version = "0.1.10"
+version = "0.1.20"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.91"
 default-run = "kota-v2"
 
 [lib]
@@ -13,6 +13,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+webrtc = { version = "=0.20.5", default-features = false, features = ["runtime-tokio"] }
+rtc-ice = "=0.20.5"
+# Existing rtc package: explicit native SCTP message ceiling, no extra crypto.
+rtc = { version = "=0.20.5", default-features = false }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+async-trait = "0.1"
+bytes = "1"
 anyhow = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
@@ -36,6 +43,9 @@ dirs = "6"
 libc = "0.2"
 base64 = "0.22"
 sha2 = "0.10"
+# Already present transitively; Ed25519 device proofs and strict Worker URL parsing.
+ring = "0.17"
+url = "2"
 ureq = { version = "2", features = ["json", "socks-proxy"] }
 urlencoding = "2"
 notify = "6"

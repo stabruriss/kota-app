@@ -3,6 +3,7 @@ import type { KeyboardEvent, MouseEvent, ReactNode, UIEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   agentBusRetryDelivery,
+  claudeNativeImagesForEvent,
   fileImageDataUrl,
   loadAccountUserIdentity,
   readVioletRoomCache,
@@ -51,6 +52,7 @@ import {
 } from '../lib/room-quote';
 import { RoomQuoteMark } from '../lib/room-quote-mark';
 import subagentUpdateIconUrl from '../assets/tavern/icons/subagent-update.png';
+import { filterAgentBusMessages } from '../lib/violet-message-filter';
 
 export {
   normalizeAttachmentInsensitive,
@@ -62,6 +64,7 @@ interface VioletRoomPanelProps {
   agentIds?: readonly AgentId[];
   chatFilterActive?: boolean;
   chatFilterAgentIds?: readonly AgentId[];
+  showAgentToAgentMessages?: boolean;
   agentMeta?: Readonly<Record<AgentId, Agent>>;
   agentRecords?: Readonly<Record<AgentId, ProjectAgentRecord>>;
   onAgentContextMenu?: (
@@ -204,6 +207,7 @@ export function VioletRoomPanel({
   agentIds = [],
   chatFilterActive,
   chatFilterAgentIds = [],
+  showAgentToAgentMessages = true,
   agentMeta,
   agentRecords,
   onAgentContextMenu,
@@ -232,7 +236,7 @@ export function VioletRoomPanel({
   const forceScrollBottomRef = useRef(false);
   const hasLoadedLatestRef = useRef(false);
   const historyExpandedRef = useRef(VIOLET_ROOM_HISTORY_EXPANDED_CACHE_KEYS.has(roomCacheKey));
-  const filterAutofillRef = useRef({ key: '', pages: 0 });
+  const filterAutofillRef = useRef({ roomCacheKey, key: '', pages: 0 });
   const scrollFrameRef = useRef<number | null>(null);
   const bottomSettleFrameRef = useRef<number | null>(null);
   const bottomSettleTimeoutRef = useRef<number | null>(null);
@@ -866,14 +870,17 @@ export function VioletRoomPanel({
     `${roomCacheKey}::${chatFilterActive ? chatFilterAgentIdsKey : 'all'}`,
   );
   const nextVisibleMessages = useMemo(
-    () => chatFilterActive
-      ? groupConsecutiveSameAgentProgressMessages(scopedMessages)
-      : groupAdjacentProgressRunMessages(scopedMessages),
-    [chatFilterActive, scopedMessages],
+    () => {
+      const displayMessages = filterAgentBusMessages(scopedMessages, showAgentToAgentMessages);
+      return chatFilterActive
+        ? groupConsecutiveSameAgentProgressMessages(displayMessages)
+        : groupAdjacentProgressRunMessages(displayMessages);
+    },
+    [chatFilterActive, scopedMessages, showAgentToAgentMessages],
   );
   const visibleMessages = useStableRoomMessages(
     nextVisibleMessages,
-    `${roomCacheKey}::visible::${chatFilterActive ? chatFilterAgentIdsKey : 'all'}`,
+    `${roomCacheKey}::visible::${chatFilterActive ? chatFilterAgentIdsKey : 'all'}::bus:${showAgentToAgentMessages}`,
   );
   const latestVisibleMessage = visibleMessages[visibleMessages.length - 1];
   const latestVisibleMessageKey = latestVisibleMessage
@@ -978,16 +985,19 @@ export function VioletRoomPanel({
     forceScrollBottomRef.current = true;
     setHasOlder(true);
     setJumpToLatestVisible(false);
-  }, [chatFilterActive, chatFilterAgentIdsKey, setJumpToLatestVisible]);
+  }, [chatFilterActive, chatFilterAgentIdsKey, showAgentToAgentMessages, setJumpToLatestVisible]);
 
   useEffect(() => {
-    const key = chatFilterActive ? chatFilterAgentIdsKey : '';
-    if (filterAutofillRef.current.key !== key) {
-      filterAutofillRef.current = { key, pages: 0 };
+    const key = `${chatFilterActive ? chatFilterAgentIdsKey : ''}::bus:${showAgentToAgentMessages}`;
+    const roomChanged = filterAutofillRef.current.roomCacheKey !== roomCacheKey;
+    if (roomChanged || filterAutofillRef.current.key !== key) {
+      filterAutofillRef.current = { roomCacheKey, key, pages: 0 };
     }
     if (
-      !chatFilterActive ||
-      chatFilterAgentSet.size === 0 ||
+      // Let the room-load effect replace the previous room's messages/cursor first.
+      roomChanged ||
+      (!chatFilterActive && showAgentToAgentMessages) ||
+      (chatFilterActive && chatFilterAgentSet.size === 0) ||
       loading ||
       loadingOlder ||
       !hasOlder ||
@@ -1007,6 +1017,8 @@ export function VioletRoomPanel({
     loadOlder,
     loading,
     loadingOlder,
+    roomCacheKey,
+    showAgentToAgentMessages,
     state?.messages,
     visibleMessages.length,
   ]);
@@ -1058,6 +1070,7 @@ export function VioletRoomPanel({
     chatFilterAgentIdsKey,
     latestVisibleMessageKey,
     loading,
+    showAgentToAgentMessages,
     settleScrollToBottom,
     visibleMessages.length,
   ]);
@@ -1115,6 +1128,7 @@ export function VioletRoomPanel({
       ].filter(Boolean).join(' ')}
       aria-label={chatFilterActive ? `Violet room filtered to ${chatFilterLabel || 'current target'}` : 'Violet room'}
       data-chat-filter-agents={chatFilterActive ? chatFilterAgentIds.join('|') : undefined}
+      data-show-agent-to-agent-messages={showAgentToAgentMessages}
     >
       {onClose && (
         <button
@@ -1134,7 +1148,7 @@ export function VioletRoomPanel({
         onScroll={handleScroll}
       >
         <div ref={contentRef} className="violet-room-content">
-          {(loadingOlder || hasOlder) && visibleMessages.length > 0 && (
+          {(loadingOlder || hasOlder) && (visibleMessages.length > 0 || (!showAgentToAgentMessages && scopedMessages.length > 0)) && (
             <button
               type="button"
               className="violet-room-older"
@@ -1153,7 +1167,12 @@ export function VioletRoomPanel({
             </div>
           )}
           {!error && !loading && visibleMessages.length === 0 && (
-            chatFilterActive ? (
+            !showAgentToAgentMessages && scopedMessages.length > 0 ? (
+              <div className="violet-room-state chat-filter">
+                <b>No messages match these filters.</b>
+                <span>Agent-to-agent messages are hidden.</span>
+              </div>
+            ) : chatFilterActive ? (
               <div className="violet-room-state chat-filter">
                 <b>{chatFilterLabel ? `No messages for ${chatFilterLabel}.` : 'No target selected.'}</b>
                 <span>This filter follows the current composer target and includes direct prompts, matching broadcasts, and selected agent replies.</span>
@@ -1506,7 +1525,12 @@ const VioletMessageBubble = memo(function VioletMessageBubble({
                 <RoomQuoteCards quotes={parsedQuotePrompt.quotes} />
               )}
               {parsedQuotePrompt.body && (
-                <MarkdownText text={parsedQuotePrompt.body} projectRoot={projectRoot} enableLocalFileRefs />
+                <MarkdownText
+                  text={parsedQuotePrompt.body}
+                  projectRoot={projectRoot}
+                  enableLocalFileRefs
+                  nativeMessage={message}
+                />
               )}
             </>
           )}
@@ -1697,7 +1721,12 @@ const GhostSasayakiBubble = memo(function GhostSasayakiBubble({
           <span>Ghost Sasayaki</span>
         </summary>
         <div className="violet-ghost-sasayaki-body">
-          <MarkdownText text={message.text} projectRoot={projectRoot} enableLocalFileRefs />
+          <MarkdownText
+            text={message.text}
+            projectRoot={projectRoot}
+            enableLocalFileRefs
+            nativeMessage={message}
+          />
         </div>
       </details>
     </article>
@@ -1966,38 +1995,82 @@ function emberDreamMessageBody(text: string): string {
   return trimmed.slice(EMBER_DREAM_MESSAGE_TITLE.length).replace(/^\s+/, '');
 }
 
+type ClaudeNativeMessageRef = Pick<
+  VioletChatMessage,
+  'shell' | 'sourcePath' | 'nativeEventId'
+>;
+
+type ClaudeNativeImageRequestDescriptor = {
+  key: string;
+  sourcePath: string;
+  nativeEventId: string;
+  maxImages: number;
+};
+
+type ClaudeNativeImageRenderState = {
+  cacheKeys: ReadonlyMap<string, string>;
+  settled: boolean;
+  request: () => void;
+};
+
 type MarkdownRenderOptions = {
   projectRoot?: string | null;
   previewImageRefs: ReadonlySet<string>;
   enableLocalFileRefs: boolean;
+  claudeNativeImages: ClaudeNativeImageRenderState | null;
 };
 
-const VIOLET_INLINE_IMAGE_PREVIEW_LIMIT = 4;
+const VIOLET_INLINE_IMAGE_PREVIEW_LIMIT = 9;
 const VIOLET_INLINE_IMAGE_CACHE_LIMIT = 50;
+const VIOLET_INLINE_IMAGE_PRELOAD_MARGIN = '480px 0px';
+const CLAUDE_NATIVE_IMAGE_MARKER_LIMIT = 16;
+const CLAUDE_NATIVE_EVENT_RESULT_CACHE_LIMIT = 160;
+const CLAUDE_NATIVE_SOURCE_PATH_PATTERN = /^\/.*\/\.claude\/projects\/.+\.jsonl$/;
+const CLAUDE_NATIVE_EVENT_ID_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?::\d+)?$/i;
+const CLAUDE_NATIVE_IMAGE_DATA_URL_PATTERN = /^data:image\/(?:png|jpeg|gif|webp);base64,/i;
 const violetInlineImageDataUrlCache = new Map<string, string>();
+const claudeNativeEventResultCache = new Map<string, ReadonlyMap<string, string>>();
+const claudeNativeEventInFlight = new Map<string, Promise<ReadonlyMap<string, string>>>();
 const EMPTY_IMAGE_REF_SET = new Set<string>();
+const EMPTY_NATIVE_IMAGE_CACHE_KEYS = new Map<string, string>();
 const DEFAULT_MARKDOWN_RENDER_OPTIONS: MarkdownRenderOptions = {
   projectRoot: null,
   previewImageRefs: EMPTY_IMAGE_REF_SET,
   enableLocalFileRefs: false,
+  claudeNativeImages: null,
 };
 
 export const MarkdownText = memo(function MarkdownText({
   text,
   projectRoot,
   enableLocalFileRefs = false,
+  nativeMessage,
 }: {
   text: string;
   projectRoot?: string | null;
   enableLocalFileRefs?: boolean;
+  nativeMessage?: ClaudeNativeMessageRef | null;
 }) {
   const blocks = useMemo(() => parseMarkdownBlocks(text), [text]);
   const previewImageRefs = useMemo(() => collectPreviewImageRefs(text), [text]);
+  const claudeNativeRequest = useMemo(() => claudeNativeImageRequestDescriptor(
+    text,
+    nativeMessage,
+    VIOLET_INLINE_IMAGE_PREVIEW_LIMIT - previewImageRefs.size,
+  ), [
+    nativeMessage?.nativeEventId,
+    nativeMessage?.shell,
+    nativeMessage?.sourcePath,
+    previewImageRefs,
+    text,
+  ]);
+  const claudeNativeImages = useClaudeNativeImages(claudeNativeRequest);
   const renderOptions = useMemo<MarkdownRenderOptions>(() => ({
     projectRoot: projectRoot ?? null,
     previewImageRefs,
     enableLocalFileRefs,
-  }), [enableLocalFileRefs, previewImageRefs, projectRoot]);
+    claudeNativeImages,
+  }), [claudeNativeImages, enableLocalFileRefs, previewImageRefs, projectRoot]);
   return (
     <div className="violet-msg-text">
       {blocks.map((block, index) => {
@@ -2066,6 +2139,165 @@ export const MarkdownText = memo(function MarkdownText({
     </div>
   );
 });
+
+function claudeNativeImageRequestDescriptor(
+  text: string,
+  nativeMessage: ClaudeNativeMessageRef | null | undefined,
+  remainingPreviewSlots: number,
+): ClaudeNativeImageRequestDescriptor | null {
+  if (nativeMessage?.shell !== 'claude' || remainingPreviewSlots <= 0) return null;
+  const sourcePath = nativeMessage.sourcePath?.trim();
+  const nativeEventId = nativeMessage.nativeEventId?.trim();
+  if (!sourcePath || !nativeEventId || !CLAUDE_NATIVE_SOURCE_PATH_PATTERN.test(sourcePath)) {
+    return null;
+  }
+  const eventMatch = nativeEventId.match(CLAUDE_NATIVE_EVENT_ID_PATTERN);
+  if (!eventMatch) return null;
+  const markerIds = collectClaudeNativeImageMarkerIds(text);
+  if (markerIds.length === 0) return null;
+  const eventUuid = eventMatch[1]!.toLowerCase();
+  return {
+    key: JSON.stringify([sourcePath, eventUuid]),
+    sourcePath,
+    nativeEventId,
+    maxImages: Math.min(
+      remainingPreviewSlots,
+      markerIds.length,
+      VIOLET_INLINE_IMAGE_PREVIEW_LIMIT,
+    ),
+  };
+}
+
+function collectClaudeNativeImageMarkerIds(text: string): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/\[Image #(\d+)\]/g)) {
+    const rawId = match[1] ?? '';
+    const parsed = Number.parseInt(rawId, 10);
+    if (!rawId || !Number.isSafeInteger(parsed) || parsed < 0 || parsed > 0xffff_ffff) continue;
+    const id = String(parsed);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= CLAUDE_NATIVE_IMAGE_MARKER_LIMIT) break;
+  }
+  return ids;
+}
+
+function cachedClaudeNativeEventResult(
+  key: string,
+): ReadonlyMap<string, string> | null {
+  if (!claudeNativeEventResultCache.has(key)) return null;
+  const result = claudeNativeEventResultCache.get(key) ?? EMPTY_NATIVE_IMAGE_CACHE_KEYS;
+  const dataUrlsStillCached = result.size === 0 || Array.from(result.values()).every(
+    (cacheKey) => violetInlineImageDataUrlCache.has(cacheKey),
+  );
+  if (!dataUrlsStillCached) {
+    claudeNativeEventResultCache.delete(key);
+    return null;
+  }
+  claudeNativeEventResultCache.delete(key);
+  claudeNativeEventResultCache.set(key, result);
+  return result;
+}
+
+function rememberClaudeNativeEventResult(
+  key: string,
+  result: ReadonlyMap<string, string>,
+): void {
+  claudeNativeEventResultCache.delete(key);
+  claudeNativeEventResultCache.set(key, result);
+  while (claudeNativeEventResultCache.size > CLAUDE_NATIVE_EVENT_RESULT_CACHE_LIMIT) {
+    const oldest = claudeNativeEventResultCache.keys().next().value;
+    if (!oldest) break;
+    claudeNativeEventResultCache.delete(oldest);
+  }
+}
+
+function loadClaudeNativeEventImages(
+  request: ClaudeNativeImageRequestDescriptor,
+): Promise<ReadonlyMap<string, string>> {
+  const cached = cachedClaudeNativeEventResult(request.key);
+  if (cached) return Promise.resolve(cached);
+  const existing = claudeNativeEventInFlight.get(request.key);
+  if (existing) return existing;
+
+  const pending = claudeNativeImagesForEvent({
+    sourcePath: request.sourcePath,
+    nativeEventId: request.nativeEventId,
+    maxImages: request.maxImages,
+  })
+    .then((images) => {
+      const cacheKeys = new Map<string, string>();
+      for (const [rawId, dataUrl] of Object.entries(images)) {
+        if (cacheKeys.size >= request.maxImages) break;
+        if (!/^\d+$/.test(rawId) || !CLAUDE_NATIVE_IMAGE_DATA_URL_PATTERN.test(dataUrl)) continue;
+        const parsed = Number.parseInt(rawId, 10);
+        if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 0xffff_ffff) continue;
+        const id = String(parsed);
+        const cacheKey = `${request.key}:${id}`;
+        rememberInlineImageDataUrl(cacheKey, dataUrl);
+        cacheKeys.set(id, cacheKey);
+      }
+      rememberClaudeNativeEventResult(request.key, cacheKeys);
+      return cacheKeys;
+    })
+    .catch(() => {
+      rememberClaudeNativeEventResult(request.key, EMPTY_NATIVE_IMAGE_CACHE_KEYS);
+      return EMPTY_NATIVE_IMAGE_CACHE_KEYS;
+    });
+  claudeNativeEventInFlight.set(request.key, pending);
+  void pending.finally(() => {
+    if (claudeNativeEventInFlight.get(request.key) === pending) {
+      claudeNativeEventInFlight.delete(request.key);
+    }
+  });
+  return pending;
+}
+
+function useClaudeNativeImages(
+  request: ClaudeNativeImageRequestDescriptor | null,
+): ClaudeNativeImageRenderState | null {
+  const [result, setResult] = useState<{
+    key: string;
+    cacheKeys: ReadonlyMap<string, string>;
+  } | null>(() => {
+    if (!request) return null;
+    const cached = cachedClaudeNativeEventResult(request.key);
+    return cached ? { key: request.key, cacheKeys: cached } : null;
+  });
+
+  useEffect(() => {
+    if (!request) {
+      setResult(null);
+      return;
+    }
+    const cached = cachedClaudeNativeEventResult(request.key);
+    setResult((current) => {
+      if (current?.key === request.key && current.cacheKeys === cached) return current;
+      return cached ? { key: request.key, cacheKeys: cached } : null;
+    });
+  }, [request?.key]);
+
+  const settled = !!request && result?.key === request.key;
+  const requestImages = useCallback(() => {
+    if (!request || settled) return;
+    const key = request.key;
+    void loadClaudeNativeEventImages(request).then((cacheKeys) => {
+      setResult((current) => (
+        current?.key === key && current.cacheKeys === cacheKeys
+          ? current
+          : { key, cacheKeys }
+      ));
+    });
+  }, [request, settled]);
+
+  return useMemo(() => request ? {
+    cacheKeys: settled ? result?.cacheKeys ?? EMPTY_NATIVE_IMAGE_CACHE_KEYS : EMPTY_NATIVE_IMAGE_CACHE_KEYS,
+    settled,
+    request: requestImages,
+  } : null, [request, requestImages, result?.cacheKeys, settled]);
+}
 
 const HTML_DRAWING_MIN_HEIGHT = 160;
 const HTML_DRAWING_MAX_HEIGHT = 420;
@@ -2217,11 +2449,25 @@ const RichInline = memo(function RichInline({
   text: string;
   options: MarkdownRenderOptions;
 }) {
-  const parts = useMemo(() => splitRichText(text), [text]);
+  const includeClaudeMarkers = !!options.claudeNativeImages;
+  const parts = useMemo(
+    () => splitRichText(text, includeClaudeMarkers),
+    [includeClaudeMarkers, text],
+  );
   return (
     <>
       {parts.map((part, index) => {
         if (part.kind === 'text') return <span key={index}>{part.value}</span>;
+        if (part.kind === 'claude-image-marker') {
+          return (
+            <ClaudeNativeImageMarker
+              key={index}
+              label={part.value}
+              markerId={part.markerId}
+              state={options.claudeNativeImages!}
+            />
+          );
+        }
         return (
           <LocalFileRef
             key={index}
@@ -2234,6 +2480,50 @@ const RichInline = memo(function RichInline({
         );
       })}
     </>
+  );
+});
+
+const ClaudeNativeImageMarker = memo(function ClaudeNativeImageMarker({
+  label,
+  markerId,
+  state,
+}: {
+  label: string;
+  markerId: string;
+  state: ClaudeNativeImageRenderState;
+}) {
+  const triggerRef = useRef<HTMLSpanElement | null>(null);
+  const cacheKey = state.cacheKeys.get(markerId) ?? null;
+  const loadDataUrl = useCallback(() => {
+    const dataUrl = cacheKey ? violetInlineImageDataUrlCache.get(cacheKey) : null;
+    return dataUrl
+      ? Promise.resolve(dataUrl)
+      : Promise.reject(new Error('Claude native image is no longer cached.'));
+  }, [cacheKey]);
+
+  useEffect(() => {
+    if (cacheKey || state.settled) return undefined;
+    const target = triggerRef.current;
+    if (!target || typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      state.request();
+      observer.disconnect();
+    }, { rootMargin: VIOLET_INLINE_IMAGE_PRELOAD_MARGIN });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [cacheKey, state]);
+
+  if (!cacheKey) {
+    return <span ref={state.settled ? undefined : triggerRef}>{label}</span>;
+  }
+  return (
+    <InlineImagePreview
+      key={cacheKey}
+      cacheKey={cacheKey}
+      alt={label}
+      loadDataUrl={loadDataUrl}
+    />
   );
 });
 
@@ -2521,18 +2811,40 @@ function markdownEscapePrefixLength(text: string, index: number): number {
   return length;
 }
 
-function splitRichText(text: string): Array<{ kind: 'text' | 'file' | 'image'; value: string }> {
-  const pattern = /((?:~\/|\/|\.{1,2}\/|[\w@.-]+\/)[^\s"'`<>()]+?\.(?:tsx?|jsx?|rs|md|markdown|json|ya?ml|toml|css|scss|html?|png|jpe?g|webp|gif|svg|pdf|txt|log|csv|tsv|zip|dmg|app|command|sh|scpt|pkg|terminal|workflow)(?::\d+)?)/gi;
-  const out: Array<{ kind: 'text' | 'file' | 'image'; value: string }> = [];
+type RichTextPart =
+  | { kind: 'text' | 'file' | 'image'; value: string }
+  | { kind: 'claude-image-marker'; value: string; markerId: string };
+
+const LOCAL_FILE_REF_PATTERN_SOURCE = '(?:~\\/|\\/|\\.{1,2}\\/|[\\w@.-]+\\/)[^\\s"\'`<>()]+?\\.(?:tsx?|jsx?|rs|md|markdown|json|ya?ml|toml|css|scss|html?|png|jpe?g|webp|gif|svg|pdf|txt|log|csv|tsv|zip|dmg|app|command|sh|scpt|pkg|terminal|workflow)(?::\\d+)?';
+
+function splitRichText(text: string, includeClaudeMarkers = false): RichTextPart[] {
+  const pattern = new RegExp(
+    includeClaudeMarkers
+      ? `(\\[Image #(\\d+)\\]|${LOCAL_FILE_REF_PATTERN_SOURCE})`
+      : `(${LOCAL_FILE_REF_PATTERN_SOURCE})`,
+    'gi',
+  );
+  const out: RichTextPart[] = [];
   let lastIndex = 0;
   for (const match of text.matchAll(pattern)) {
     const value = match[0];
     const index = match.index ?? 0;
     if (index > lastIndex) out.push({ kind: 'text', value: text.slice(lastIndex, index) });
-    out.push({
-      kind: isImageFileRef(value) ? 'image' : 'file',
-      value,
-    });
+    const markerId = includeClaudeMarkers ? match[2] : undefined;
+    if (markerId !== undefined && /^\[Image #\d+\]$/.test(value)) {
+      out.push({
+        kind: 'claude-image-marker',
+        value,
+        markerId: String(Number.parseInt(markerId, 10)),
+      });
+    } else if (markerId !== undefined) {
+      out.push({ kind: 'text', value });
+    } else {
+      out.push({
+        kind: isImageFileRef(value) ? 'image' : 'file',
+        value,
+      });
+    }
     lastIndex = index + value.length;
   }
   if (lastIndex < text.length) out.push({ kind: 'text', value: text.slice(lastIndex) });
@@ -2543,7 +2855,12 @@ function localFileRefFromInlineCode(value: string): { kind: 'file' | 'image'; va
   const parts = splitRichText(value);
   if (parts.length !== 1) return null;
   const [part] = parts;
-  if (!part || part.kind === 'text' || part.value !== value) return null;
+  if (
+    !part ||
+    part.kind === 'text' ||
+    part.kind === 'claude-image-marker' ||
+    part.value !== value
+  ) return null;
   return { kind: part.kind, value: part.value };
 }
 
@@ -2618,13 +2935,16 @@ const LocalFileRef = memo(function LocalFileRef({
   inlineCode?: boolean;
 }) {
   const [resolved, setResolved] = useState<VioletFileRefResolveResult | null>(null);
-  const [imageContextMenu, setImageContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [fileContextMenu, setFileContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  const hadSelectionBeforeContextMenuRef = useRef<boolean | null>(null);
   const displayText = label ?? value;
 
   useEffect(() => {
     let cancelled = false;
     setResolved(null);
+    setFileContextMenu(null);
+    hadSelectionBeforeContextMenuRef.current = null;
     if (!enableLocalFileRefs) return undefined;
     void violetResolveFileRef({ projectRoot: projectRoot ?? null, path: value })
       .then((result) => {
@@ -2648,6 +2968,13 @@ const LocalFileRef = memo(function LocalFileRef({
   }, [enableLocalFileRefs, projectRoot, resolved, value]);
 
   const handleMouseDown = useCallback((event: MouseEvent<HTMLElement>) => {
+    // WebKit selects the clicked word before contextmenu. Preserve only a
+    // selection that existed before the secondary mouse press.
+    const selection = window.getSelection();
+    const isContextClick = event.button === 2 || (event.button === 0 && event.ctrlKey);
+    hadSelectionBeforeContextMenuRef.current = isContextClick
+      ? !!selection && !selection.isCollapsed && selection.containsNode(event.currentTarget, true)
+      : null;
     pointerDownRef.current = { x: event.clientX, y: event.clientY };
   }, []);
 
@@ -2664,7 +2991,7 @@ const LocalFileRef = memo(function LocalFileRef({
   }, []);
 
   const handleClick = useCallback((event: MouseEvent<HTMLElement>) => {
-    if (!resolved || shouldSkipClickOpen(event)) return;
+    if (event.button !== 0 || event.ctrlKey || !resolved || shouldSkipClickOpen(event)) return;
     openRef();
   }, [openRef, resolved, shouldSkipClickOpen]);
 
@@ -2676,15 +3003,15 @@ const LocalFileRef = memo(function LocalFileRef({
   }, [openRef, resolved]);
 
   useEffect(() => {
-    if (!imageContextMenu) return undefined;
+    if (!fileContextMenu) return undefined;
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      setImageContextMenu(null);
+      setFileContextMenu(null);
     };
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target;
-      if (target instanceof Element && target.closest('[data-violet-image-context-menu="true"]')) return;
-      setImageContextMenu(null);
+      if (target instanceof Element && target.closest('[data-violet-file-context-menu="true"]')) return;
+      setFileContextMenu(null);
     };
     document.addEventListener('keydown', onKeyDown, true);
     document.addEventListener('pointerdown', onPointerDown, true);
@@ -2692,55 +3019,67 @@ const LocalFileRef = memo(function LocalFileRef({
       document.removeEventListener('keydown', onKeyDown, true);
       document.removeEventListener('pointerdown', onPointerDown, true);
     };
-  }, [imageContextMenu]);
+  }, [fileContextMenu]);
 
-  const handleImageContextMenu = useCallback((event: MouseEvent<HTMLImageElement>) => {
-    if (!resolved) return;
+  const handleFileContextMenu = useCallback((event: MouseEvent<HTMLElement>) => {
+    if (!enableLocalFileRefs || !resolved) return;
+    const hadSelection = hadSelectionBeforeContextMenuRef.current;
+    hadSelectionBeforeContextMenuRef.current = null;
+    if (hadSelection) return;
     event.preventDefault();
     event.stopPropagation();
-    setImageContextMenu({ x: event.clientX, y: event.clientY, path: resolved.path });
-  }, [resolved]);
+    // Do not let WebKit's automatic selection become a "prior selection" on
+    // the next right click. Leave genuine or unrelated selections alone.
+    if (hadSelection === false) {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && selection.containsNode(event.currentTarget, true)) {
+        selection.removeAllRanges();
+      }
+    }
+    pointerDownRef.current = null;
+    setFileContextMenu({ x: event.clientX, y: event.clientY, path: resolved.path });
+  }, [enableLocalFileRefs, resolved]);
 
-  const runImageContextAction = useCallback(async (action: 'open' | 'reveal' | 'copy') => {
-    const path = imageContextMenu?.path;
+  const runFileContextAction = useCallback(async (action: 'open' | 'reveal' | 'copy') => {
+    const path = fileContextMenu?.path;
     if (!path) return;
     try {
       if (action === 'open') {
-        openRef();
+        await violetOpenFileRef({ projectRoot: null, path });
       } else if (action === 'reveal') {
         await violetRevealFileRef({ projectRoot: null, path });
       } else if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(path);
       }
     } catch (err) {
-      console.warn(`[violet-room] image ${action} failed`, err);
+      console.warn(`[violet-room] file ${action} failed`, err);
       if (typeof window !== 'undefined' && typeof window.alert === 'function') {
         window.alert(`${action} failed: ${err}`);
       }
     } finally {
-      setImageContextMenu(null);
+      setFileContextMenu(null);
     }
-  }, [imageContextMenu?.path, openRef]);
+  }, [fileContextMenu?.path]);
 
-  const imageContextMenuPortal = imageContextMenu && typeof document !== 'undefined'
+  const fileContextMenuPortal = enableLocalFileRefs && resolved && fileContextMenu && typeof document !== 'undefined'
     ? createPortal(
       <div
-        data-violet-image-context-menu="true"
+        data-violet-file-context-menu="true"
         className="tree-context-menu"
-        style={contextMenuPosition(imageContextMenu.x, imageContextMenu.y)}
+        style={contextMenuPosition(fileContextMenu.x, fileContextMenu.y)}
         role="menu"
         onPointerDown={(event) => event.stopPropagation()}
         onMouseDown={(event) => event.stopPropagation()}
         onClick={(event) => event.stopPropagation()}
       >
-        <button type="button" role="menuitem" onClick={() => void runImageContextAction('open')}>
-          Open
+        <button type="button" role="menuitem" onClick={() => void runFileContextAction('open')}>
+          Open Default App
         </button>
-        <button type="button" role="menuitem" onClick={() => void runImageContextAction('reveal')}>
+        <button type="button" role="menuitem" onClick={() => void runFileContextAction('reveal')}>
           Reveal in Finder
         </button>
-        <button type="button" role="menuitem" onClick={() => void runImageContextAction('copy')}>
-          Copy full path
+        <button type="button" role="menuitem" onClick={() => void runFileContextAction('copy')}>
+          Copy Full Path
         </button>
       </div>,
       document.body,
@@ -2764,6 +3103,7 @@ const LocalFileRef = memo(function LocalFileRef({
       onMouseDown={handleMouseDown}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
+      onContextMenu={enableLocalFileRefs && resolved ? handleFileContextMenu : undefined}
     >
       {displayText}
     </span>
@@ -2776,24 +3116,26 @@ const LocalFileRef = memo(function LocalFileRef({
       onMouseDown={handleMouseDown}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
+      onContextMenu={enableLocalFileRefs && resolved ? handleFileContextMenu : undefined}
     >
       {displayText}
     </code>
   );
 
   if (kind !== 'image' || !previewImage || !resolved || resolved.isDir || !isPreviewableImageRef(value)) {
-    return chip;
+    return <>{chip}{fileContextMenuPortal}</>;
   }
 
   return (
-    <span className="violet-image-ref">
+    <span className="violet-image-ref" onMouseDown={handleMouseDown}>
       <InlineLocalImagePreview
+        key={resolved.path}
         path={resolved.path}
         alt={label || basename(value)}
         onOpen={openRef}
-        onContextMenu={handleImageContextMenu}
+        onContextMenu={handleFileContextMenu}
       />
-      {imageContextMenuPortal}
+      {fileContextMenuPortal}
     </span>
   );
 });
@@ -2809,45 +3151,112 @@ const InlineLocalImagePreview = memo(function InlineLocalImagePreview({
   onOpen: () => void;
   onContextMenu?: (event: MouseEvent<HTMLImageElement>) => void;
 }) {
-  const [src, setSrc] = useState<string | null>(() => violetInlineImageDataUrlCache.get(path) ?? null);
+  const loadDataUrl = useCallback(() => fileImageDataUrl(path), [path]);
+  return (
+    <InlineImagePreview
+      cacheKey={path}
+      alt={alt}
+      loadDataUrl={loadDataUrl}
+      onOpen={onOpen}
+      onContextMenu={onContextMenu}
+      title={`Open ${path}`}
+    />
+  );
+});
+
+const InlineImagePreview = memo(function InlineImagePreview({
+  cacheKey,
+  alt,
+  loadDataUrl,
+  onOpen,
+  onContextMenu,
+  title,
+}: {
+  cacheKey: string;
+  alt: string;
+  loadDataUrl: () => Promise<string>;
+  onOpen?: () => void;
+  onContextMenu?: (event: MouseEvent<HTMLImageElement>) => void;
+  title?: string;
+}) {
+  const cachedSrc = violetInlineImageDataUrlCache.get(cacheKey) ?? null;
+  const [src, setSrc] = useState<string | null>(() => cachedSrc);
+  const [loadRequested, setLoadRequested] = useState(() => (
+    cachedSrc !== null || typeof IntersectionObserver === 'undefined'
+  ));
+  const [loadFailed, setLoadFailed] = useState(false);
+  const loadTriggerRef = useRef<HTMLSpanElement | null>(null);
   const handleKeyDown = useCallback((event: KeyboardEvent<HTMLImageElement>) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
+    if (!onOpen || (event.key !== 'Enter' && event.key !== ' ')) return;
     event.preventDefault();
     onOpen();
   }, [onOpen]);
 
   useEffect(() => {
-    if (violetInlineImageDataUrlCache.has(path)) {
-      setSrc(violetInlineImageDataUrlCache.get(path) ?? null);
-      return;
+    if (loadRequested) return undefined;
+    const target = loadTriggerRef.current;
+    if (!target || typeof IntersectionObserver === 'undefined') {
+      setLoadRequested(true);
+      return undefined;
     }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      setLoadRequested(true);
+      observer.disconnect();
+    }, { rootMargin: VIOLET_INLINE_IMAGE_PRELOAD_MARGIN });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [loadRequested]);
+
+  useEffect(() => {
+    const cached = violetInlineImageDataUrlCache.get(cacheKey);
+    if (cached) {
+      setSrc(cached);
+      setLoadFailed(false);
+      return undefined;
+    }
+    if (!loadRequested) return undefined;
     let cancelled = false;
-    void fileImageDataUrl(path)
+    setLoadFailed(false);
+    void loadDataUrl()
       .then((dataUrl) => {
-        rememberInlineImageDataUrl(path, dataUrl);
+        rememberInlineImageDataUrl(cacheKey, dataUrl);
         if (!cancelled) setSrc(dataUrl);
       })
       .catch(() => {
-        if (!cancelled) setSrc(null);
+        if (!cancelled) setLoadFailed(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [cacheKey, loadDataUrl, loadRequested]);
 
-  if (!src) return null;
+  if (!src) {
+    if (loadFailed) return null;
+    return (
+      <span
+        ref={loadTriggerRef}
+        className="violet-inline-image-preview-placeholder"
+        aria-hidden="true"
+      />
+    );
+  }
   return (
     <img
       className="violet-inline-image-preview"
       src={src}
       alt={alt}
       draggable={false}
-      role="button"
-      tabIndex={0}
-      title={`Open ${path}`}
-      onClick={onOpen}
+      loading="lazy"
+      decoding="async"
+      role={onOpen ? 'button' : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      title={title}
+      onClick={onOpen ? (event) => {
+        if (event.button === 0 && !event.ctrlKey) onOpen();
+      } : undefined}
       onContextMenu={onContextMenu}
-      onKeyDown={handleKeyDown}
+      onKeyDown={onOpen ? handleKeyDown : undefined}
     />
   );
 });

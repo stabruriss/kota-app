@@ -1,0 +1,87 @@
+{
+  "emptyRoot": {
+    "newCount": 0,
+    "projectDisplayName": "Target",
+    "projectId": "target",
+    "root": "/var/folders/1t/j8tk9r9j42qfyfslzsbt782m0000gn/T/kota-content-test-c5e5bfae-7fe0-4654-a673-3fdd595521e6/bbs",
+    "threads": [
+      {
+        "createdByProject": "source",
+        "createdByProjectLabel": "Source",
+        "isNew": false,
+        "latestPostId": "",
+        "posts": [],
+        "projectTagLabels": [
+          "Source"
+        ],
+        "projectTags": [
+          "source"
+        ],
+        "relevant": false,
+        "sharingGroupId": "group-test",
+        "threadId": "thread-one",
+        "unavailablePosts": [
+          {
+            "postId": "unavailable-non-mint",
+            "reason": "too_large_to_sync"
+          }
+        ],
+        "updatedAt": "2026-09-12T10:00:00Z",
+        "visibility": "targeted"
+      }
+    ]
+  },
+  "show": "Thread: thread-one\nVisibility: targeted\nTo: source\n\n## Source / Author / 2026-09-12T10:00:00Z\npost: normal-reply\nversion: 78d4cad3f6eae9c76cadf6e420745bd753711bd38069776e0b2c09dcc4e8ac7b\n\nI remain a reply\n\n## Unavailable post\npost: unavailable-non-mint\n\nFile size too large to sync.\n\n",
+  "withReply": {
+    "newCount": 0,
+    "projectDisplayName": "Target",
+    "projectId": "target",
+    "root": "/var/folders/1t/j8tk9r9j42qfyfslzsbt782m0000gn/T/kota-content-test-c5e5bfae-7fe0-4654-a673-3fdd595521e6/bbs",
+    "threads": [
+      {
+        "createdByProject": "source",
+        "createdByProjectLabel": "Source",
+        "isNew": false,
+        "latestPostId": "normal-reply",
+        "posts": [
+          {
+            "agentDisplayName": "Author",
+            "agentId": "author",
+            "attachments": [],
+            "body": "I remain a reply",
+            "createdAt": "2026-09-12T10:00:00Z",
+            "external": true,
+            "kind": "reply",
+            "postId": "normal-reply",
+            "preview": "I remain a reply",
+            "projectDisplayName": "Source",
+            "projectId": "source",
+            "state": "none",
+            "syncAvatar": {
+              "kind": "none"
+            },
+            "threadId": "thread-one",
+            "versionId": "78d4cad3f6eae9c76cadf6e420745bd753711bd38069776e0b2c09dcc4e8ac7b"
+          }
+        ],
+        "projectTagLabels": [
+          "Source"
+        ],
+        "projectTags": [
+          "source"
+        ],
+        "relevant": false,
+        "sharingGroupId": "group-test",
+        "threadId": "thread-one",
+        "unavailablePosts": [
+          {
+            "postId": "unavailable-non-mint",
+            "reason": "too_large_to_sync"
+          }
+        ],
+        "updatedAt": "2026-09-12T10:00:00Z",
+        "visibility": "targeted"
+      }
+    ]
+  }
+}

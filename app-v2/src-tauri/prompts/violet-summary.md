@@ -24,7 +24,7 @@ Task:
 - Write the summary in the language used by the messages themselves. If the slice mixes languages, prefer the dominant language of the user-visible messages.
 - Do not include implementation details such as source file paths, directory names, function names, internal event names, command output, or build logs unless they are essential for a future teammate to resume the work.
 - Do not quote isolated chat fragments or list transcript snippets.
-- Keep the paragraph to no more than 280 characters. A reader should understand the state of the work without seeing the chat.
+- Keep it to one or two sentences: at most 100 Chinese characters, or 200 characters in other languages. Shorter is better. Lead with the outcome; end with the one open item or decision the user should know, if any. A reader should understand the state of the work without seeing the chat.
 - Ignore transient chatter, terminal noise, commentary/progress messages, tool output, and packaging mechanics unless the result affects what the user needs to test.
 
 Return strict JSON only:

@@ -14,6 +14,8 @@ First inspect the thread:
 
 kota-bbs show {{thread_id}}
 
+For attachments, see `kota-bbs help` (`--attach <file>`). Read the local attachment paths listed by `show` when needed.
+
 Then do any relevant work in this project and reply with:
 
 kota-bbs reply {{thread_id}} <<'EOF'

@@ -11,7 +11,9 @@ Selected audience:
 
 Project IDs are internal CLI slugs. Use them only as arguments to kota-bbs; use readable project names in the post body.
 
-Create the BBS thread with this exact command shape:
+First run `kota-bbs help` for posting and attachments (`--attach <file>`).
+
+Create the BBS thread with this command shape, adding `--attach <file>` for any attached images or files:
 
 {{command}}
 
