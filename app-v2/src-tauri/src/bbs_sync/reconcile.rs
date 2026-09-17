@@ -388,7 +388,68 @@ pub(crate) struct Catalog {
     versions: BTreeMap<VersionCursor, PostVersion>,
     unavailable_posts: BTreeMap<(String, String), UnavailablePost>,
 }
+impl Serialize for Catalog {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeSeq, SerializeStruct};
+        struct Values<'a, K, V>(&'a BTreeMap<K, V>);
+        impl<K, V: Serialize> Serialize for Values<'_, K, V> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+                for value in self.0.values() { seq.serialize_element(value)?; }
+                seq.end()
+            }
+        }
+        let mut out = serializer.serialize_struct("Catalog", 4)?;
+        out.serialize_field("tombstones", &Values(&self.deletions))?;
+        out.serialize_field("threads", &Values(&self.threads))?;
+        out.serialize_field("versions", &Values(&self.versions))?;
+        out.serialize_field("unavailable", &Values(&self.unavailable_posts))?;
+        out.end()
+    }
+}
 impl Catalog {
+    /// A delta only omits equal facts. Absence in either snapshot is never a
+    /// deletion; tombstones remain the sole deletion authority. Include thread
+    /// records needed by changed versions/notices even when their record is old.
+    pub(crate) fn since(&self, previous: &Self) -> Self {
+        let mut delta = Self {
+            deletions: self.deletions.iter().filter(|(k, v)| previous.deletions.get(*k) != Some(*v))
+                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            threads: self.threads.iter().filter(|(k, v)| previous.threads.get(*k) != Some(*v))
+                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            versions: self.versions.iter().filter(|(k, v)| previous.versions.get(*k) != Some(*v))
+                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+            unavailable_posts: self.unavailable_posts.iter()
+                .filter(|(k, v)| previous.unavailable_posts.get(*k) != Some(*v))
+                .map(|(k, v)| (k.clone(), v.clone())).collect(),
+        };
+        for thread in delta.versions.values().map(|p| &p.thread_id)
+            .chain(delta.unavailable_posts.values().map(|p| &p.thread_id))
+        {
+            if let Some(record) = self.threads.get(thread) {
+                delta.threads.insert(thread.clone(), record.clone());
+            }
+        }
+        delta
+    }
+
+    /// Stable public revision for a catalog snapshot.  It is derived only from
+    /// ordered content facts; activity timestamps and online state are absent.
+    pub(crate) fn revision(&self) -> String {
+        self.revision_with_roster(None)
+    }
+
+    pub(crate) fn revision_with_roster(&self, roster_version: Option<&str>) -> String {
+        let value = serde_json::json!({
+            "tombstones": self.deletions.values().collect::<Vec<_>>(),
+            "threads": self.threads.values().collect::<Vec<_>>(),
+            "versions": self.versions.values().collect::<Vec<_>>(),
+            "unavailable": self.unavailable_posts.values().collect::<Vec<_>>(),
+            "rosterVersion": roster_version,
+        });
+        raw_sha256(&serde_json::to_vec(&value).expect("catalog revision is serializable"))
+    }
+
     pub(crate) fn post_versions(&self) -> impl Iterator<Item = &PostVersion> {
         self.versions.values()
     }
@@ -847,6 +908,129 @@ mod tests {
         .unwrap()
     }
     #[test]
+    #[ignore = "explicit existing-history manifest budget measurement"]
+    fn history_manifest_bytes_and_page_counts() {
+        let mut rows = Vec::new();
+        for count in [0, 1000, 10000] {
+            let mut state = SyncState::new();
+            shared(&mut state, "group", true);
+            state.thread_records.insert("thread-one".into(), record());
+            for i in 0..count {
+                let id = format!("post-{i:08}");
+                remember(&mut state, post(&id, id.as_bytes()));
+            }
+            let catalog = Catalog::from_state(&state, "group").unwrap();
+            let mut pages = 0;
+            let mut bytes = 0;
+            let mut reader = ManifestReader::default();
+            for phase in [
+                ManifestPhase::Tombstones,
+                ManifestPhase::Threads,
+                ManifestPhase::Versions,
+                ManifestPhase::Unavailable,
+            ] {
+                let mut after = None;
+                loop {
+                    // Same 12,000-byte payload allowance as exchange::PAGE_BUDGET.
+                    let (page, issues) = catalog
+                        .page_with_budget(phase, after.as_ref(), 12_000)
+                        .unwrap();
+                    assert!(issues.is_empty());
+                    reader.read(&page).unwrap();
+                    pages += 1;
+                    bytes += serde_json::to_vec(&page).unwrap().len();
+                    after = page.next;
+                    if after.is_none() {
+                        break;
+                    }
+                }
+            }
+            assert!(reader.is_complete());
+            rows.push(serde_json::json!({
+                "existingVersions": count,
+                "oneDirectionPages": pages,
+                "oneDirectionManifestBytes": bytes,
+            }));
+        }
+        println!(
+            "BBS_RELAY_HISTORY_COUNTS {}",
+            serde_json::to_string(&rows).unwrap()
+        );
+    }
+    #[test]
+    fn delta_retains_explicit_deletions_dependencies_and_changed_resource_availability() {
+        let mut state = SyncState::new();
+        shared(&mut state, "group", true);
+        state.thread_records.insert("thread-one".into(), record());
+        let unchanged = post("unchanged", b"old");
+        let mut changed = post("changed", b"body");
+        changed.attachments.push(super::super::AttachmentRef { id: "file".into(),
+            sha256: raw_sha256(b"file"), size_bytes: 4, ext: "txt".into(), available: false });
+        remember(&mut state, unchanged.clone()); remember(&mut state, changed.clone());
+        let notice = UnavailablePost { thread_id: "thread-one".into(), post_id: "oversized".into(),
+            reason: super::super::UnavailableReason::TooLargeToSync, kind: None };
+        state.local_unavailable.insert(notice.key().unwrap(), notice.clone());
+        let before = Catalog::from_state(&state, "group").unwrap();
+        changed.attachments[0].available = true; remember(&mut state, changed.clone());
+        let new = post("added", b"new"); remember(&mut state, new.clone());
+        let mut notice = notice; notice.kind = Some("reply".into());
+        state.local_unavailable.insert(notice.key().unwrap(), notice.clone());
+        let deletion = Tombstone { thread_id: "thread-one".into(), post_id: Some("removed".into()),
+            version_id: None, deleted_at: "2026-09-16T00:00:00Z".into() };
+        state.tombstones.insert(deletion.key().unwrap(), deletion.clone());
+        let delta = Catalog::from_state(&state, "group").unwrap().since(&before);
+        assert_eq!(delta.versions.len(),2);
+        assert_eq!(delta.versions[&VersionCursor::of(&changed)],changed);
+        assert_eq!(delta.versions[&VersionCursor::of(&new)],new);
+        assert_eq!(delta.threads.len(),1); // relation available before version/notice pages
+        assert_eq!(delta.unavailable_posts.values().next(),Some(&notice));
+        assert_eq!(delta.deletions.values().next(),Some(&deletion));
+        let absent = Catalog::default().since(&before);
+        assert!(absent.deletions.is_empty()); // physical unlink is never synthesized into a tombstone
+        assert!(absent.versions.is_empty());
+        assert!(before.since(&before).versions.is_empty());
+    }
+
+    #[test]
+    fn fifty_dispersed_deltas_do_not_repeat_existing_history_pages() {
+        fn measure(catalog: &Catalog) -> (usize, usize, usize) {
+            let mut result=(0,0,0); let mut reader=ManifestReader::default();
+            for phase in [ManifestPhase::Tombstones, ManifestPhase::Threads,
+                ManifestPhase::Versions, ManifestPhase::Unavailable]
+            {
+                let mut after=None;
+                loop {
+                    let (page,issues)=catalog.page_with_budget(phase,after.as_ref(),12_000).unwrap();
+                    assert!(issues.is_empty());reader.read(&page).unwrap();
+                    result.0+=1;result.1+=serde_json::to_vec(&page).unwrap().len();
+                    if phase==ManifestPhase::Versions { result.2+=page.items.len(); }
+                    after=page.next;if after.is_none(){break;}
+                }
+            }
+            assert!(reader.is_complete());result
+        }
+        let mut rows=Vec::new();
+        for history in [1000,10_000] {
+            let mut state=SyncState::new();shared(&mut state,"group",true);
+            state.thread_records.insert("thread-one".into(),record());
+            for i in 0..history {let id=format!("post-{i:08}");remember(&mut state,post(&id,id.as_bytes()));}
+            let mut confirmed=Catalog::from_state(&state,"group").unwrap();
+            let full=measure(&confirmed);let mut delta_pages=0;let mut delta_bytes=0;
+            for i in 0..50 {
+                let id=format!("new-{i:08}");remember(&mut state,post(&id,id.as_bytes()));
+                let current=Catalog::from_state(&state,"group").unwrap();
+                let delta=current.since(&confirmed);let counts=measure(&delta);
+                assert_eq!(counts.0,4);assert_eq!(counts.2,1);
+                assert_eq!(delta.threads.len(),1);
+                delta_pages+=counts.0;delta_bytes+=counts.1;confirmed=current;
+            }
+            rows.push(serde_json::json!({"history":history,"fullPages":full.0,"fullBytes":full.1,
+                "dispersedChanges":50,"deltaPages":delta_pages,"deltaBytes":delta_bytes,
+                "dailyFullPagesPlusFiftyDeltas":full.0+delta_pages}));
+        }
+        println!("BBS_DELTA_HISTORY_COUNTS {}",serde_json::to_string(&rows).unwrap());
+    }
+    #[test]
     fn historical_scope_is_not_backfilled_and_newly_announced_local_delete_only_sends_marker() {
         let mut state = SyncState::new();
         shared(&mut state, "a", true);
@@ -1127,5 +1311,25 @@ mod tests {
             .collect();
         large.sha256 = raw_sha256(&thread_bytes(&large.record).unwrap());
         assert!(validate_thread(&large).is_err());
+    }
+
+    #[test]
+    fn catalog_revision_is_stable_and_changes_only_for_content_facts() {
+        let mut state = SyncState::new();
+        shared(&mut state, "g", true);
+        let first = Catalog::from_state(&state, "g").unwrap().revision();
+        assert!(valid_hash(&first).is_ok());
+        let same = Catalog::from_state(&state, "g").unwrap().revision();
+        assert_eq!(first, same);
+        let roster_changed = Catalog::from_state(&state, "g")
+            .unwrap()
+            .revision_with_roster(Some(&"b".repeat(64)));
+        assert_ne!(first, roster_changed);
+        assert!(valid_hash(&roster_changed).is_ok());
+
+        remember(&mut state, post("a", b"body"));
+        let changed = Catalog::from_state(&state, "g").unwrap().revision();
+        assert_ne!(first, changed);
+        assert!(valid_hash(&changed).is_ok());
     }
 }

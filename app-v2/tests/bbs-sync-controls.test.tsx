@@ -15,7 +15,7 @@ const owner = (): BbsSyncView => ({
     { id: 'peer', name: 'Travel Mac', role: 'member', online: true },
   ] },
   invitation: { state: 'preparing' }, invitationGeneration: '7', phase: 'idle', progress: null,
-  lastSuccessfulAt: null, error: null, controlRecoverable: false,
+  lastSuccessfulAt: null, error: null, controlRecoverable: false, serviceRecoverable: false,
 });
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -60,25 +60,132 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-12T08:
 afterEach(() => vi.useRealTimers());
 
 describe('BBS real control composition', () => {
+  it('uses the backend recovery window across rereads and reopen, without a frontend recovery clock or network action', async () => {
+    const recovery = { ...owner(), phase: 'failed' as const, indicator: 'connecting' as const,
+      error: 'Old error kept for compatibility', lastSuccessfulAt: '2026-09-11T04:00:00Z' };
+    const task = harness(recovery);
+    const first = await mount(task);
+    const time = screen.getByText(/^Last sync at/).textContent;
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'connecting');
+    expect(screen.queryByText(recovery.error)).not.toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(61_000));
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'connecting');
+    expect(task.source.read).toHaveBeenCalledTimes(13); // Existing visible 5 s memory-read fallback, not network recovery.
+    first.unmount();
+    await mount(task);
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'connecting');
+    await task.update({ ...recovery, indicator: 'reaching_peers' });
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'reaching_peers');
+    expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
+    expect(screen.getByText(/^Last sync at/)).toHaveTextContent(time!);
+    for (const action of Object.values(task.actions)) expect(action).not.toHaveBeenCalled();
+  });
+
+  it('retains exact lease evidence over ambiguous busy actions and never guesses it from a string', async () => {
+    const task = harness({ ...owner(), phase: 'failed', indicator: 'other_instance', controlRecoverable: true });
+    task.actions.start.mockRejectedValue(new BbsSyncClientError('sync_busy'));
+    await mount(task);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Manual sync' })));
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'other_instance');
+    expect(screen.getByRole('status')).toHaveAttribute('data-tone', 'red');
+    await task.update({ ...owner(), phase: 'failed', indicator: 'reconnecting', error: 'Another Kota app is using sync.' });
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Manual sync' })));
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'reconnecting');
+    expect(screen.getByRole('status')).toHaveAttribute('data-tone', 'yellow');
+    expect(screen.getByRole('status')).toHaveTextContent('Sync is busy; try again shortly.');
+    expect(screen.getByRole('status')).not.toHaveTextContent('Another Kota');
+  });
+
+  it('allows a newer indicator alone to supersede a local rejection without fabricating Last sync', async () => {
+    const task = harness({ ...owner(), phase: 'failed', indicator: 'connecting' });
+    task.actions.start.mockRejectedValueOnce(new BbsSyncClientError('sync_busy'));
+    await mount(task);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Manual sync' })));
+    expect(screen.getByText(BBS_SYNC_ERROR_DETAILS.sync_busy)).toBeInTheDocument();
+    await task.update({ ...owner(), phase: 'failed', indicator: 'reaching_service' });
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'reaching_service');
+    expect(screen.queryByText(BBS_SYNC_ERROR_DETAILS.sync_busy)).not.toBeInTheDocument();
+    expect(screen.getByText('Not synced yet')).toBeInTheDocument();
+  });
+
+  it('does not downgrade an authoritative blocker when a local status read fails', async () => {
+    const task = harness({ ...owner(), phase: 'failed', indicator: 'update_worker' });
+    await mount(task);
+    task.source.read.mockRejectedValueOnce(new Error('PRIVATE'));
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'update_worker');
+    expect(screen.getByRole('status')).toHaveAttribute('data-tone', 'red');
+    expect(screen.getByRole('button', { name: 'Retry status' })).toBeEnabled();
+    expect(document.body.textContent).not.toContain('PRIVATE');
+    await task.update({ ...owner(), indicator: 'healthy' });
+    expect(screen.getByRole('status')).toHaveAttribute('data-tone', 'green');
+  });
+
+  it('keeps a typed access denial visible after the backend retires group membership', async () => {
+    const task = harness({ ...owner(), group: null, phase: 'idle', error: null,
+      invitation: { state: 'none' }, invitationGeneration: null, indicator: 'group_access_denied' });
+    await mount(task);
+    expect(screen.getByRole('status')).toHaveAttribute('data-indicator', 'group_access_denied');
+    expect(screen.getByRole('status')).toHaveAttribute('data-tone', 'red');
+    expect(screen.queryByRole('button', { name: 'Manual sync' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Connect devices to BBS' })).toBeEnabled();
+    expect(task.actions.start).not.toHaveBeenCalled();
+  });
+
   it('allows manual recovery with zero peers, shows one error, and only clears it after authoritative recovery', async () => {
     const busy = { ...owner(), group: { ...owner().group!, members: [] }, phase: 'failed' as const,
       controlRecoverable: true, error: BBS_SYNC_ERROR_DETAILS.sync_busy };
     const task = harness(busy);
     task.actions.start.mockRejectedValueOnce(new BbsSyncClientError('sync_busy'));
     await mount(task);
-    expect(screen.getByRole('button', { name: 'Retry sync' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
     expect(screen.queryByText('No other device online now.')).not.toBeInTheDocument();
     expect(screen.queryByText('Sync failed')).not.toBeInTheDocument();
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry sync' })));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Manual sync' })));
     expect(task.actions.start).toHaveBeenCalledExactlyOnceWith({ expectedGroupId: 'one' });
-    expect(screen.getAllByText('Sync error:')).toHaveLength(1);
+    expect(document.querySelectorAll('.bbs-sync-indicator')).toHaveLength(1);
     expect(screen.getAllByText(BBS_SYNC_ERROR_DETAILS.sync_busy)).toHaveLength(1);
     await act(async () => vi.advanceTimersByTimeAsync(60_000));
     expect(task.actions.start).toHaveBeenCalledOnce();
-    expect(screen.getByRole('button', { name: 'Retry sync' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
     await task.update(owner());
     expect(screen.queryByText('Sync error:')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
+  });
+
+  it('keeps quota recovery explicit and single-flight with one error and no fabricated success', async () => {
+    const quota = { ...owner(), group: { ...owner().group!, members: [] }, phase: 'failed' as const,
+      error: BBS_SYNC_ERROR_DETAILS.cloudflare_quota_exceeded, serviceRecoverable: true,
+      lastSuccessfulAt: '2026-09-11T04:00:00Z' };
+    const task = harness(quota);
+    const first = deferred<void>(); task.actions.start.mockReturnValueOnce(first.promise);
+    await mount(task, <textarea aria-label="Draft" defaultValue="Do not lose my draft" />);
+    const editor = screen.getByRole('textbox', { name: 'Draft' });
+    const lastSync = screen.getByText(/^Last sync at/).textContent;
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(task.actions.start).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Manual sync' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Starting…' }));
+    await task.update({ ...quota, serviceRecoverable: false });
+    expect(screen.getByRole('button', { name: 'Starting…' })).toBeDisabled();
+    expect(task.actions.start).toHaveBeenCalledExactlyOnceWith({ expectedGroupId: 'one' });
+    expect(document.querySelectorAll('.bbs-sync-indicator')).toHaveLength(1);
+    expect(screen.getAllByText(quota.error)).toHaveLength(1);
+    await task.update(quota);
+    await act(async () => first.reject(new BbsSyncClientError('cloudflare_quota_exceeded')));
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
+    expect(document.querySelectorAll('.bbs-sync-indicator')).toHaveLength(1);
+    await act(async () => vi.advanceTimersByTimeAsync(86_400_000));
+    expect(task.actions.start).toHaveBeenCalledOnce(); // No frontend UTC-reset poll.
+    expect(screen.getByText(/^Last sync at/)).toHaveTextContent(lastSync!);
+    expect(screen.getByRole('textbox', { name: 'Draft' })).toBe(editor);
+    expect(editor).toHaveValue('Do not lose my draft');
+    await task.update({ ...owner(), lastSuccessfulAt: quota.lastSuccessfulAt });
+    expect(screen.queryByText('Sync error:')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
+    expect(task.actions.cancel).not.toHaveBeenCalled();
   });
 
   it('gives immediate single-flight feedback through ACK and fresh read without manufacturing sync success', async () => {
@@ -100,15 +207,11 @@ describe('BBS real control composition', () => {
     expect(screen.queryByText(/^Syncing/)).not.toBeInTheDocument();
     await act(async () => read.resolve({ ...owner(), phase: 'syncing', progress: { completed: 0, total: 3 } }));
     expect(screen.getByRole('button', { name: 'Syncing 0/3' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Draft' })).toBe(editor);
     expect(editor).toHaveValue('Keep typing');
-    const cancel = deferred<void>(); task.actions.cancel.mockReturnValueOnce(cancel.promise);
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.getByRole('button', { name: 'Cancelling…' })).toBeDisabled();
-    await act(async () => cancel.resolve());
-    await act(async () => vi.advanceTimersByTimeAsync(500));
-    expect(task.actions.cancel).toHaveBeenCalledExactlyOnceWith({ expectedGroupId: 'one' });
+    await task.update(owner());
+    expect(task.actions.cancel).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
   });
 
@@ -117,14 +220,14 @@ describe('BBS real control composition', () => {
     const task = harness(state);
     task.actions.start.mockRejectedValueOnce(new BbsSyncClientError('sync_busy'));
     await mount(task);
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry sync' })));
-    expect(screen.getAllByText('Sync error:')).toHaveLength(1);
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Manual sync' })));
+    expect(document.querySelectorAll('.bbs-sync-indicator')).toHaveLength(1);
     expect(screen.queryByText(state.error)).not.toBeInTheDocument();
     expect(screen.getByText(BBS_SYNC_ERROR_DETAILS.sync_busy)).toBeInTheDocument();
     await task.update({ ...state });
     expect(screen.getByText(BBS_SYNC_ERROR_DETAILS.sync_busy)).toBeInTheDocument();
     await task.update({ ...state, error: 'A received file failed verification; click Retry to download it again.' });
-    expect(screen.getAllByText('Sync error:')).toHaveLength(1);
+    expect(document.querySelectorAll('.bbs-sync-indicator')).toHaveLength(1);
     expect(screen.queryByText(BBS_SYNC_ERROR_DETAILS.sync_busy)).not.toBeInTheDocument();
     expect(screen.getByText(/A received file failed verification/)).toBeInTheDocument();
   });
@@ -134,17 +237,17 @@ describe('BBS real control composition', () => {
     const task = harness(state);
     await mount(task);
     task.source.read.mockRejectedValueOnce(new Error('PRIVATE status payload'));
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry sync' })));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Manual sync' })));
     expect(screen.getByRole('button', { name: 'Starting…' })).toBeDisabled();
     await act(async () => vi.advanceTimersByTimeAsync(500));
-    expect(screen.getAllByText('Sync error:')).toHaveLength(1);
+    expect(document.querySelectorAll('.bbs-sync-indicator')).toHaveLength(1);
     expect(screen.getByText('Could not refresh device sync status.')).toBeInTheDocument();
     expect(screen.queryByText(BBS_SYNC_ERROR_DETAILS.sync_busy)).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain('PRIVATE');
-    expect(screen.getByRole('button', { name: 'Retry sync' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Retry status' }));
     await act(async () => vi.advanceTimersByTimeAsync(500));
-    expect(screen.getAllByText('Sync error:')).toHaveLength(1);
+    expect(document.querySelectorAll('.bbs-sync-indicator')).toHaveLength(1);
     expect(screen.getByText(BBS_SYNC_ERROR_DETAILS.sync_busy)).toBeInTheDocument();
     expect(task.actions.start).toHaveBeenCalledOnce();
   });
@@ -153,11 +256,11 @@ describe('BBS real control composition', () => {
     const state = { ...owner(), phase: 'failed' as const, error: 'A received file failed verification; click Retry to download it again.' };
     const task = harness(state);
     await mount(task);
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Retry sync' })));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Manual sync' })));
     await act(async () => vi.advanceTimersByTimeAsync(500));
     expect(screen.getByText(state.error)).toBeInTheDocument();
     const late = deferred<void>(); task.actions.start.mockReturnValueOnce(late.promise);
-    fireEvent.click(screen.getByRole('button', { name: 'Retry sync' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manual sync' }));
     await task.update({ ...owner(), phase: 'syncing', progress: { completed: 1, total: 2 } });
     await act(async () => late.reject(new BbsSyncClientError('sync_busy')));
     expect(screen.queryByText('Sync error:')).not.toBeInTheDocument();
@@ -176,7 +279,8 @@ describe('BBS real control composition', () => {
     expect(screen.getByRole('button', { name: 'Manual sync' })).toBeEnabled();
   });
 
-  it.each(['stale_signature', 'worker_update_required', 'sync_busy'] as const)(
+  it.each(['stale_signature', 'worker_update_required', 'sync_busy',
+    'cloudflare_quota_exceeded', 'cloudflare_resource_limit', 'relay_session_lost'] as const)(
     'preserves the safe %s instruction through activity and invitation controls without retrying', async (code) => {
     const task = harness();
     const failure = new BbsSyncClientError(code);

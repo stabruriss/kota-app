@@ -1,0 +1,297 @@
+{
+  "note": "Public test keys; Node/OpenSSL-generated protocol vectors, not real platform error samples or a TLS handshake.",
+  "now": 1789488000000,
+  "members": {
+    "groupId": "group-fixture-0001",
+    "dissolved": false,
+    "members": {
+      "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9": {
+        "deviceId": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "publicKey": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        "membershipId": "membership-alpha-0001"
+      },
+      "39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f": {
+        "deviceId": "39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f",
+        "publicKey": "PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=",
+        "membershipId": "membership-bravo-0002"
+      }
+    }
+  },
+  "requests": [
+    {
+      "name": "poll",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/poll?group=group-fixture-0001",
+      "method": "GET",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "x-kota-relay-membership": "membership-alpha-0001",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "cp/TS8v1Wr0AvEmuGE+XNxMGPT0i4X8HuJsNLOKKYqk/063nNHGofVkALzWz3dRs/1cc7NTuPVHkEMZMb6htCg=="
+      },
+      "bodyHex": "",
+      "message": "[\"kota-bbs-relay.read.v1\",\"https://worker.example\",\"GET\",\"/bbs/relay/poll?group=group-fixture-0001\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-alpha-0001\",\"1789488000000\",\"\",\"\",\"\",\"\",\"0\",false,\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"]",
+      "signature": "cp/TS8v1Wr0AvEmuGE+XNxMGPT0i4X8HuJsNLOKKYqk/063nNHGofVkALzWz3dRs/1cc7NTuPVHkEMZMb6htCg=="
+    },
+    {
+      "name": "receive",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=probe&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+      "method": "GET",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f",
+        "x-kota-relay-membership": "membership-bravo-0002",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "kWN6EnZN6nKT6uK1WMydMnTjtSHGViAp3QcR1IrETnggfInOoka3kT3K32xGOxChcWNPPGqZdkJY0NxNan1yBQ=="
+      },
+      "bodyHex": "",
+      "message": "[\"kota-bbs-relay.read.v1\",\"https://worker.example\",\"GET\",\"/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=probe&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0\",\"group-fixture-0001\",\"39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f\",\"membership-bravo-0002\",\"1789488000000\",\"\",\"\",\"\",\"\",\"0\",false,\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"]",
+      "signature": "kWN6EnZN6nKT6uK1WMydMnTjtSHGViAp3QcR1IrETnggfInOoka3kT3K32xGOxChcWNPPGqZdkJY0NxNan1yBQ=="
+    },
+    {
+      "name": "receive-data",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=data&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+      "method": "GET",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f",
+        "x-kota-relay-membership": "membership-bravo-0002",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "l2LY9lR2P5Z5gi+gBtvkGOT1YHR7H9PDSX9zJp5VtQXTWThGQBpKQc0IcghhVS52HcTO3wB9dzYrX6sPl4sUDQ=="
+      },
+      "bodyHex": "",
+      "message": "[\"kota-bbs-relay.read.v1\",\"https://worker.example\",\"GET\",\"/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=data&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0\",\"group-fixture-0001\",\"39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f\",\"membership-bravo-0002\",\"1789488000000\",\"\",\"\",\"\",\"\",\"0\",false,\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"]",
+      "signature": "l2LY9lR2P5Z5gi+gBtvkGOT1YHR7H9PDSX9zJp5VtQXTWThGQBpKQc0IcghhVS52HcTO3wB9dzYrX6sPl4sUDQ=="
+    },
+    {
+      "name": "receive-receipts",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=receipts&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+      "method": "GET",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "x-kota-relay-membership": "membership-alpha-0001",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "IjwQdq0aH9u9j+DrpeVSiCJAB5jSDKVd5gGlV92rbynvb9mtIqarzYQCN9idXdz+1A55fjs15fQWvBSgBkpHBg=="
+      },
+      "bodyHex": "",
+      "message": "[\"kota-bbs-relay.read.v1\",\"https://worker.example\",\"GET\",\"/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=receipts&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-alpha-0001\",\"1789488000000\",\"\",\"\",\"\",\"\",\"0\",false,\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"]",
+      "signature": "IjwQdq0aH9u9j+DrpeVSiCJAB5jSDKVd5gGlV92rbynvb9mtIqarzYQCN9idXdz+1A55fjs15fQWvBSgBkpHBg=="
+    },
+    {
+      "name": "announce",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/announce?group=group-fixture-0001",
+      "method": "POST",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "x-kota-relay-membership": "membership-alpha-0001",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "lgJgasFzM8O6JMUasNIX1+/3Zq1+0u8yxSx6utBA4JdvykTF09byO0BosGx3aiCovAYDtXRVo84k0KcbGxGaAw==",
+        "x-kota-relay-nonce": "nonce-fixture-0001"
+      },
+      "bodyHex": "7b22726571756573744964223a22616e6e6f756e63652d726571756573742d30303031222c2270726576696f7573223a6e756c6c2c22637265617465644174223a313738393438383030303030302c22696e7374616e6365223a22696e7374616e63652d636c69656e742d30303031222c227265766973696f6e223a2266666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666222c227065657256657273696f6e223a347d",
+      "message": "[\"kota-bbs-relay.mutation.v1\",\"https://worker.example\",\"POST\",\"/bbs/relay/announce?group=group-fixture-0001\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-alpha-0001\",\"1789488000000\",\"nonce-fixture-0001\",\"\",\"\",\"\",\"0\",false,\"b5121840f34d2f6f494fc3e90870f82d8c149ae7a40ec74df1800ff7b3096f47\"]",
+      "signature": "lgJgasFzM8O6JMUasNIX1+/3Zq1+0u8yxSx6utBA4JdvykTF09byO0BosGx3aiCovAYDtXRVo84k0KcbGxGaAw=="
+    },
+    {
+      "name": "wake",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/wake?group=group-fixture-0001",
+      "method": "POST",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "x-kota-relay-membership": "membership-alpha-0001",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "OJidsZ/adtjQbi6zGeYz5Amacncf7nK5LR+EZ0UDKi3XVZjIsuC4ngBnvFqM5PkUZhtIHkH6fLGYiV/6+Vp5Ag==",
+        "x-kota-relay-nonce": "nonce-fixture-0001"
+      },
+      "bodyHex": "7b22726571756573744964223a2277616b652d726571756573742d30303030303031222c2270726576696f7573223a6e756c6c2c22637265617465644174223a313738393438383030303030302c22696e7374616e6365223a22696e7374616e63652d636c69656e742d30303031222c2270656572223a2233396637313364306136343432353366303435323934323162396635316239623038393739643038323935393539633466333939306565363137663531333966222c2270656572496e7374616e6365223a22696e7374616e63652d7365727665722d30303031227d",
+      "message": "[\"kota-bbs-relay.mutation.v1\",\"https://worker.example\",\"POST\",\"/bbs/relay/wake?group=group-fixture-0001\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-alpha-0001\",\"1789488000000\",\"nonce-fixture-0001\",\"\",\"\",\"\",\"0\",false,\"0bfd43a037f9f5f1a8714c8673fb24942adc6d381c8c18d04274a8e439052374\"]",
+      "signature": "OJidsZ/adtjQbi6zGeYz5Amacncf7nK5LR+EZ0UDKi3XVZjIsuC4ngBnvFqM5PkUZhtIHkH6fLGYiV/6+Vp5Ag=="
+    },
+    {
+      "name": "ready",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/ready?group=group-fixture-0001",
+      "method": "POST",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "x-kota-relay-membership": "membership-alpha-0001",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "qyoa2qiCyuLPvJCNtf6AA0LWkkj46iC/O29pl6Lj6Ht2scDITO+RYAYAAuejUg90S1rLbBXBCjxtV0DmHsiZDA==",
+        "x-kota-relay-boot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "bodyHex": "7b2277616b65223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22636c69656e74496e7374616e6365223a22696e7374616e63652d636c69656e742d30303031222c22736572766572496e7374616e6365223a22696e7374616e63652d7365727665722d30303031227d",
+      "message": "[\"kota-bbs-relay.boot.v1\",\"https://worker.example\",\"POST\",\"/bbs/relay/ready?group=group-fixture-0001\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-alpha-0001\",\"1789488000000\",\"\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"\",\"\",\"0\",false,\"a6d835f2e88b7db77605a389890578aff6a5a98908f4e6f1cde40dc338aa3c60\"]",
+      "signature": "qyoa2qiCyuLPvJCNtf6AA0LWkkj46iC/O29pl6Lj6Ht2scDITO+RYAYAAuejUg90S1rLbBXBCjxtV0DmHsiZDA=="
+    },
+    {
+      "name": "open",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/open?group=group-fixture-0001",
+      "method": "POST",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "x-kota-relay-membership": "membership-alpha-0001",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "+mv0gB50DJ7IgB9VrLdpFd5Gg9VAz2IW+OnkeT+wzYrmuM9zyCLQIwXhtDOs5/ATz0jChbrYe3w8gtEyM5NzDA==",
+        "x-kota-relay-boot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "bodyHex": "7b22636c69656e74223a7b2273746174656d656e74223a7b2272656c617956657273696f6e223a312c227065657256657273696f6e223a342c226f726967696e223a2268747470733a2f2f776f726b65722e6578616d706c65222c2267726f7570223a2267726f75702d666978747572652d30303031222c2266726f6d223a2232316665333164666131353461323631363236626638353430343666643232373162376265643462366162653435616135383837376566343766393732316239222c22746f223a2233396637313364306136343432353366303435323934323162396635316239623038393739643038323935393539633466333939306565363137663531333966222c2266726f6d4d656d62657273686970223a226d656d626572736869702d616c7068612d30303031222c22746f4d656d62657273686970223a226d656d626572736869702d627261766f2d30303032222c2266726f6d496e7374616e6365223a22696e7374616e63652d636c69656e742d30303031222c22746f496e7374616e6365223a22696e7374616e63652d7365727665722d30303031222c22726f6c65223a22636c69656e74222c2277616b65223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22626f6f74223a2262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c226e6f6e6365223a2273657373696f6e2d6e6f6e63652d666978747572652d30303031222c226973737565644174223a313738393438383030303030302c22657870697265734174223a313738393438383132303030302c226365727469666963617465536861323536223a2263636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c227265706c79546f223a6e756c6c7d2c227369676e6174757265223a22396241666d47445452616432614c43753433356a5a37716b746675564670674e4957755053626331784b4f78626c49425a4e5a71794c58336f4963754b44746b6b6f6268654c4572326b693344382f4c6e31547342673d3d227d2c22736572766572223a7b2273746174656d656e74223a7b2272656c617956657273696f6e223a312c227065657256657273696f6e223a342c226f726967696e223a2268747470733a2f2f776f726b65722e6578616d706c65222c2267726f7570223a2267726f75702d666978747572652d30303031222c2266726f6d223a2233396637313364306136343432353366303435323934323162396635316239623038393739643038323935393539633466333939306565363137663531333966222c22746f223a2232316665333164666131353461323631363236626638353430343666643232373162376265643462366162653435616135383837376566343766393732316239222c2266726f6d4d656d62657273686970223a226d656d626572736869702d627261766f2d30303032222c22746f4d656d62657273686970223a226d656d626572736869702d616c7068612d30303031222c2266726f6d496e7374616e6365223a22696e7374616e63652d7365727665722d30303031222c22746f496e7374616e6365223a22696e7374616e63652d636c69656e742d30303031222c22726f6c65223a22736572766572222c2277616b65223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22626f6f74223a2262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c226e6f6e6365223a2273657373696f6e2d6e6f6e63652d666978747572652d30303031222c226973737565644174223a313738393438383030303030302c22657870697265734174223a313738393438383132303030302c226365727469666963617465536861323536223a2264646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464222c227265706c79546f223a2262633161613533623764303931653661313434343033386366613761663438343431666163646465643237646336663661666664386530303938616166366534227d2c227369676e6174757265223a225053563659483463534e4d424c6151506672564e77496136626d5353627a4758584d333852646f30572f69776731326a33644a6b786f446e72593848586d584e764a3679437150554565532b436a70654231596941673d3d227d7d",
+      "message": "[\"kota-bbs-relay.boot.v1\",\"https://worker.example\",\"POST\",\"/bbs/relay/open?group=group-fixture-0001\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-alpha-0001\",\"1789488000000\",\"\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"\",\"\",\"0\",false,\"3a87caed612751356dea73e280b0c19461b6c780cd1917e3b010298b48672cbb\"]",
+      "signature": "+mv0gB50DJ7IgB9VrLdpFd5Gg9VAz2IW+OnkeT+wzYrmuM9zyCLQIwXhtDOs5/ATz0jChbrYe3w8gtEyM5NzDA=="
+    },
+    {
+      "name": "open-offer",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/open?group=group-fixture-0001",
+      "method": "POST",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "x-kota-relay-membership": "membership-alpha-0001",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "bilWx0K1Pm5NVB7Nlg1Y9on+nzMg6sUiwY1NQ5QLk2CAFi8R8G7aE3kp6gsag7hGzqU5Q6fmn2KE7SULqgOUBg==",
+        "x-kota-relay-boot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "bodyHex": "7b22636c69656e74223a7b2273746174656d656e74223a7b2272656c617956657273696f6e223a312c227065657256657273696f6e223a342c226f726967696e223a2268747470733a2f2f776f726b65722e6578616d706c65222c2267726f7570223a2267726f75702d666978747572652d30303031222c2266726f6d223a2232316665333164666131353461323631363236626638353430343666643232373162376265643462366162653435616135383837376566343766393732316239222c22746f223a2233396637313364306136343432353366303435323934323162396635316239623038393739643038323935393539633466333939306565363137663531333966222c2266726f6d4d656d62657273686970223a226d656d626572736869702d616c7068612d30303031222c22746f4d656d62657273686970223a226d656d626572736869702d627261766f2d30303032222c2266726f6d496e7374616e6365223a22696e7374616e63652d636c69656e742d30303031222c22746f496e7374616e6365223a22696e7374616e63652d7365727665722d30303031222c22726f6c65223a22636c69656e74222c2277616b65223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161222c22626f6f74223a2262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262626262222c226e6f6e6365223a2273657373696f6e2d6e6f6e63652d666978747572652d30303031222c226973737565644174223a313738393438383030303030302c22657870697265734174223a313738393438383132303030302c226365727469666963617465536861323536223a2263636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c227265706c79546f223a6e756c6c7d2c227369676e6174757265223a22396241666d47445452616432614c43753433356a5a37716b746675564670674e4957755053626331784b4f78626c49425a4e5a71794c58336f4963754b44746b6b6f6268654c4572326b693344382f4c6e31547342673d3d227d2c22736572766572223a6e756c6c7d",
+      "message": "[\"kota-bbs-relay.boot.v1\",\"https://worker.example\",\"POST\",\"/bbs/relay/open?group=group-fixture-0001\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-alpha-0001\",\"1789488000000\",\"\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"\",\"\",\"0\",false,\"fec7727d5abe022b4f8867ee9dcf8eb7dc3609957699d7938261ed1fb443a745\"]",
+      "signature": "bilWx0K1Pm5NVB7Nlg1Y9on+nzMg6sUiwY1NQ5QLk2CAFi8R8G7aE3kp6gsag7hGzqU5Q6fmn2KE7SULqgOUBg=="
+    },
+    {
+      "name": "send",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/send?group=group-fixture-0001",
+      "method": "POST",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+        "x-kota-relay-membership": "membership-alpha-0001",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "5bNoIPj5HEAm+2XQ0KQz4yW0RfdY4pLXyYWiP646RnCT5LvQaWtBPnMOxWWqfgr7IiOvjjmERCIPEKxaeesVCw==",
+        "x-kota-relay-boot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "x-kota-relay-session": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "x-kota-relay-direction": "c2s",
+        "x-kota-relay-sequence": "0",
+        "x-kota-relay-final": "0"
+      },
+      "bodyHex": "0011aaff7f8001020304",
+      "message": "[\"kota-bbs-relay.frame.v1\",\"https://worker.example\",\"POST\",\"/bbs/relay/send?group=group-fixture-0001\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-alpha-0001\",\"1789488000000\",\"\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"c2s\",\"0\",false,\"dbd03070155d11c9d4c64c27a25a40a8eacece30ff0af69935ecf642f3a8ae1a\"]",
+      "signature": "5bNoIPj5HEAm+2XQ0KQz4yW0RfdY4pLXyYWiP646RnCT5LvQaWtBPnMOxWWqfgr7IiOvjjmERCIPEKxaeesVCw=="
+    },
+    {
+      "name": "ack",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/ack?group=group-fixture-0001",
+      "method": "POST",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f",
+        "x-kota-relay-membership": "membership-bravo-0002",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "NotKznfE7DhP90P+J7Wx3ySxTqWXM8aXlTTPhjKXJ6qgjwmxGK/wVTcnf4IPkQX/wCE2YU98pNuFUs/UcNq/Dw==",
+        "x-kota-relay-boot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "x-kota-relay-session": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "x-kota-relay-direction": "c2s",
+        "x-kota-relay-sequence": "0",
+        "x-kota-relay-final": "0"
+      },
+      "bodyHex": "7b227468726f756768223a2231222c2266696e616c223a66616c73657d",
+      "message": "[\"kota-bbs-relay.frame.v1\",\"https://worker.example\",\"POST\",\"/bbs/relay/ack?group=group-fixture-0001\",\"group-fixture-0001\",\"39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f\",\"membership-bravo-0002\",\"1789488000000\",\"\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"c2s\",\"0\",false,\"6bb7cc3459af04971e0c2b2f3722f40b94bf2fc7037c61152f9f01b812d4aacb\"]",
+      "signature": "NotKznfE7DhP90P+J7Wx3ySxTqWXM8aXlTTPhjKXJ6qgjwmxGK/wVTcnf4IPkQX/wCE2YU98pNuFUs/UcNq/Dw=="
+    },
+    {
+      "name": "ack-final",
+      "origin": "https://worker.example",
+      "path": "/bbs/relay/ack?group=group-fixture-0001",
+      "method": "POST",
+      "headers": {
+        "x-kota-relay-version": "1",
+        "x-kota-relay-device": "39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f",
+        "x-kota-relay-membership": "membership-bravo-0002",
+        "x-kota-relay-time": "1789488000000",
+        "x-kota-relay-signature": "+JOLwgq2Dkae94vzAYtAtwbHgbSNkSTiLzruynCB2nTahDWZo0Bkj9BMhN108SOLEB3tSwK7nn4UQA5lAtzkDg==",
+        "x-kota-relay-boot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "x-kota-relay-session": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "x-kota-relay-direction": "c2s",
+        "x-kota-relay-sequence": "1",
+        "x-kota-relay-final": "1"
+      },
+      "bodyHex": "7b227468726f756768223a2231222c2266696e616c223a747275657d",
+      "message": "[\"kota-bbs-relay.frame.v1\",\"https://worker.example\",\"POST\",\"/bbs/relay/ack?group=group-fixture-0001\",\"group-fixture-0001\",\"39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f\",\"membership-bravo-0002\",\"1789488000000\",\"\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"c2s\",\"1\",true,\"ce2dfcf0e5ead92aded3f37da21b5f50d6d64533a37bdea75d0c5791388013bd\"]",
+      "signature": "+JOLwgq2Dkae94vzAYtAtwbHgbSNkSTiLzruynCB2nTahDWZo0Bkj9BMhN108SOLEB3tSwK7nn4UQA5lAtzkDg=="
+    }
+  ],
+  "receiveQueryRejections": [
+    "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=Receipts&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+    "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=RECEIPTS&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+    "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=receipt&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+    "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=%72eceipts&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+    "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=receipts&mode=receipts&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+    "/bbs/relay/receive?group=group-fixture-0001&mode=receipts&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0",
+    "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=receipts&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.00",
+    "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=receipts&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0,eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.1",
+    "/bbs/relay/receive?group=group-fixture-0001&boot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&mode=receipts&cursors=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.0&extra=1"
+  ],
+  "tls": {
+    "declarations": {
+      "client": {
+        "statement": {
+          "relayVersion": 1,
+          "peerVersion": 4,
+          "origin": "https://worker.example",
+          "group": "group-fixture-0001",
+          "from": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+          "to": "39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f",
+          "fromMembership": "membership-alpha-0001",
+          "toMembership": "membership-bravo-0002",
+          "fromInstance": "instance-client-0001",
+          "toInstance": "instance-server-0001",
+          "role": "client",
+          "wake": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "nonce": "session-nonce-fixture-0001",
+          "issuedAt": 1789488000000,
+          "expiresAt": 1789488120000,
+          "certificateSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "replyTo": null
+        },
+        "signature": "9bAfmGDTRad2aLCu435jZ7qktfuVFpgNIWuPSbc1xKOxblIBZNZqyLX3oIcuKDtkkobheLEr2ki3D8/Ln1TsBg=="
+      },
+      "server": {
+        "statement": {
+          "relayVersion": 1,
+          "peerVersion": 4,
+          "origin": "https://worker.example",
+          "group": "group-fixture-0001",
+          "from": "39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f",
+          "to": "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9",
+          "fromMembership": "membership-bravo-0002",
+          "toMembership": "membership-alpha-0001",
+          "fromInstance": "instance-server-0001",
+          "toInstance": "instance-client-0001",
+          "role": "server",
+          "wake": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "boot": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "nonce": "session-nonce-fixture-0001",
+          "issuedAt": 1789488000000,
+          "expiresAt": 1789488120000,
+          "certificateSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "replyTo": "bc1aa53b7d091e6a1444038cfa7af48441facdded27dc6f6affd8e0098aaf6e4"
+        },
+        "signature": "PSV6YH4cSNMBLaQPfrVNwIa6bmSSbzGXXM38Rdo0W/iwg12j3dJkxoDnrY8HXmXNvJ6yCqPUEeS+CjpeB1YiAg=="
+      }
+    },
+    "clientMessage": "[\"kota-bbs-relay.tls.v1\",1,4,\"https://worker.example\",\"group-fixture-0001\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f\",\"membership-alpha-0001\",\"membership-bravo-0002\",\"instance-client-0001\",\"instance-server-0001\",\"client\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"session-nonce-fixture-0001\",\"1789488000000\",\"1789488120000\",\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",null]",
+    "serverMessage": "[\"kota-bbs-relay.tls.v1\",1,4,\"https://worker.example\",\"group-fixture-0001\",\"39f713d0a644253f04529421b9f51b9b08979d08295959c4f3990ee617f5139f\",\"21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9\",\"membership-bravo-0002\",\"membership-alpha-0001\",\"instance-server-0001\",\"instance-client-0001\",\"server\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"session-nonce-fixture-0001\",\"1789488000000\",\"1789488120000\",\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"bc1aa53b7d091e6a1444038cfa7af48441facdded27dc6f6affd8e0098aaf6e4\"]"
+  }
+}

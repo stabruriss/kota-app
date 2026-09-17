@@ -37,6 +37,7 @@ pub(crate) struct Work {
     epoch: AtomicU64,
     changes: AtomicU64,
     cutoff: AtomicU64,
+    wake: tokio::sync::Notify,
 }
 impl Work {
     pub(crate) fn epoch(&self) -> u64 {
@@ -44,6 +45,7 @@ impl Work {
     }
     pub(crate) fn changed(&self) {
         self.changes.fetch_add(1, Ordering::AcqRel);
+        self.wake.notify_one();
     }
     pub(crate) fn serial(&self) -> u64 {
         self.changes.load(Ordering::Acquire)
@@ -51,7 +53,10 @@ impl Work {
     pub(crate) fn cancel(&self) {
         self.cutoff.store(self.serial(), Ordering::Release);
         self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.wake.notify_one();
     }
+    pub(crate) async fn notified(&self) { self.wake.notified().await }
+    pub(crate) fn cutoff(&self) -> u64 { self.cutoff.load(Ordering::Acquire) }
 }
 #[derive(Clone)]
 pub(crate) struct Authority {
@@ -105,7 +110,7 @@ impl Authority {
         }
         Ok(())
     }
-    fn peer(&self, id: &str) -> Result<PeerIdentity> {
+    pub(crate) fn peer(&self, id: &str) -> Result<PeerIdentity> {
         if now() >= self.valid_until {
             return Err(Error::Unauthorized);
         }
@@ -1008,7 +1013,7 @@ impl Actor {
             let id = id.to_owned();
             let tx = self.tx.clone();
             tokio::spawn(async move {
-                if let Ok(d) = connection.diagnostics().await {
+                if let Ok(Some(d)) = connection.diagnostics().await {
                     #[cfg(not(test))]
                     crate::kota_debug_log(&format!(
                         "[bbs-sync] candidate peer={id} local={} remote={} basis={} sent_bytes={}",

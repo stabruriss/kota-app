@@ -3,21 +3,75 @@
 use super::roster;
 use super::{
     control::{self, ControlClient, HttpsTransport, InvitationResult, OwnerConnection},
-    coordinator::{self, Actor, Authority, ControlKind, ControlWork, Notice, Port},
+    coordinator::{self, Authority, ControlKind, ControlWork, Notice},
     exchange,
     public::{self, Status},
     transport::{self, NetworkHost},
 };
 use crate::bbs::sync::{ContentStore, GroupFence};
 use std::{
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
         Arc, Mutex, RwLock, Weak,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{oneshot, Notify, OwnedSemaphorePermit, Semaphore};
+
+// This is a display window only. It neither extends network deadlines nor
+// changes retries. Each unresolved source keeps its first monotonic instant.
+const RECOVERY_DISPLAY_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RecoverySource {
+    Control,
+    Service,
+    Peer(String),
+}
+struct Recovery {
+    since: Instant,
+    indicator: public::Indicator,
+    detail: String,
+}
+impl Recovery {
+    fn immediate(&self) -> bool {
+        use public::Indicator::*;
+        matches!(self.indicator, CloudflareLimit | UpdateWorker | UpdateKota
+            | GroupAccessDenied | DeviceIdentityError | OtherInstance | FileAccessError)
+    }
+    fn indicator_at(&self, now: Instant) -> public::Indicator {
+        if self.immediate() || now.saturating_duration_since(self.since) >= RECOVERY_DISPLAY_WINDOW {
+            self.indicator
+        } else {
+            public::Indicator::Connecting
+        }
+    }
+}
+fn failure_indicator(source: &RecoverySource, code: &str) -> public::Indicator {
+    use public::Indicator::*;
+    match code {
+        "control_in_use" if *source == RecoverySource::Control => OtherInstance,
+        "incomplete_sync_identity" | "missing_device_identity"
+            if *source == RecoverySource::Control => DeviceIdentityError,
+        "worker_update_required" => UpdateWorker,
+        "protocol_mismatch" => UpdateKota,
+        "cloudflare_resource_limit" => CloudflareLimit,
+        "relay_session_lost" => FetchingSession,
+        "sync_item_failed" => FinishingSync,
+        "sync_integrity_error" => RetryingFiles,
+        "sync_protocol_error" => CheckingProtocol,
+        "worker_unreachable" => ReachingService,
+        "sync_timeout" | "sync_connection_closed" => match source {
+            RecoverySource::Peer(_) => ReachingPeers,
+            _ => ReachingService,
+        },
+        // Neither Unauthorized nor Io identifies the original cause. In
+        // particular they do not prove revoked membership or disk permissions.
+        _ => Reconnecting,
+    }
+}
 
 #[derive(Default)]
 struct View {
@@ -30,8 +84,52 @@ struct View {
     // Accepted Manual/Retry work is visible until a real coordinator event or
     // a refreshed no-peer/control-error result settles it. This is not success.
     manual_pending: bool,
+    recovery: BTreeMap<RecoverySource, Recovery>,
 }
 impl View {
+    fn recovery_source(&self, id: &str) -> Option<RecoverySource> {
+        if id.is_empty() {
+            Some(RecoverySource::Service)
+        } else if self.status.group.members.iter().any(|m| m.id == id) {
+            Some(RecoverySource::Peer(id.into()))
+        } else {
+            None // Late events for removed peers cannot leave permanent debt.
+        }
+    }
+    fn failure(&mut self, source: RecoverySource, code: &str, now: Instant) {
+        if matches!(code, "not_joined" | "sync_cancelled") {
+            return;
+        }
+        let indicator = failure_indicator(&source, code);
+        let detail = public::display_error(if matches!(code, "removed" | "unauthorized") {
+            "sync_unavailable" // No proof of a formerly valid membership here.
+        } else { code });
+        self.record_recovery(source, indicator, detail, now);
+    }
+    fn record_recovery(&mut self, source: RecoverySource, indicator: public::Indicator, detail: String, now: Instant) {
+        let next = Recovery { since: now, indicator, detail };
+        match self.recovery.entry(source) {
+            std::collections::btree_map::Entry::Vacant(entry) => { entry.insert(next); }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                // A transient follow-up cannot erase an established blocker.
+                // Successful work at the relevant source must clear it first.
+                if !entry.get().immediate() || next.immediate() {
+                    let since = entry.get().since;
+                    entry.insert(Recovery { since, ..next });
+                }
+            }
+        }
+    }
+    fn displayed_recovery(&self) -> Option<&Recovery> {
+        self.recovery.iter()
+            .min_by_key(|(source, failure)| (!failure.immediate(), **source != RecoverySource::Control, failure.since))
+            .map(|(_, failure)| failure)
+    }
+    fn indicator_deadline(&self, now: Instant) -> Option<Instant> {
+        let failure = self.displayed_recovery()?;
+        let deadline = failure.since + RECOVERY_DISPLAY_WINDOW;
+        (!failure.immediate() && now < deadline).then_some(deadline)
+    }
     fn connection_state(&mut self, id: &str, state: &str) {
         if !self.status.group.members.iter().any(|m| m.id == id) {
             return;
@@ -64,6 +162,10 @@ struct Network {
     host: NetworkHost,
     tx: tokio::sync::mpsc::Sender<coordinator::Command>,
 }
+struct IndicatorTimer {
+    deadline: Instant,
+    task: tauri::async_runtime::JoinHandle<()>,
+}
 struct Inner {
     store: ContentStore,
     roster: Arc<roster::runtime::Runtime>,
@@ -73,6 +175,7 @@ struct Inner {
     worker: Mutex<Option<Worker>>,
     network: Mutex<Option<Network>>,
     retired: Mutex<Vec<NetworkHost>>,
+    relay: Mutex<Option<super::relay::HttpPool>>,
     generation: AtomicU64,
     network_epoch: AtomicU64,
     booted: AtomicBool,
@@ -84,6 +187,7 @@ struct Inner {
     work: Arc<coordinator::Work>,
     emit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     last_progress_event: AtomicU64,
+    indicator_timer: Mutex<Option<IndicatorTimer>>,
 }
 #[derive(Clone)]
 pub(crate) struct Manager(Arc<Inner>);
@@ -133,6 +237,7 @@ impl Manager {
             worker: Mutex::new(None),
             network: Mutex::new(None),
             retired: Mutex::new(Vec::new()),
+            relay: Mutex::new(None),
             generation: AtomicU64::new(0),
             network_epoch: AtomicU64::new(0),
             booted: AtomicBool::new(false),
@@ -144,20 +249,35 @@ impl Manager {
             work: Arc::new(coordinator::Work::default()),
             emit: Mutex::new(None),
             last_progress_event: AtomicU64::new(0),
+            indicator_timer: Mutex::new(None),
         }))
     }
     pub(crate) fn status(&self) -> Status {
+        self.status_at(Instant::now())
+    }
+    fn status_at(&self, now: Instant) -> Status {
         let view = self.0.view.lock().unwrap_or_else(|p| p.into_inner());
         let mut status = view.status.clone();
         if view.manual_pending {
             status.sync.phase = public::Phase::Connecting;
-            status.sync.error = None;
             status.sync.completed = None;
             status.sync.total = None;
         } else if let Some((_, detail)) = &view.control_error {
-            status.sync.phase = public::Phase::Failed;
+            if status.sync.phase != public::Phase::Syncing {
+                status.sync.phase = public::Phase::Failed;
+            }
             status.sync.error = Some(detail.clone());
         }
+        status.sync.indicator = if let Some(failure) = view.displayed_recovery() {
+            // Started/Progress/Manual retain their actual phase and counters;
+            // none proves the previously failed work has completed.
+            status.sync.error = Some(failure.detail.clone());
+            failure.indicator_at(now)
+        } else if status.sync.phase == public::Phase::Connecting {
+            public::Indicator::Connecting
+        } else {
+            public::Indicator::Healthy
+        };
         status.sync.control_recoverable = status.group.id.is_some()
             && self
                 .0
@@ -228,6 +348,7 @@ impl Manager {
         }
     }
     fn emit(&self, progress: bool) {
+        self.schedule_indicator_hint();
         if progress {
             let now = coordinator::now();
             let old = self.0.last_progress_event.load(Ordering::Relaxed);
@@ -240,17 +361,68 @@ impl Manager {
             emit();
         }
     }
+    fn schedule_indicator_hint(&self) {
+        // At most one weak, memory-only timer for the currently displayed
+        // recovery. It emits a read hint at the threshold, never network work.
+        // Keeping it out of status() makes card reads completely passive.
+        let mut timer = self.0.indicator_timer.lock().unwrap();
+        let deadline = if self.0.shutdown.load(Ordering::Acquire)
+            || self.0.emit.lock().unwrap().is_none()
+        {
+            None
+        } else {
+            self.0.view.lock().unwrap().indicator_deadline(Instant::now())
+        };
+        if timer.as_ref().map(|timer| timer.deadline) == deadline {
+            return;
+        }
+        if let Some(previous) = timer.take() {
+            previous.task.abort();
+        }
+        if let Some(deadline) = deadline {
+            let weak = Arc::downgrade(&self.0);
+            let task = tauri::async_runtime::spawn(async move {
+                tokio::time::sleep_until(deadline.into()).await;
+                let Some(inner) = weak.upgrade() else { return; };
+                let due = {
+                    let mut timer = inner.indicator_timer.lock().unwrap();
+                    if timer.as_ref().is_some_and(|timer| timer.deadline == deadline) {
+                        timer.take();
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if due && !inner.shutdown.load(Ordering::Acquire) {
+                    Manager(inner).emit(false);
+                }
+            });
+            *timer = Some(IndicatorTimer { deadline, task });
+        }
+    }
     fn error(&self, code: &str) {
         self.control_error(code, None);
     }
     fn control_error(&self, code: &str, work: Option<u64>) {
+        self.control_failure(code, work, false);
+    }
+    fn control_failure(&self, code: &str, work: Option<u64>, membership_rejected: bool) {
         {
             let mut v = self.0.view.lock().unwrap();
             if work.is_some_and(|epoch| self.0.work.epoch() != epoch) {
                 return;
             }
+            if code == "not_joined" {
+                return; // Ordinary absence of a group is not a sync failure.
+            }
             v.manual_pending = false;
             v.control_error = Some((public::Error::from_code(code), public::display_error(code)));
+            if membership_rejected {
+                v.record_recovery(RecoverySource::Control, public::Indicator::GroupAccessDenied,
+                    public::display_error(code), Instant::now());
+            } else {
+                v.failure(RecoverySource::Control, code, Instant::now());
+            }
         }
         self.emit(false);
     }
@@ -261,6 +433,9 @@ impl Manager {
                 return;
             }
             let cleared = view.control_error.take().is_some();
+            // A successful control heartbeat proves only control recovery.
+            // It is not evidence for any pending content/service failure.
+            view.recovery.remove(&RecoverySource::Control);
             let no_peer = !view.status.group.members.iter()
                 .any(|m| m.id != view.status.device.id && m.online);
             let settled = no_peer && std::mem::take(&mut view.manual_pending);
@@ -280,6 +455,7 @@ impl Manager {
             v.status.sync.phase = public::Phase::Failed;
             v.status.sync.error = Some(public::display_error(code));
             v.diagnostics.last_error = Some(public::Error::from_code(code).code.into());
+            v.failure(RecoverySource::Service, code, Instant::now());
         }
         self.emit(false);
     }
@@ -547,8 +723,10 @@ impl Manager {
         Ok(())
     }
     fn stop_network(&self) {
+        let mut slot = self.0.network.lock().unwrap();
         self.0.network_epoch.fetch_add(1, Ordering::AcqRel);
-        if let Some(net) = self.0.network.lock().unwrap().take() {
+        if let Some(pool) = self.0.relay.lock().unwrap().as_ref() { pool.unbind(); }
+        if let Some(net) = slot.take() {
             net.host.stop();
             self.0.retired.lock().unwrap().push(net.host);
         }
@@ -564,7 +742,11 @@ impl Manager {
     }
     pub(crate) fn shutdown(&self) {
         self.0.shutdown.store(true, Ordering::Release);
+        if let Some(timer) = self.0.indicator_timer.lock().unwrap().take() {
+            timer.task.abort();
+        }
         self.stop_network();
+        if let Some(pool) = self.0.relay.lock().unwrap().take() { pool.stop(); }
         self.0.roster.stop();
     }
     pub(crate) fn notification_files(
@@ -797,7 +979,10 @@ impl Manager {
                         if client.has_pending() && pending_at <= coordinator::now() {
                             pending_at = coordinator::now().saturating_add(retry);
                         }
-                        self.control_error(&e, Some(epoch));
+                        // This request began with a valid persisted membership;
+                        // refresh_members clears it only on these exact rejections.
+                        self.control_failure(&e, Some(epoch), client.membership().is_none()
+                            && matches!(e.as_str(), "removed" | "unauthorized"));
                     }
                 }
             }
@@ -899,11 +1084,13 @@ impl Manager {
             let next = client
                 .membership()
                 .map(|m| (m.group_id.clone(), m.membership_id.clone()));
-            if view.fence != next {
+            let scope_changed = view.fence != next;
+            if scope_changed {
                 view.status.sync = public::Progress::default();
                 view.diagnostics = public::Diagnostics::default();
                 view.control_error = None;
                 view.manual_pending = false;
+                view.recovery.clear();
             }
             view.fence = next;
             view.status.device.id = client.device_id().unwrap_or_default();
@@ -925,6 +1112,20 @@ impl Manager {
             view.diagnostics
                 .connections
                 .retain(|c| ids.contains(&c.device_id));
+            let before = view.recovery.len();
+            if members.is_some() {
+                view.recovery.retain(|source, _| match source {
+                    RecoverySource::Peer(id) => ids.contains(id),
+                    _ => true,
+                });
+            }
+            let pruned = view.recovery.len() != before;
+            if pruned && view.recovery.is_empty() && view.control_error.is_none() {
+                view.status.sync.error = None;
+                if matches!(view.status.sync.phase, public::Phase::Failed | public::Phase::Partial) {
+                    view.status.sync.phase = public::Phase::Idle;
+                }
+            }
             view.status.invitation_generation = generation.clone();
             view.status.invitation = if generation.is_some() {
                 public::Invitation::Ready
@@ -937,7 +1138,7 @@ impl Manager {
             } else {
                 public::Invitation::None
             };
-            view.status != previous
+            scope_changed || pruned || view.status != previous
         };
         if changed {
             self.emit(false);
@@ -946,7 +1147,7 @@ impl Manager {
     fn network<T: control::Transport>(
         &self,
         client: &ControlClient<T>,
-        tx: SyncSender<ControlWork>,
+        _tx: SyncSender<ControlWork>,
         signals: Vec<control::Signal>,
         work_epoch: u64,
     ) {
@@ -980,6 +1181,7 @@ impl Manager {
             n.fence.group_id != fence.group_id || n.fence.membership_id != fence.membership_id
         }) {
             if let Some(net) = slot.take() {
+                if let Some(pool) = self.0.relay.lock().unwrap().as_ref() { pool.unbind(); }
                 net.host.stop();
                 self.0.retired.lock().unwrap().push(net.host);
                 self.0.network_epoch.fetch_add(1, Ordering::AcqRel);
@@ -1032,9 +1234,16 @@ impl Manager {
         if epoch != self.0.network_epoch.load(Ordering::Acquire) {
             return;
         }
-        let host = match self.0.roster.files().and_then(|(io, limits)| {
-            tauri::async_runtime::block_on(NetworkHost::start_with_files(io, limits))
-        }) {
+        let start = self.0.roster.files().and_then(|(io, limits)| {
+            let mut slot = self.0.relay.lock().map_err(|_| transport::Error::Runtime)?;
+            if slot.is_none() {
+                *slot = Some(tauri::async_runtime::block_on(super::relay::HttpPool::start(limits.clone()))?);
+            }
+            let pool = slot.as_ref().unwrap().clone();
+            let host = tauri::async_runtime::block_on(NetworkHost::start_with_files(io, limits))?;
+            Ok((host, pool))
+        });
+        let (host, relay) = match start {
             Ok(h) => h,
             Err(e) => {
                 self.work_error(work_epoch, &e.to_string());
@@ -1046,11 +1255,6 @@ impl Manager {
         let this = self.clone();
         let expected = fence.clone();
         let observe = Arc::new(move |work, notice| this.notice(&expected, epoch, work, notice));
-        let port = Port {
-            tx,
-            fence: fence.clone(),
-            epoch: work_epoch,
-        };
         let runner = host.clone();
         let this = self.clone();
         let expected = fence.clone();
@@ -1062,13 +1266,45 @@ impl Manager {
         let work = self.0.work.clone();
         let actor_work = work.clone();
         let roster = self.0.roster.clone();
+        let _ = command_tx.try_send(coordinator::Command::Members(
+            authority, signals, work_epoch,
+        ));
+        let watch = self.change_watcher(work);
+        let mut slot = self.0.network.lock().unwrap();
+        if epoch != self.0.network_epoch.load(Ordering::Acquire)
+            || work_epoch != self.0.work.epoch()
+            || slot.is_some()
+        {
+            host.stop();
+            self.0.retired.lock().unwrap().push(host);
+            return;
+        }
+        // Bind while the installed network slot is locked. A delayed task from
+        // an older group cannot rebind the account after a newer owner starts.
+        let relay = match relay.bind(&first.membership.worker_url) {
+            Ok(client) => client,
+            Err(e) => {
+                host.stop();
+                self.0.retired.lock().unwrap().push(host);
+                drop(slot);
+                self.work_error(work_epoch, &e.to_string());
+                return;
+            }
+        };
+        *slot = Some(Network {
+            fence,
+            host,
+            tx: command_tx,
+            _watch: watch,
+            authority: live_authority,
+            connections,
+        });
+        drop(slot);
         tauri::async_runtime::spawn(async move {
             let result = runner
                 .execute(move |context| async move {
-                    Actor::new(context, store, first, port, observe)?
-                        .roster(roster)
-                        .live_authority(actor_authority, actor_connections)
-                        .work_control(actor_work)
+                    super::relay::Actor::new(context, store, first, relay, observe, actor_work, work_epoch,
+                        roster, actor_authority, actor_connections)?
                         .run(command_rx)
                         .await
                 })
@@ -1083,27 +1319,6 @@ impl Manager {
                     );
                 }
             }
-        });
-        let _ = command_tx.try_send(coordinator::Command::Members(
-            authority, signals, work_epoch,
-        ));
-        let watch = self.change_watcher(work);
-        let mut slot = self.0.network.lock().unwrap();
-        if epoch != self.0.network_epoch.load(Ordering::Acquire)
-            || work_epoch != self.0.work.epoch()
-            || slot.is_some()
-        {
-            host.stop();
-            self.0.retired.lock().unwrap().push(host);
-            return;
-        }
-        *slot = Some(Network {
-            fence,
-            host,
-            tx: command_tx,
-            _watch: watch,
-            authority: live_authority,
-            connections,
         });
     }
     fn change_watcher(
@@ -1147,6 +1362,10 @@ impl Manager {
         }
     }
     fn notice(&self, fence: &GroupFence, epoch: u64, work: u64, notice: Notice) {
+        self.notice_at(fence, epoch, work, notice, Instant::now(), chrono::Utc::now());
+    }
+    fn notice_at(&self, fence: &GroupFence, epoch: u64, work: u64, notice: Notice,
+        now: Instant, completed_at: chrono::DateTime<chrono::Utc>) {
         let mut progress = false;
         {
             let mut v = self.0.view.lock().unwrap();
@@ -1177,11 +1396,13 @@ impl Manager {
                 }
                 Notice::Error(_, transport::Error::Busy) => return,
                 Notice::Error(id, e) => {
+                    let Some(source) = v.recovery_source(&id) else { return; };
                     v.manual_pending = false;
                     v.connection_state(&id, "failed");
                     v.status.sync.phase = public::Phase::Failed;
                     v.status.sync.error = Some(public::display_error(&e.to_string()));
                     v.diagnostics.last_error = Some(e.to_string());
+                    v.failure(source, &e.to_string(), now);
                 }
                 Notice::Exchange(event) => match event {
                     exchange::Event::Changed(_) => return,
@@ -1199,7 +1420,8 @@ impl Manager {
                         v.status.sync.total = Some(total);
                         progress = true;
                     }
-                    exchange::Event::Finished(_, result) => {
+                    exchange::Event::Finished(id, result) => {
+                        let Some(source) = v.recovery_source(&id) else { return; };
                         v.manual_pending = false;
                         let okay = result.failures.is_empty()
                             && result.omitted == 0
@@ -1220,20 +1442,35 @@ impl Manager {
                         } else {
                             Some(public::display_error("sync_item_failed"))
                         };
+                        if okay {
+                            v.recovery.remove(&source);
+                            // A completed authenticated content round proves
+                            // service availability, never another peer's work.
+                            v.recovery.remove(&RecoverySource::Service);
+                        } else {
+                            let code = if result.failures.iter().any(|f| f.code == "sync_integrity_error") {
+                                "sync_integrity_error"
+                            } else {
+                                "sync_item_failed"
+                            };
+                            v.failure(source, code, now);
+                        }
                         v.diagnostics.failures = result.failures;
                         v.diagnostics.omitted_failures = result.omitted;
                         if okay {
                             v.status.sync.last_successful_at =
-                                Some(chrono::Utc::now().to_rfc3339());
+                                Some(completed_at.to_rfc3339());
                         }
                     }
                     exchange::Event::Failed(_, transport::Error::Cancelled) => {}
                     exchange::Event::Failed(id, e) => {
+                        let Some(source) = v.recovery_source(&id) else { return; };
                         v.manual_pending = false;
                         v.connection_state(&id, "failed");
                         v.status.sync.phase = public::Phase::Failed;
                         v.status.sync.error = Some(public::display_error(&e.to_string()));
                         v.diagnostics.last_error = Some(e.to_string());
+                        v.failure(source, &e.to_string(), now);
                     }
                 },
             }

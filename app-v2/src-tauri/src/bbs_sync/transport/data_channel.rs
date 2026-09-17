@@ -1,7 +1,7 @@
 //! One registered file at a time. There is one poller, and receipt of a frame
 //! never acknowledges it. Only the file worker's completed write grants credit.
 use super::{
-    control_channel::send_frame,
+    channel::Channel,
     protocol::{self, Data, Frame, SendWindow, TransferId},
     Cancellation, Error, FileIo, FileWriter, Limits, MembershipCheck, Resource, Result,
     VerifiedFile, DATA_WINDOW, PROGRESS_TIMEOUT,
@@ -15,10 +15,10 @@ use std::{
     },
 };
 use tokio::sync::{mpsc, Mutex, OwnedMutexGuard};
-use webrtc::data_channel::{DataChannel, DataChannelEvent};
+use webrtc::data_channel::DataChannel;
 
 pub(crate) struct DataPipe {
-    channel: Arc<dyn DataChannel>,
+    channel: Channel,
     incoming: Mutex<mpsc::Receiver<Frame>>,
     operation: Arc<Mutex<()>>,
     active: Arc<AtomicBool>,
@@ -27,9 +27,9 @@ pub(crate) struct DataPipe {
     cancel: Cancellation,
     authorized: MembershipCheck,
     #[cfg(test)]
-    pub(super) pause_after_ready: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub(crate) pause_after_ready: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     #[cfg(test)]
-    pub(super) pause_after_write: Mutex<
+    pub(crate) pause_after_write: Mutex<
         Option<(
             tokio::sync::oneshot::Sender<u64>,
             tokio::sync::oneshot::Receiver<()>,
@@ -52,11 +52,26 @@ impl Drop for Active {
 }
 impl DataPipe {
     #[cfg(test)]
-    pub(super) async fn debug_queued(&self) -> usize {
+    pub(crate) async fn debug_queued(&self) -> usize {
         self.incoming.lock().await.len()
     }
     pub(crate) fn start(
         channel: Arc<dyn DataChannel>,
+        limits: Limits,
+        io: FileIo,
+        cancel: Cancellation,
+        authorized: MembershipCheck,
+    ) -> Arc<Self> {
+        Self::start_on(
+            Channel::Rtc(channel, limits.clone()),
+            limits,
+            io,
+            cancel,
+            authorized,
+        )
+    }
+    pub(crate) fn start_on(
+        channel: Channel,
         limits: Limits,
         io: FileIo,
         cancel: Cancellation,
@@ -112,24 +127,12 @@ impl DataPipe {
     async fn poll(&self, tx: mpsc::Sender<Frame>) -> Result<()> {
         loop {
             self.check()?;
-            let event = tokio::select! {_ = self.cancel.cancelled() => return Err(Error::Cancelled), event = self.channel.poll() => event};
+            let frame = tokio::select! {_ = self.cancel.cancelled() => return Err(Error::Cancelled), frame = self.channel.receive() => frame?};
             self.check()?;
-            match event {
-                Some(DataChannelEvent::OnMessage(m)) => {
-                    if m.is_string || !self.active.load(Ordering::Acquire) {
-                        return Err(Error::Protocol);
-                    }
-                    let frame = Frame::received(m.data, &self.limits)?;
-                    tx.try_send(frame).map_err(|_| Error::Protocol)?;
-                }
-                None
-                | Some(
-                    DataChannelEvent::OnClose
-                    | DataChannelEvent::OnClosing
-                    | DataChannelEvent::OnError,
-                ) => return Err(Error::Closed),
-                _ => {}
+            if !self.active.load(Ordering::Acquire) {
+                return Err(Error::Protocol);
             }
+            tx.try_send(frame).map_err(|_| Error::Protocol)?;
         }
     }
     async fn next(&self) -> Result<Frame> {
@@ -144,7 +147,16 @@ impl DataPipe {
     }
     async fn send(&self, message: Data<'_>) -> Result<()> {
         self.check()?;
-        send_frame(&self.channel, message.encode(&self.limits)?, &self.cancel).await
+        let capacity = self.channel.encoding_capacity(message.compact_capacity());
+        self.channel
+            .send_encoded(&self.limits, &self.cancel, capacity, || {
+                if capacity == super::MAX_FRAME {
+                    message.encode(&self.limits)
+                } else {
+                    message.encode_sized(&self.limits, capacity)
+                }
+            })
+            .await
     }
     async fn ack(&self, id: TransferId, window: &mut SendWindow, frame: Frame) -> Result<()> {
         match protocol::decode_data(&frame.bytes)? {

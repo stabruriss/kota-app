@@ -1,4 +1,6 @@
 /** Presentation data, not the transport wire protocol. No IO or persistent state. */
+import type { BbsSyncIndicator } from './types/bbs-sync';
+
 export interface BbsSyncMemberView {
   id: string;
   name: string;
@@ -32,6 +34,10 @@ export interface BbsSyncView {
   error: string | null;
   /** Only the backend may authorize recovery without an online peer. */
   controlRecoverable: boolean;
+  /** Backend grants one explicit service-recovery attempt without online peers. */
+  serviceRecoverable: boolean;
+  /** Typed presentation, never inferred from a backend English error. */
+  indicator?: BbsSyncIndicator;
 }
 
 export function bbsSyncOnlinePeers(view: BbsSyncView): number {

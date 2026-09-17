@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "kota-v2"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2446,10 +2446,12 @@ dependencies = [
  "objc2-foundation",
  "portable-pty",
  "pretty_assertions",
+ "rcgen",
  "ring",
  "rtc",
  "rtc-ice",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",

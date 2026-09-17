@@ -1,5 +1,13 @@
 /** Frontend/backend IPC contract agreed with the backend owner, 2026-09-12.
  * Not the P2P manifest. No private key, invitation token or image bytes here. */
+export const BBS_SYNC_INDICATORS = [
+  'healthy', 'connecting', 'reaching_service', 'reaching_peers', 'fetching_session',
+  'finishing_sync', 'retrying_files', 'checking_protocol', 'reconnecting', 'cloudflare_limit',
+  'update_worker', 'update_kota', 'group_access_denied', 'device_identity_error',
+  'other_instance', 'file_access_error',
+] as const;
+export type BbsSyncIndicator = typeof BBS_SYNC_INDICATORS[number];
+
 export interface BbsSyncStatus {
   protocolVersion: 1;
   device: { id: string; name: string };
@@ -22,6 +30,10 @@ export interface BbsSyncStatus {
     error: string | null;
     /** Explicit Retry can restore a joined device whose control worker is absent. */
     controlRecoverable: boolean;
+    /** Explicit Retry may probe a daily-quota circuit breaker once; never a poll. */
+    serviceRecoverable: boolean;
+    /** Backend-owned recovery presentation; absent only in older protocol-1 snapshots. */
+    indicator?: BbsSyncIndicator;
   };
 }
 

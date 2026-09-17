@@ -166,6 +166,8 @@ async fn connect_wiring(
     mb.membership_id = fb.membership_id.clone();
     let ab = PeerIdentity::current(&ma, &members, &ka, &kb.device_id().unwrap()).unwrap();
     let ba = PeerIdentity::current(&mb, &members, &kb, &ka.device_id().unwrap()).unwrap();
+    let ab_catalog = ab.clone();
+    let ba_catalog = ba.clone();
     // Content-only scenarios still speak the real v3 Roster RPC, with a
     // complete empty local roster and the actual authenticated device IDs.
     sa.state.save_identity(&ka).unwrap();
@@ -203,6 +205,7 @@ async fn connect_wiring(
                 }),
             );
             Arc::get_mut(&mut e).unwrap().roster = Some(ra);
+            e.catalog_members([ab_catalog]);
             e.refresh(&Cancellation::default()).await?;
             Ok(e)
         })
@@ -221,6 +224,7 @@ async fn connect_wiring(
                 }),
             );
             Arc::get_mut(&mut e).unwrap().roster = Some(rb);
+            e.catalog_members([ba_catalog]);
             e.refresh(&Cancellation::default()).await?;
             Ok(e)
         })
@@ -496,6 +500,22 @@ async fn roster_file_work_during_admitted_round_does_not_desynchronize_the_peers
     }
 }
 
+async fn assert_link_retired(link: &Link) {
+    // A remote close may fall back to the existing idle-progress deadline.
+    // Poll state, not a fixed sleep; the extra time is scheduling tolerance.
+    let retired = || {
+        link.is_stopped() && !link.active() && link.pending.lock().unwrap().is_none()
+    };
+    let settled = tokio::time::timeout(transport::PROGRESS_TIMEOUT + Duration::from_secs(5), async {
+        while !retired() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await;
+    assert!(settled.is_ok(), "link did not retire: stopped={} active={} pending={} round_permits={}",
+        link.is_stopped(), link.active(), link.pending.lock().unwrap().is_some(),
+        link.engine.rounds.available_permits());
+}
+
 #[tokio::test]
 async fn resource_refusal_after_open_retires_the_link_instead_of_reusing_a_half_round() {
     let (_ra, sa, fa) = board("member-a");
@@ -505,16 +525,47 @@ async fn resource_refusal_after_open_retires_the_link_instead_of_reusing_a_half_
     let a = pair.a.clone();
     let result = pair.ha.execute(move |_| async move { a.round().await }).await;
     assert_eq!(result.err(), Some(Error::Busy));
+    // The initiating side must retire before returning, not after a timeout.
     assert!(pair.a.is_stopped());
-    tokio::time::timeout(Duration::from_secs(8), async {
-        // cancel() publishes the stop signal before clearing its session. Wait
-        // for both facts rather than sampling between those two operations.
-        while !pair.b.is_stopped() || pair.b.active() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await.unwrap();
+    assert!(!pair.a.active());
+    assert!(pair.ea.rounds.clone().try_acquire_owned().is_ok());
+    assert_link_retired(&pair.b).await;
     assert!(!pair.b.active());
     assert!(pair.eb.rounds.clone().try_acquire_owned().is_ok());
+}
+
+#[tokio::test]
+async fn transport_stop_retires_active_round_without_coordinator() {
+    let (_ra, sa, fa) = board("member-a");
+    let (_rb, sb, fb) = board("member-b");
+    let pair = connect(sa, fa, sb, fb).await;
+    let a = pair.a.clone();
+    pair.ha.execute(move |_| async move {
+        let response = a.rpc(Request::Open {
+            protocol_version: EXCHANGE_PROTOCOL_VERSION,
+            round: uuid::Uuid::new_v4().to_string(),
+            revision: "0".repeat(64),
+            checkpoint: None,
+        }).await?;
+        assert!(matches!(response.answer, Answer::Open { .. }));
+        Ok(())
+    }).await.unwrap();
+    let b = pair.b.clone();
+    pair.hb.execute(move |_| async move {
+        // Drain response credits, then stop only the transport. Neither this
+        // test nor the bare-Link harness invokes coordinator/Link cleanup.
+        b.send(Packet::Working { counter: 1 }).await?;
+        assert!(b.active());
+        assert_eq!(b.engine.rounds.available_permits(), 0);
+        b.connection.cancel();
+        Ok(())
+    }).await.unwrap();
+    assert_link_retired(&pair.b).await;
+    assert!(pair.eb.rounds.clone().try_acquire_owned().is_ok());
+    // A later coordinator removal may retire the same link again safely.
+    pair.b.cancel();
+    assert!(!pair.b.active());
+    assert_eq!(pair.eb.rounds.available_permits(), 1);
 }
 
 #[tokio::test]
@@ -533,6 +584,8 @@ async fn occupied_account_round_is_busy_without_changing_membership_or_losing_co
     );
     assert!(!pair.a.is_stopped());
     assert!(!pair.b.is_stopped());
+    assert_eq!(pair.ea.checkpoint(&pair.a.remote).unwrap(), None);
+    assert_eq!(pair.eb.checkpoint(&pair.b.remote).unwrap(), None);
     drop(permit);
     let a = pair.a.clone();
     assert!(pair
@@ -644,6 +697,8 @@ async fn silent_open_round_times_out_and_releases_account_permit() {
                 .rpc(Request::Open {
                     protocol_version: EXCHANGE_PROTOCOL_VERSION,
                     round: uuid::Uuid::new_v4().to_string(),
+                    revision: "0".repeat(64),
+                    checkpoint: None,
                 })
                 .await?;
             assert!(matches!(response.answer, Answer::Open { .. }));
@@ -713,6 +768,8 @@ async fn real_exchange_keeps_unavailable_out_of_failures_and_recovers_when_sourc
             .items
             .is_empty());
     }
+    assert!(pair.ea.checkpoint(&pair.a.remote).unwrap().is_some());
+    assert!(pair.eb.checkpoint(&pair.b.remote).unwrap().is_some());
     let small = publish(&sa, "now a normal root");
     let ea = pair.ea.clone();
     pair.ha
@@ -767,6 +824,8 @@ async fn previous_exchange_version_fails_before_a_round_or_any_content_install()
             a.rpc(Request::Open {
                 protocol_version: 2,
                 round: uuid::Uuid::new_v4().to_string(),
+                revision: "0".repeat(64),
+                checkpoint: None,
             })
             .await
             .map(|_| ())
@@ -776,4 +835,186 @@ async fn previous_exchange_version_fails_before_a_round_or_any_content_install()
     assert!(pair.b.is_stopped());
     assert!(pair.eb.rounds.clone().try_acquire_owned().is_ok());
     assert!(!sb.root().join("threads/thread-one").exists());
+}
+
+async fn responder_finished(pair: &Connected) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pair.b.active() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("responder did not finish the accepted round");
+}
+
+#[tokio::test]
+async fn incomplete_initiator_pull_keeps_only_the_completed_direction_checkpoint() {
+    let (_ra, sa, fa) = board("member-a");
+    let (_rb, sb, fb) = board("member-b");
+    publish(&sb, "the initiator yields between the post and its attachment");
+    let pair = connect(sa, fa, sb, fb).await;
+    let revision_a = pair.ea.snapshot.lock().unwrap().as_ref().unwrap().revision.clone();
+    pair.ea.yield_requested.store(true, Ordering::Relaxed);
+    let a = pair.a.clone();
+    let outcome = pair.ha.execute(move |_| async move { a.round().await }).await.unwrap();
+    assert!(outcome.more);
+    assert!(outcome.completed < outcome.total);
+    responder_finished(&pair).await;
+    assert_eq!(pair.ea.checkpoint(&pair.a.remote).unwrap(), None);
+    // B did absorb A's fixed snapshot. This directional hint cannot prevent
+    // A (the only initiator) from finishing its own outstanding pull next time.
+    assert_eq!(pair.eb.checkpoint(&pair.b.remote).unwrap(), Some(revision_a));
+}
+
+#[tokio::test]
+async fn incomplete_responder_pull_does_not_confirm_either_checkpoint() {
+    let (_ra, sa, fa) = board("member-a");
+    let (_rb, sb, fb) = board("member-b");
+    publish(&sa, "the responder yields between the post and its attachment");
+    let pair = connect(sa, fa, sb, fb).await;
+    pair.eb.yield_requested.store(true, Ordering::Relaxed);
+    let a = pair.a.clone();
+    let outcome = pair.ha.execute(move |_| async move { a.round().await }).await.unwrap();
+    assert!(outcome.more);
+    assert!(outcome.completed < outcome.total);
+    responder_finished(&pair).await;
+    assert_eq!(pair.ea.checkpoint(&pair.a.remote).unwrap(), None);
+    assert_eq!(pair.eb.checkpoint(&pair.b.remote).unwrap(), None);
+}
+
+#[tokio::test]
+async fn checkpoints_name_the_pinned_catalog_and_roster_and_next_open_carries_them() {
+    let (_ra, sa, fa) = board("member-a");
+    let (_rb, sb, fb) = board("member-b");
+    publish(&sa, "A original version");
+    publish(&sb, "B independent version");
+    let projects = |name: &str| vec![roster::Project {
+        project_id: "project".into(), name: name.into(), agents: vec![],
+    }];
+    let pair = connect_rosters(sa, fa, sb.clone(), fb, projects("Pinned"), vec![]).await;
+    let snapshot_a = pair.ea.snapshot.lock().unwrap().clone().unwrap();
+    let snapshot_b = pair.eb.snapshot.lock().unwrap().clone().unwrap();
+    assert_ne!(snapshot_a.revision, snapshot_b.revision);
+    let roster = pair.ea.roster.as_ref().unwrap();
+    // Publication between refresh and Open must not silently change this round.
+    roster.test_publish_source(projects("Published before Open"));
+    let (started, written) = oneshot::channel();
+    let (release, gate) = oneshot::channel();
+    let connection = pair.b.connection.clone();
+    pair.hb.execute(move |_| async move {
+        connection.pause_after_first_file_write(started, gate).await;
+        Ok(())
+    }).await.unwrap();
+    let a = pair.a.clone();
+    let host = pair.ha.clone();
+    let round = tokio::spawn(async move {
+        host.execute(move |_| async move { a.round().await }).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), written).await.unwrap().unwrap();
+    // B is pulling A after Turn, so A already installed B's different post.
+    // Its advertised catalog must nevertheless still be the original snapshot.
+    roster.test_publish_source(projects("Published after Open"));
+    {
+        let session = pair.a.session.lock().unwrap();
+        assert_eq!(session.stage, 2);
+        let catalog = session.catalog.as_ref().unwrap();
+        let local = session.roster.as_ref().unwrap();
+        assert!(Arc::ptr_eq(catalog, &snapshot_a.catalog));
+        assert!(Arc::ptr_eq(local, snapshot_a.roster.as_ref().unwrap()));
+        assert_eq!(catalog.revision_with_roster(Some(&local.version)), snapshot_a.revision);
+    }
+    assert_eq!(pair.b.trace.lock().unwrap().last_open,
+        Some((snapshot_a.revision.clone(), None)));
+    assert_eq!(pair.a.trace.lock().unwrap().last_open,
+        Some((snapshot_b.revision.clone(), None)));
+    let cached = roster::read_peer(&sb.state, &roster::context(&sb.state).unwrap(), &pair.b.remote)
+        .unwrap().unwrap();
+    assert_eq!(cached.projects[0].name, "Pinned");
+    release.send(()).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), round).await.unwrap().unwrap().unwrap();
+    assert!(outcome.failures.is_empty());
+    assert_eq!(outcome.completed, outcome.total);
+    assert!(!outcome.more);
+    responder_finished(&pair).await;
+    assert_eq!(pair.ea.checkpoint(&pair.a.remote).unwrap(), Some(snapshot_b.revision.clone()));
+    assert_eq!(pair.eb.checkpoint(&pair.b.remote).unwrap(), Some(snapshot_a.revision.clone()));
+    let first_counts = [pair.a.trace.lock().unwrap().manifest_items,
+        pair.b.trace.lock().unwrap().manifest_items];
+
+    // Only an explicit round-external refresh publishes the newly installed
+    // versions and the latest roster. No partial admission is taken after Open.
+    for engine in [&pair.ea, &pair.eb] {
+        engine.refresh(&Cancellation::default()).await.unwrap();
+    }
+    let next_a = pair.ea.snapshot.lock().unwrap().as_ref().unwrap().revision.clone();
+    let next_b = pair.eb.snapshot.lock().unwrap().as_ref().unwrap().revision.clone();
+    assert_ne!(next_a, snapshot_a.revision);
+    assert_ne!(next_b, snapshot_b.revision);
+    let a = pair.a.clone();
+    let outcome = pair.ha.execute(move |_| async move { a.round().await }).await.unwrap();
+    responder_finished(&pair).await;
+    assert!(outcome.failures.is_empty());
+    assert_eq!((outcome.completed, outcome.total, outcome.more), (0, 0, false));
+    assert_eq!(pair.b.trace.lock().unwrap().last_open,
+        Some((next_a.clone(), Some(snapshot_b.revision))));
+    assert_eq!(pair.a.trace.lock().unwrap().last_open,
+        Some((next_b.clone(), Some(snapshot_a.revision))));
+    assert_eq!(pair.ea.checkpoint(&pair.a.remote).unwrap(), Some(next_b));
+    assert_eq!(pair.eb.checkpoint(&pair.b.remote).unwrap(), Some(next_a));
+    // Only the newly learned opposite Fork is offered back, not both old
+    // versions. It is already present there, hence zero duplicate resources.
+    for (link, first) in [(&pair.a,first_counts[0]),(&pair.b,first_counts[1])] {
+        let counts=link.trace.lock().unwrap().manifest_items;
+        assert_eq!(counts[2]-first[2],1);
+        assert_eq!(counts[1]-first[1],1);
+    }
+    let cached = roster::read_peer(&sb.state, &roster::context(&sb.state).unwrap(), &pair.b.remote)
+        .unwrap().unwrap();
+    assert_eq!(cached.projects[0].name, "Published after Open");
+
+    for engine in [&pair.ea, &pair.eb] {
+        engine.refresh(&Cancellation::default()).await.unwrap();
+    }
+    let old=[pair.a.trace.lock().unwrap().manifest_items,pair.b.trace.lock().unwrap().manifest_items];
+    let a=pair.a.clone();
+    let empty=pair.ha.execute(move |_| async move { a.round().await }).await.unwrap();
+    responder_finished(&pair).await;
+    assert_eq!((empty.completed,empty.total),(0,0));
+    for (link,before) in [(&pair.a,old[0]),(&pair.b,old[1])] {
+        assert_eq!(link.trace.lock().unwrap().manifest_items,before);
+    }
+    // A Manual on the larger device must request full from the initiator too.
+    pair.eb.force_full_catalogs();
+    let a=pair.a.clone();
+    let manual=pair.ha.execute(move |_| async move { a.round().await }).await.unwrap();
+    responder_finished(&pair).await;
+    assert!(manual.failures.is_empty());
+    assert_eq!(pair.a.trace.lock().unwrap().last_open.as_ref().unwrap().1,None);
+    for (link,before) in [(&pair.a,old[0]),(&pair.b,old[1])] {
+        assert_eq!(link.trace.lock().unwrap().manifest_items[2]-before[2],2);
+    }
+}
+
+#[tokio::test]
+async fn peer_inventory_failures_or_omitted_issues_do_not_confirm_the_initiator_checkpoint() {
+    for omitted in [false, true] {
+        let (_ra, sa, fa) = board("member-a");
+        let (_rb, sb, fb) = board("member-b");
+        let pair = connect(sa, fa, sb, fb).await;
+        {
+            let mut snapshot = pair.eb.snapshot.lock().unwrap();
+            let snapshot = snapshot.as_mut().unwrap();
+            if omitted {
+                snapshot.omitted = 1;
+            } else {
+                snapshot.issues.push(Failure::checked("local", "invalid_local_thread_record", Some("broken-thread"), None));
+            }
+        }
+        let a = pair.a.clone();
+        let outcome = pair.ha.execute(move |_| async move { a.round().await }).await.unwrap();
+        responder_finished(&pair).await;
+        assert_eq!(outcome.omitted, u64::from(omitted));
+        assert_eq!(outcome.failures.is_empty(), omitted);
+        assert_eq!(pair.ea.checkpoint(&pair.a.remote).unwrap(), None);
+    }
 }

@@ -59,15 +59,42 @@ pub enum Phase {
     Partial,
     Failed,
 }
+/// Presentation facts, not permissions or a second sync state machine. Only
+/// Manager can classify a failure's source; the UI must not parse error text.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Indicator {
+    #[default]
+    Healthy,
+    Connecting,
+    ReachingService,
+    ReachingPeers,
+    FetchingSession,
+    FinishingSync,
+    RetryingFiles,
+    CheckingProtocol,
+    Reconnecting,
+    CloudflareLimit,
+    UpdateWorker,
+    UpdateKota,
+    GroupAccessDenied,
+    DeviceIdentityError,
+    OtherInstance,
+    // Reserved for a confirmed file-access cause; generic transport::Io does
+    // not carry that evidence and must not produce this value.
+    FileAccessError,
+}
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
     pub phase: Phase,
+    pub indicator: Indicator,
     pub completed: Option<u64>,
     pub total: Option<u64>,
     pub last_successful_at: Option<String>,
     pub error: Option<String>,
     pub control_recoverable: bool,
+    pub service_recoverable: bool,
 }
 impl Default for Status {
     fn default() -> Self {
@@ -166,6 +193,8 @@ impl Error {
                 "not_joined" => "not_joined",
                 "worker_not_paired" => "worker_not_paired",
                 "worker_update_required" => "worker_update_required",
+                "cloudflare_resource_limit" => "cloudflare_resource_limit",
+                "relay_session_lost" => "relay_session_lost",
                 "owner_required" => "owner_required",
                 _ => "sync_unavailable",
             },
@@ -174,6 +203,12 @@ impl Error {
 }
 pub(crate) fn display_error(code: &str) -> String {
     match code {
+        "cloudflare_resource_limit" => {
+            "Cloudflare resource limit reached. Retry later; if it continues, ask the group owner to check Cloudflare."
+        }
+        "relay_session_lost" => {
+            "The sync relay session was interrupted. Keep Kota running on the other devices and retry."
+        }
         "stale_signature" => {
             "Request expired; check this device’s clock and the other devices’ clocks, then retry."
         }
@@ -183,9 +218,10 @@ pub(crate) fn display_error(code: &str) -> String {
         "incomplete_sync_identity" | "missing_device_identity" => {
             "Device identity is incomplete; report it on GitHub Discussions."
         }
-        "control_in_use" | "control_busy" | "sync_busy" => {
+        "control_in_use" => {
             "Another Kota app is using sync; quit it and click Retry."
         }
+        "control_busy" | "sync_busy" => "Sync is busy; try again shortly.",
         "worker_unreachable" => "Cannot reach the sync service; check your connection and retry.",
         "removed" | "unauthorized" => {
             "Group access was revoked; ask the owner for a new invitation."
@@ -270,6 +306,62 @@ pub(crate) struct ConnectionInfo {
 mod tests {
     use super::*;
     #[test]
+    fn indicator_contract_is_closed_and_busy_does_not_imply_another_instance() {
+        use Indicator::*;
+        let indicators = [Healthy, Connecting, ReachingService, ReachingPeers,
+            FetchingSession, FinishingSync, RetryingFiles, CheckingProtocol,
+            Reconnecting, CloudflareLimit, UpdateWorker, UpdateKota,
+            GroupAccessDenied, DeviceIdentityError, OtherInstance, FileAccessError];
+        assert_eq!(serde_json::to_value(indicators).unwrap(), serde_json::json!([
+            "healthy", "connecting", "reaching_service", "reaching_peers",
+            "fetching_session", "finishing_sync", "retrying_files", "checking_protocol",
+            "reconnecting", "cloudflare_limit", "update_worker", "update_kota",
+            "group_access_denied", "device_identity_error", "other_instance", "file_access_error"
+        ]));
+        assert_eq!(serde_json::to_value(Status::default()).unwrap()["sync"]["indicator"], "healthy");
+        for code in ["control_busy", "sync_busy"] {
+            assert_eq!(Error::from_code(code).code, "sync_busy");
+            assert_eq!(display_error(code), "Sync is busy; try again shortly.");
+        }
+        assert_eq!(Error::from_code("control_in_use").code, "sync_busy");
+        assert!(display_error("control_in_use").contains("Another Kota app"));
+    }
+    #[test]
+    fn relay_errors_are_fixed_details_and_never_infer_daily_quota_or_recovery() {
+        let codes = ["relay_session_lost", "cloudflare_resource_limit"];
+        let errors: Vec<_> = codes.iter().map(|code| Error::from_code(code)).collect();
+        assert_eq!(
+            serde_json::to_value(&errors).unwrap(),
+            serde_json::json!([
+            {"code":"relay_session_lost"}, {"code":"cloudflare_resource_limit"}])
+        );
+        let details = codes.map(|code| display_error(code));
+        assert_eq!(details[0], "The sync relay session was interrupted. Keep Kota running on the other devices and retry.");
+        assert_eq!(details[1], "Cloudflare resource limit reached. Retry later; if it continues, ask the group owner to check Cloudflare.");
+        // The UI reserves a daily-quota detail, but this backend has no sample
+        // proof and cannot emit that public action code or its reset promise.
+        assert_eq!(
+            Error::from_code("cloudflare_quota_exceeded").code,
+            "sync_unavailable"
+        );
+        for detail in details
+            .into_iter()
+            .chain([display_error("cloudflare_quota_exceeded")])
+        {
+            assert!(
+                !detail.contains("00:00")
+                    && !detail.contains("update")
+                    && !detail.contains("Sync error:")
+            );
+        }
+        assert!(!Status::default().sync.service_recoverable);
+        println!(
+            "KOTA_BBS_RELAY_ERROR_FIXTURE={}",
+            serde_json::json!({
+            "errors":errors,"details":codes.map(|code|display_error(code)),"serviceRecoverable":false})
+        );
+    }
+    #[test]
     fn only_confirmed_version_mismatch_recommends_updating() {
         let details = ["sync_protocol_error", "protocol_mismatch", "sync_timeout", "sync_connection_closed"]
             .map(|code| (code, display_error(code)))
@@ -309,17 +401,22 @@ mod tests {
         member.invitation_generation = None;
         let mut connecting = member.clone();
         connecting.sync.phase = Phase::Connecting;
+        connecting.sync.indicator = Indicator::Connecting;
         let mut partial = member.clone();
         partial.sync = Progress {
             phase: Phase::Partial,
+            indicator: Indicator::FinishingSync,
             completed: Some(2),
             total: Some(3),
             last_successful_at: Some("2026-09-12T10:00:00Z".into()),
             error: Some(display_error("sync_file_io_failed")),
             control_recoverable: false,
+            service_recoverable: false,
         };
+        assert!(!partial.sync.control_recoverable || !partial.sync.service_recoverable);
         let mut clock = member.clone();
         clock.sync.phase = Phase::Failed;
+        clock.sync.indicator = Indicator::Connecting;
         clock.sync.error = Some(display_error("stale_signature"));
         use crate::bbs::sync::AvatarView;
         let avatars = [

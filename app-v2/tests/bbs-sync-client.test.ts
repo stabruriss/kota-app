@@ -10,7 +10,7 @@ import {
   bbsSyncStatus, bbsSyncStatusView, bbsSyncViewSource, onBbsSyncChanged, parseBbsSyncStatus,
   bbsSyncInvitation, bbsSyncJoin, bbsSyncDisconnect, bbsSyncRename, bbsSyncRemove, bbsSyncStart, bbsSyncCancel,
 } from '../src/bbs-sync-client';
-import type { BbsSyncStatus } from '../src/types/bbs-sync';
+import { BBS_SYNC_INDICATORS, type BbsSyncStatus } from '../src/types/bbs-sync';
 import { useBbsSyncView } from '../src/chrome/useBbsSyncView';
 import retryRecovery from './fixtures/bbs-retry-recovery.json';
 
@@ -21,7 +21,7 @@ function status(): BbsSyncStatus {
       { id: 'self', name: 'Mac', role: 'owner', online: true, publicKey: 'public-key' },
       { id: 'peer', name: 'Other Mac', role: 'member', online: false, publicKey: 'other-public-key' },
     ] },
-    invitation: 'ready', invitationGeneration: '7', sync: { phase: 'idle', completed: null, total: null, lastSuccessfulAt: null, error: null, controlRecoverable: false },
+    invitation: 'ready', invitationGeneration: '7', sync: { phase: 'idle', completed: null, total: null, lastSuccessfulAt: null, error: null, controlRecoverable: false, serviceRecoverable: false },
   };
 }
 
@@ -33,14 +33,14 @@ describe('BBS sync IPC status client', () => {
       retryRecovery.retainedExchange, retryRecovery.started]) {
       vi.mocked(invoke).mockResolvedValueOnce(raw);
       const parsed = await bbsSyncStatus();
-      expect(parsed.sync).toEqual(raw.sync);
+      expect(parsed.sync).toEqual({ ...raw.sync, serviceRecoverable: false });
       expect(bbsSyncStatusView(parsed).controlRecoverable).toBe(raw.sync.controlRecoverable);
     }
     expect(vi.mocked(invoke).mock.calls).toEqual(Array.from({ length: 5 }, () => ['bbs_sync_status']));
     expect(retryRecovery.busyError).toEqual({ code: 'sync_busy' });
     vi.mocked(invoke).mockRejectedValueOnce(retryRecovery.busyError);
     await expect(bbsSyncStart({ expectedGroupId: retryRecovery.busy.group.id })).rejects.toMatchObject({
-      code: 'sync_busy', message: retryRecovery.details.control_in_use,
+      code: 'sync_busy', message: 'Sync is busy; try again shortly.',
     });
     expect(listen).not.toHaveBeenCalled();
   });
@@ -68,6 +68,22 @@ describe('BBS sync IPC status client', () => {
     for (const protocolVersion of [undefined, '1', 0, 2]) {
       expect(() => parseBbsSyncStatus({ ...status(), protocolVersion })).toThrow(/incompatible/);
     }
+  });
+
+  it('parses exactly the frozen indicator enum, preserving legacy absence without reading English causes', () => {
+    const raw = status();
+    for (const indicator of BBS_SYNC_INDICATORS) {
+      const parsed = parseBbsSyncStatus({ ...raw, sync: { ...raw.sync, indicator, error: 'unrelated text' } });
+      expect(parsed.sync.indicator).toBe(indicator);
+      expect(bbsSyncStatusView(parsed).indicator).toBe(indicator);
+    }
+    for (const indicator of [null, '', 'green', 'otherInstance', 'sync_busy', 1, [], {}]) {
+      expect(() => parseBbsSyncStatus({ ...raw, sync: { ...raw.sync, indicator } })).toThrow(/incompatible/);
+    }
+    const legacy = parseBbsSyncStatus({ ...raw, sync: { ...raw.sync, error: 'Another Kota app is using sync; update Kota.' } });
+    expect(legacy.sync).not.toHaveProperty('indicator');
+    expect(bbsSyncStatusView(legacy)).not.toHaveProperty('indicator');
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it('validates membership and progress without accepting partial connected state', () => {
@@ -107,6 +123,22 @@ describe('BBS sync IPC status client', () => {
     expect(() => parseBbsSyncStatus({ ...recoverable, invitation: 'none', invitationGeneration: null,
       group: { id: null, name: null, role: null, members: [] } })).toThrow(/incompatible/);
     expect(parseBbsSyncStatus({ ...raw, sync: { ...legacySync, error: 'controlRecoverable=true sync_busy' } }).sync.controlRecoverable).toBe(false);
+  });
+
+  it('requires a joined, explicit service capability independent of detail text or control recovery', () => {
+    const raw = status();
+    const recoverable = { ...raw, sync: { ...raw.sync, phase: 'failed', serviceRecoverable: true } };
+    expect(bbsSyncStatusView(parseBbsSyncStatus(recoverable)).serviceRecoverable).toBe(true);
+    const { serviceRecoverable: _, ...legacySync } = raw.sync;
+    expect(parseBbsSyncStatus({ ...raw, sync: legacySync }).sync.serviceRecoverable).toBe(false);
+    expect(parseBbsSyncStatus({ ...raw, sync: { ...legacySync, error: 'cloudflare_quota_exceeded serviceRecoverable=true' } })
+      .sync.serviceRecoverable).toBe(false);
+    for (const serviceRecoverable of [null, 'true', 1, [], {}]) {
+      expect(() => parseBbsSyncStatus({ ...raw, sync: { ...raw.sync, serviceRecoverable } })).toThrow(/incompatible/);
+    }
+    expect(() => parseBbsSyncStatus({ ...recoverable, invitation: 'none', invitationGeneration: null,
+      group: { id: null, name: null, role: null, members: [] } })).toThrow(/incompatible/);
+    expect(() => parseBbsSyncStatus({ ...recoverable, sync: { ...recoverable.sync, controlRecoverable: true } })).toThrow(/incompatible/);
   });
 
   it('drops unknown/private fields instead of forwarding the raw IPC object', () => {
@@ -178,7 +210,10 @@ describe('BBS sync management client', () => {
   it.each([
     ['stale_signature', 'Request expired; check this device’s clock and the other devices’ clocks, then retry.'],
     ['worker_update_required', 'Worker is outdated; update it from the Laughing Man card and retry.'],
-    ['sync_busy', 'Another Kota app is using sync; quit it and click Retry.'],
+    ['sync_busy', 'Sync is busy; try again shortly.'],
+    ['cloudflare_quota_exceeded', 'Cloudflare daily quota exceeded. Sync will retry after 00:00 UTC.'],
+    ['cloudflare_resource_limit', 'Cloudflare resource limit reached. Retry later; if it continues, ask the group owner to check Cloudflare.'],
+    ['relay_session_lost', 'The sync relay session was interrupted. Keep Kota running on the other devices and retry.'],
   ])('maps only the agreed %s enum without raw strings, causes or retries', async (code, message) => {
     const tasks = [
       () => bbsSyncInvitation({ expectedGroupId: null, refresh: false }),
@@ -200,6 +235,19 @@ describe('BBS sync management client', () => {
       expect(error).not.toHaveProperty('cause');
       expect(String(error)).not.toContain('PRIVATE');
     }
+  });
+
+  it.each([
+    { code: 'relay_quota_exceeded' }, { code: '1102' }, { status: 429 },
+    { status: 503, body: '<html>Cloudflare Error 1027 PRIVATE</html>' },
+    { code: 'cloudflare_quota_exceeded', resetsAtUtc: '2026-09-17T00:00:00Z' },
+  ])('does not classify provider or expanded rejection payloads as a safe quota error: %j', async (failure) => {
+    vi.mocked(invoke).mockRejectedValueOnce(failure);
+    const error = await bbsSyncStart({ expectedGroupId: 'group-one' }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'start', message: 'Sync could not finish; retry or report it on GitHub Discussions.' });
+    expect(error).not.toHaveProperty('cause');
+    expect(String(error)).not.toMatch(/PRIVATE|1027|00:00 UTC/);
+    expect(invoke).toHaveBeenCalledOnce();
   });
 
   it('passes a fixed group fence to every command and only returns unit', async () => {

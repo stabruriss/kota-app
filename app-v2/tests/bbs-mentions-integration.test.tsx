@@ -39,7 +39,7 @@ beforeEach(() => {
   vi.mocked(bbsRosterSource.listen).mockImplementation(async changed => { rosterHint = changed; return stopRoster; });
   vi.mocked(bbsRosterSource.read).mockImplementation(cancelled => readCompleteBbsRoster(async () => parseBbsRosterPage({ version, items: rows, next: null }), cancelled));
   sync = { deviceId: 'self', deviceName: 'This Mac', group: { id: 'group-one', name: 'Group', role: 'member', members: [] },
-    workerAvailable: false, invitation: { state: 'none' }, phase: 'idle', progress: null, lastSuccessfulAt: null, error: null, controlRecoverable: false };
+    workerAvailable: false, invitation: { state: 'none' }, phase: 'idle', progress: null, lastSuccessfulAt: null, error: null, controlRecoverable: false, serviceRecoverable: false };
   vi.mocked(bbsSyncViewSource.read).mockImplementation(async () => sync);
   vi.mocked(bbsSyncViewSource.listen).mockImplementation(async changed => { syncHint = changed; return () => {}; });
   board = { projectId: 'p', projectDisplayName: 'Kota', root: '/tmp/bbs', newCount: 0, threads: [{ threadId: 'thread-one', sharingGroupId: 'group-one',

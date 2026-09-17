@@ -3,6 +3,7 @@ import worker, { BbsGroup, RelayState } from '../src/index';
 import { MemoryState } from './durable_runtime';
 import { signedRequest, signingKey } from './support';
 import { sha256 } from '../src/bbs_auth';
+import { RateLimiter } from '../src/bbs_auth';
 import type { Env } from '../src/index';
 
 const GROUP = '00000000-0000-4000-8000-000000000001';
@@ -85,18 +86,61 @@ async function setup() {
   return { ...context, key, owner, create, join, member, token, hash };
 }
 describe('BbsGroup DO request and storage integration', () => {
+  it('keeps malformed relay requests from resetting the group object', async () => {
+    const f = await setup();
+    const bad = await worker.fetch(
+      new Request(`https://worker.example/bbs/relay/not-a-route?group=${GROUP}`, { headers: { 'cf-connecting-ip': 'bad' } }),
+      f.env,
+    );
+    expect(bad.status).toBe(404);
+    expect((await f.owner('status')).status).toBe(200);
+  });
+
+  it('uses separate high abuse and authenticated-device rate buckets', () => {
+    const limiter = new RateLimiter();
+    for (let i = 0; i < 3000; i++) expect(limiter.allow('shared-ip', '/bbs/relay', 0, 3000)).toBe(true);
+    expect(limiter.allow('shared-ip', '/bbs/relay', 0, 3000)).toBe(false);
+    for (let i = 0; i < 1500; i++) expect(limiter.allow('device-a', 'receive', 0, 1500)).toBe(true);
+    expect(limiter.allow('device-a', 'receive', 0, 1500)).toBe(false);
+    expect(limiter.allow('device-b', 'receive', 0, 1500)).toBe(true);
+  });
+
+  it('cleans expired relay metadata without dropping live rows', async () => {
+    const f = environment();
+    const ctx = new MemoryState();
+    const group = new BbsGroup(ctx as any, f.env);
+    const now = Date.now();
+    await ctx.storage.put('relay:old-request', { expiresAt: now - 1, response: {} });
+    await ctx.storage.put('relay:old-nonce', now - 1);
+    await ctx.storage.put('relay:wake:old', { expiresAt: now - 1 });
+    await ctx.storage.put('relay:live-request', { expiresAt: now + 60_000, response: {} });
+    await group.alarm();
+    expect(ctx.data.has('relay:old-request')).toBe(false);
+    expect(ctx.data.has('relay:old-nonce')).toBe(false);
+    expect(ctx.data.has('relay:wake:old')).toBe(false);
+    expect(ctx.data.has('relay:live-request')).toBe(true);
+    expect(ctx.alarm).toBeGreaterThanOrEqual(now + 59_000);
+  });
+
+  it('does not reschedule an alarm when no relay or signal rows remain', async () => {
+    const f = environment();
+    const ctx = new MemoryState();
+    const group = new BbsGroup(ctx as any, f.env);
+    await group.alarm();
+    expect(ctx.alarm).toBeNull();
+  });
   it('advertises the BBS-capable release in LM health and heartbeat without changing protocols', async () => {
     const f = environment();
     const health = await worker.fetch(new Request('https://worker.example/health'), f.env);
     expect(health.status).toBe(200);
-    expect(await health.json()).toMatchObject({ relayVersion: '0.1.3', protocolVersion: 'kota-lm-standby.v1' });
+    expect(await health.json()).toMatchObject({ relayVersion: '0.1.4', protocolVersion: 'kota-lm-standby.v1' });
     const heartbeat = await worker.fetch(new Request('https://worker.example/desktop/heartbeat', {
       method: 'POST',
       headers: { 'x-kota-standby-secret': 'paired-secret' },
       body: '{}',
     }), f.env);
     expect(heartbeat.status).toBe(200);
-    expect(await heartbeat.json()).toMatchObject({ relayVersion: '0.1.3', protocolVersion: 'kota-lm-standby.v1' });
+    expect(await heartbeat.json()).toMatchObject({ relayVersion: '0.1.4', protocolVersion: 'kota-lm-standby.v1' });
     const bbs = await worker.fetch(new Request('https://worker.example/bbs/owner/status'), f.env);
     expect(bbs.status).toBe(404);
     expect(await bbs.json()).toMatchObject({ protocolVersion: 1, error: 'not_found' });

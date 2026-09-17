@@ -1,17 +1,17 @@
 //! Independent control traffic. The consumer explicitly returns credit only
 //! after parsing/handling a message; retaining a delivery stalls its sender.
+use super::channel::Channel;
 use super::{
     protocol::{self, Control, Frame},
     Cancellation, Error, Limits, MembershipCheck, Result, CONTROL_WINDOW, MAX_FRAME,
     PROGRESS_TIMEOUT,
 };
-use bytes::BytesMut;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
-use webrtc::data_channel::{DataChannel, DataChannelEvent};
+use webrtc::data_channel::DataChannel;
 
 pub(crate) struct Delivery {
     frame: Frame,
@@ -42,6 +42,11 @@ impl Delivery {
         })?;
         Ok(RetainedDelivery { _frame: self.frame })
     }
+    #[cfg(test)]
+    pub(crate) fn defer_credit(self) -> (RetainedDelivery, impl FnOnce() -> Result<()>) {
+        let credit = move || self.consumed.try_send(self.seq).map_err(|_| Error::Closed);
+        (RetainedDelivery { _frame: self.frame }, credit)
+    }
     pub(crate) fn reject(self) {
         self.cancel.cancel();
     }
@@ -59,7 +64,7 @@ struct Outgoing {
     pending: BTreeMap<u64, Pending>,
 }
 pub(crate) struct ControlChannel {
-    channel: Arc<dyn DataChannel>,
+    channel: Channel,
     send_lock: AsyncMutex<()>,
     outgoing: Mutex<Outgoing>,
     slots: Arc<Semaphore>,
@@ -72,6 +77,19 @@ impl ControlChannel {
     /// the signed remote description passed validation.
     pub(crate) fn start(
         channel: Arc<dyn DataChannel>,
+        limits: Limits,
+        cancel: Cancellation,
+        authorized: MembershipCheck,
+    ) -> (Arc<Self>, mpsc::Receiver<Delivery>) {
+        Self::start_on(
+            Channel::Rtc(channel, limits.clone()),
+            limits,
+            cancel,
+            authorized,
+        )
+    }
+    pub(crate) fn start_on(
+        channel: Channel,
         limits: Limits,
         cancel: Cancellation,
         authorized: MembershipCheck,
@@ -145,14 +163,17 @@ impl ControlChannel {
                 );
                 seq
             };
-            let frame = protocol::encode_control(
-                Control::Message {
-                    seq,
-                    bytes: payload,
-                },
-                &self.limits,
-            )?;
-            send_frame(&self.channel, frame, &self.cancel).await?;
+            self.channel
+                .send_encoded(&self.limits, &self.cancel, MAX_FRAME, || {
+                    protocol::encode_control(
+                        Control::Message {
+                            seq,
+                            bytes: payload,
+                        },
+                        &self.limits,
+                    )
+                })
+                .await?;
             drop(_serial);
             received.await.map_err(|_| Error::Closed)?
         };
@@ -181,56 +202,33 @@ impl ControlChannel {
                     self.check()?;
                     let ack = ack.ok_or(Error::Closed)?;
                     if ack != handled.checked_add(1).ok_or(Error::Protocol)? || ack > received { return Err(Error::Protocol); }
-                    let frame = protocol::encode_control(Control::Credit(ack), &self.limits)?;
-                    send_frame(&self.channel, frame, &self.cancel).await?;
+                    let capacity = self.channel.encoding_capacity(9);
+                    self.channel.send_encoded(&self.limits, &self.cancel, capacity,
+                        || protocol::encode_control_sized(Control::Credit(ack), &self.limits, capacity)).await?;
                     handled = ack;
                 }
-                event = self.channel.poll() => {
+                frame = self.channel.receive() => {
                     self.check()?;
-                    match event {
-                        Some(DataChannelEvent::OnMessage(message)) => {
-                            if message.is_string { return Err(Error::Protocol); }
-                            let frame = Frame::received(message.data, &self.limits)?;
-                            match protocol::decode_control(&frame.bytes)? {
-                                Control::Credit(seq) => {
-                                    let mut state = self.outgoing.lock().map_err(|_| Error::Closed)?;
-                                    if seq != state.acked.checked_add(1).ok_or(Error::Protocol)? { return Err(Error::Protocol); }
-                                    let pending = state.pending.remove(&seq).ok_or(Error::Protocol)?;
-                                    state.acked = seq;
-                                    let _ = pending.reply.send(Ok(()));
-                                }
-                                Control::Message { seq, .. } => {
-                                    if seq != received.checked_add(1).ok_or(Error::Protocol)? || received - handled >= CONTROL_WINDOW as u64 {
-                                        return Err(Error::Protocol);
-                                    }
-                                    received = seq;
-                                    // A compliant sender has <=CONTROL_WINDOW unconsumed messages;
-                                    // this cannot overflow even when the consumer stops completely.
-                                    deliver.try_send(Delivery { frame, seq, consumed:consumed.clone(), cancel:self.cancel.clone() })
-                                        .map_err(|_| Error::Closed)?;
-                                }
-                            }
+                    let frame = frame?;
+                    match protocol::decode_control(&frame.bytes)? {
+                        Control::Credit(seq) => {
+                            let mut state = self.outgoing.lock().map_err(|_| Error::Closed)?;
+                            if seq != state.acked.checked_add(1).ok_or(Error::Protocol)? { return Err(Error::Protocol); }
+                            let pending = state.pending.remove(&seq).ok_or(Error::Protocol)?;
+                            state.acked = seq;
+                            let _ = pending.reply.send(Ok(()));
                         }
-                        Some(DataChannelEvent::OnClose | DataChannelEvent::OnError | DataChannelEvent::OnClosing) | None => return Err(Error::Closed),
-                        _ => {},
+                        Control::Message { seq, .. } => {
+                            if seq != received.checked_add(1).ok_or(Error::Protocol)? || received - handled >= CONTROL_WINDOW as u64 {
+                                return Err(Error::Protocol);
+                            }
+                            received = seq;
+                            deliver.try_send(Delivery { frame, seq, consumed:consumed.clone(), cancel:self.cancel.clone() })
+                                .map_err(|_| Error::Closed)?;
+                        }
                     }
                 }
             }
         }
     }
-}
-pub(crate) async fn send_frame(
-    channel: &Arc<dyn DataChannel>,
-    mut frame: Frame,
-    cancel: &Cancellation,
-) -> Result<()> {
-    let bytes = std::mem::replace(&mut frame.bytes, BytesMut::new());
-    tokio::select! {
-        _ = cancel.cancelled() => Err(Error::Cancelled),
-        result = tokio::time::timeout(PROGRESS_TIMEOUT, channel.send(bytes)) => {
-            result.map_err(|_| Error::Timeout)?.map_err(|_| Error::Closed)?;
-            Ok(())
-        }
-    }
-    // Frame's budget permit remains held until the send future resolves/drops.
 }

@@ -7,8 +7,9 @@ import type { BbsSyncInvitationResult } from '../types/bbs-sync';
 import type { BbsSyncView, BbsSyncInvitationView } from '../bbs-sync-view';
 import { BbsDeviceSyncDialog, BbsSharingMark, BbsSyncManageButton, BbsSyncStatusBar } from './BbsDeviceSync';
 import { useBbsSyncView, type BbsSyncViewSource } from './useBbsSyncView';
-import { BBS_SYNC_ERROR_DETAILS } from '../bbs-sync-errors';
-import { BbsSyncError } from './BbsSyncError';
+import { BBS_SYNC_ERROR_DETAILS, isBbsSyncSafeActionErrorCode, type BbsSyncSafeActionErrorCode } from '../bbs-sync-errors';
+import { BbsSyncIndicator } from './BbsSyncIndicator';
+import { BBS_SYNC_INDICATOR_COPY, bbsSyncActionIndicator } from '../bbs-sync-indicator';
 
 const realActions = Object.freeze({
   invitation: bbsSyncInvitation, join: bbsSyncJoin, disconnect: bbsSyncDisconnect,
@@ -97,8 +98,8 @@ export function BbsSyncControlButton() {
 
 export function BbsSyncActivity() {
   const { view, error, pending, refresh, run, actions } = useControls();
-  const [failure, setFailure] = useState<{ stamp: string; message: string } | null>(null);
-  const [request, setRequest] = useState<'start' | 'cancel' | null>(null);
+  const [failure, setFailure] = useState<{ stamp: string; message: string; code: BbsSyncSafeActionErrorCode | null } | null>(null);
+  const [request, setRequest] = useState<'start' | null>(null);
   const alive = useRef(false);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -111,16 +112,16 @@ export function BbsSyncActivity() {
     setRequest(null);
     setFailure(null);
   }, [view?.deviceId, view?.group?.id]);
-  async function startOrCancel(cancel: boolean) {
+  async function start() {
     const expectedGroupId = view?.group?.id;
     if (!expectedGroupId || pending || requesting.current) return;
     requesting.current = true;
     const id = ++sequence.current;
     const stamp = syncErrorStamp(view);
-    setRequest(cancel ? 'cancel' : 'start');
+    setRequest('start');
     setFailure(null);
     try {
-      await run(expectedGroupId, () => (cancel ? actions.cancel : actions.start)({ expectedGroupId }));
+      await run(expectedGroupId, () => actions.start({ expectedGroupId }));
       // An ACK only admits the command. Keep immediate local feedback through
       // the next fresh memory read, without inventing a round or a success time.
       if (alive.current && sequence.current === id) await refresh();
@@ -128,9 +129,10 @@ export function BbsSyncActivity() {
       // A late rejection cannot cover a newer authoritative phase/error. Plain
       // status rereads do not erase an action error while nothing has changed.
       if (alive.current && sequence.current === id && syncErrorStamp(viewRef.current) === stamp) {
-        setFailure({ stamp, message: error instanceof BbsSyncClientError
-          && (error.code === 'stale_signature' || error.code === 'worker_update_required' || error.code === 'sync_busy')
-          ? error.message : BBS_SYNC_ERROR_DETAILS.unknown });
+        const code = error instanceof BbsSyncClientError && isBbsSyncSafeActionErrorCode(error.code) ? error.code : null;
+        setFailure({ stamp, code, message: code && error instanceof BbsSyncClientError
+          ? error.message
+          : BBS_SYNC_ERROR_DETAILS.unknown });
       }
     } finally {
       if (alive.current && sequence.current === id) {
@@ -139,14 +141,24 @@ export function BbsSyncActivity() {
       }
     }
   }
-  const actionError = failure?.stamp === syncErrorStamp(view) ? failure.message : null;
-  const visibleError = actionError || error || view?.error
+  const actionFailure = failure?.stamp === syncErrorStamp(view) ? failure : null;
+  const visibleError = actionFailure?.message || error || view?.error
     || (view?.phase === 'failed' ? BBS_SYNC_ERROR_DETAILS.unknown : null);
-  if (!view?.group && !visibleError) return null;
+  // A transient local read/action failure cannot disprove an authoritative
+  // blocker. Only a newer typed status can withdraw that evidence.
+  const localIndicator = actionFailure
+    ? bbsSyncActionIndicator(actionFailure.code)
+    : error ? 'reconnecting' : undefined;
+  const retainBlocker = localIndicator && BBS_SYNC_INDICATOR_COPY[localIndicator].tone !== 'red'
+    && view?.indicator && BBS_SYNC_INDICATOR_COPY[view.indicator].tone === 'red';
+  const indicator = retainBlocker ? view!.indicator : localIndicator;
+  const detail = retainBlocker ? null : actionFailure?.message || error;
+  if (!view?.group && !visibleError && (!view?.indicator || view.indicator === 'healthy')) return null;
   return <div className="bbs-sync-activity">
     {view ? <BbsSyncStatusBar view={view} pending={pending} request={request} error={visibleError}
-      onSync={() => void startOrCancel(false)} onCancel={() => void startOrCancel(true)} />
-      : visibleError && <BbsSyncError detail={visibleError} />}
+      indicator={indicator} detail={detail} expiredRequest={!retainBlocker && actionFailure?.code === 'stale_signature'}
+      onSync={() => void start()} />
+      : visibleError && <BbsSyncIndicator indicator="reconnecting" detail={visibleError} />}
     {error && <div className="bbs-sync-controls"><button type="button" onClick={() => void refresh()}>Retry status</button></div>}
   </div>;
 }
@@ -155,7 +167,7 @@ export function BbsSyncActivity() {
  * not a code/message classifier or an authorization to recover. */
 function syncErrorStamp(view: BbsSyncView | null) {
   return JSON.stringify([view?.deviceId, view?.group?.id, view?.phase, view?.error,
-    view?.controlRecoverable, view?.lastSuccessfulAt, view?.progress]);
+    view?.controlRecoverable, view?.serviceRecoverable, view?.indicator, view?.lastSuccessfulAt, view?.progress]);
 }
 
 /** Owns all raw invitation material. Unmount/close drops it; the public provider
@@ -183,7 +195,7 @@ function BbsSyncManagement({ view, opener, onClose }: {
       if (alive.current) setCode(result);
     } catch (error) {
       const message = error instanceof BbsSyncClientError
-        && (error.code === 'stale_signature' || error.code === 'worker_update_required' || error.code === 'sync_busy')
+        && isBbsSyncSafeActionErrorCode(error.code)
         ? error.message : 'Could not prepare an invitation. Please retry.';
       if (alive.current) setAttempt({ key, state: { state: 'error', message } });
       throw new Error(message);

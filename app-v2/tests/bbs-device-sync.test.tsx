@@ -21,7 +21,7 @@ function view(overrides: Partial<BbsSyncView> = {}): BbsSyncView {
       ],
     },
     invitation: { state: 'ready', value: invite }, phase: 'idle', progress: null,
-    lastSuccessfulAt: null, error: null, controlRecoverable: false, ...overrides,
+    lastSuccessfulAt: null, error: null, controlRecoverable: false, serviceRecoverable: false, ...overrides,
   };
 }
 function actions(): BbsDeviceSyncActions {
@@ -59,8 +59,8 @@ describe('BBS sync presentation helpers', () => {
 
 describe('BBS sync controls', () => {
   it('is inert before joining and keeps sharing separate from delivery progress', () => {
-    const onManage = vi.fn(), onSync = vi.fn(), onCancel = vi.fn();
-    render(<><BbsSyncControls view={view({ group: null })} {...{ onManage, onSync, onCancel }} /><BbsSharingMark deviceCount={0} /></>);
+    const onManage = vi.fn(), onSync = vi.fn();
+    render(<><BbsSyncControls view={view({ group: null })} {...{ onManage, onSync }} /><BbsSharingMark deviceCount={0} /></>);
     expect(screen.queryByText(/Sharing on/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Last sync|Not synced|Manual sync/)).not.toBeInTheDocument();
     expect(onManage).not.toHaveBeenCalled();
@@ -69,23 +69,22 @@ describe('BBS sync controls', () => {
     expect(onManage).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps stale success time while updating, hides fake success, and offers cancellation', () => {
+  it('keeps stale success time and real progress without exposing a sync Cancel action', () => {
     const state = view({ phase: 'syncing', progress: { completed: 4, total: 12 }, lastSuccessfulAt: '2026-09-12T04:00:00Z' });
-    const onSync = vi.fn(), onCancel = vi.fn();
-    render(<><BbsSyncControls view={state} onManage={vi.fn()} {...{ onSync, onCancel }} /><BbsSharingMark deviceCount={3} /></>);
+    const onSync = vi.fn();
+    render(<><BbsSyncControls view={state} onManage={vi.fn()} onSync={onSync} /><BbsSharingMark deviceCount={3} /></>);
     expect(screen.getByText('Sharing on 3 devices')).toBeInTheDocument();
     expect(screen.getByText(/^Last sync at /)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Syncing 4/12' })).toBeDisabled();
     expect(screen.queryByText(/Sync success/i)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
     expect(onSync).not.toHaveBeenCalled();
   });
 
   it('uses a discoverable disabled-button hint when everyone else is offline', () => {
     const state = view();
     state.group!.members = state.group!.members.map((member) => ({ ...member, online: member.id === 'self' }));
-    render(<BbsSyncControls view={state} onManage={vi.fn()} onSync={vi.fn()} onCancel={vi.fn()} />);
+    render(<BbsSyncControls view={state} onManage={vi.fn()} onSync={vi.fn()} />);
     const button = screen.getByRole('button', { name: 'Manual sync' });
     expect(button).toBeDisabled();
     expect(button.parentElement).toHaveAttribute('tabindex', '0');
@@ -95,15 +94,16 @@ describe('BBS sync controls', () => {
 
   it('shows partial and failed results without replacing the last successful timestamp', () => {
     const onSync = vi.fn();
-    const props = { onManage: vi.fn(), onSync, onCancel: vi.fn() };
+    const props = { onManage: vi.fn(), onSync };
     const rendered = render(<BbsSyncControls view={view({ phase: 'partial', lastSuccessfulAt: '2026-09-12T04:00:00Z' })} {...props} />);
-    expect(screen.getByText('Partially synced')).toBeInTheDocument();
+    expect(screen.getByText('Finishing Sync')).toBeInTheDocument();
     expect(screen.getByText(/^Last sync at /)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry sync' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manual sync' }));
     expect(onSync).toHaveBeenCalledTimes(1);
     rendered.rerender(<BbsSyncControls view={view({ phase: 'failed', error: 'Could not establish a direct connection.' })} {...props} />);
     expect(screen.queryByText('Sync failed')).not.toBeInTheDocument();
-    expect(screen.getByText('Sync error:')).toBeInTheDocument();
+    expect(screen.queryByText('Sync error:')).not.toBeInTheDocument();
+    expect(screen.getByText('Reconnecting')).toBeInTheDocument();
     expect(screen.getByText('Could not establish a direct connection.')).toBeInTheDocument();
     expect(screen.getByText('Not synced yet')).toBeInTheDocument();
   });
@@ -115,7 +115,7 @@ describe('BBS device management', () => {
     function Harness() {
       const [open, setOpen] = useState(false);
       const opener = useRef<HTMLButtonElement | null>(null);
-      return <><BbsSyncControls view={view()} expanded={open} onManage={(trigger) => { opener.current = trigger; setOpen(true); }} onSync={vi.fn()} onCancel={vi.fn()} />
+      return <><BbsSyncControls view={view()} expanded={open} onManage={(trigger) => { opener.current = trigger; setOpen(true); }} onSync={vi.fn()} />
         {open && <BbsDeviceSyncDialog view={view()} returnFocusTo={opener.current} actions={task} onClose={() => setOpen(false)} />}</>;
     }
     render(<Harness />);

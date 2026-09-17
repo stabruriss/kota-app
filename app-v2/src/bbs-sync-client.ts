@@ -5,7 +5,8 @@ import type {
   BbsSyncJoinRequest, BbsSyncRenameRequest, BbsSyncRemoveRequest,
 } from './types/bbs-sync';
 import type { BbsSyncView } from './bbs-sync-view';
-import { BBS_SYNC_ERROR_DETAILS } from './bbs-sync-errors';
+import { BBS_SYNC_ERROR_DETAILS, isBbsSyncSafeActionErrorCode } from './bbs-sync-errors';
+import { BBS_SYNC_INDICATORS, type BbsSyncIndicator } from './types/bbs-sync';
 
 const errorMessages = {
   unavailable: 'BBS device sync requires the Kota runtime.',
@@ -22,6 +23,9 @@ const errorMessages = {
   stale_signature: BBS_SYNC_ERROR_DETAILS.stale_signature,
   worker_update_required: BBS_SYNC_ERROR_DETAILS.worker_update_required,
   sync_busy: BBS_SYNC_ERROR_DETAILS.sync_busy,
+  cloudflare_quota_exceeded: BBS_SYNC_ERROR_DETAILS.cloudflare_quota_exceeded,
+  cloudflare_resource_limit: BBS_SYNC_ERROR_DETAILS.cloudflare_resource_limit,
+  relay_session_lost: BBS_SYNC_ERROR_DETAILS.relay_session_lost,
 } as const;
 
 export class BbsSyncClientError extends Error {
@@ -55,10 +59,14 @@ export function parseBbsSyncStatus(value: unknown): BbsSyncStatus {
     || !invitationState(value.invitation) || !syncPhase(sync.phase)
     || !(value.invitationGeneration === null || generation(value.invitationGeneration))
     || !nullableText(sync.lastSuccessfulAt) || !nullableText(sync.error)
-    || !(sync.controlRecoverable === undefined || typeof sync.controlRecoverable === 'boolean')) throw invalid();
+    || !(sync.controlRecoverable === undefined || typeof sync.controlRecoverable === 'boolean')
+    || !(sync.serviceRecoverable === undefined || typeof sync.serviceRecoverable === 'boolean')
+    || !(sync.indicator === undefined || (typeof sync.indicator === 'string'
+      && (BBS_SYNC_INDICATORS as readonly string[]).includes(sync.indicator)))) throw invalid();
   if ((group.id === null && (group.role !== null || group.name !== null || group.members.length !== 0))
     || (group.id !== null && (!group.id || !role(group.role) || !device.id))) throw invalid();
   if (sync.controlRecoverable === true && group.id === null) throw invalid();
+  if (sync.serviceRecoverable === true && (group.id === null || sync.controlRecoverable === true)) throw invalid();
   if ((group.role !== 'owner' && value.invitationGeneration !== null)
     || (group.role === 'owner' && value.invitation === 'ready' && value.invitationGeneration === null)) throw invalid();
   if (!((sync.completed === null && sync.total === null)
@@ -85,6 +93,8 @@ export function parseBbsSyncStatus(value: unknown): BbsSyncStatus {
       lastSuccessfulAt: sync.lastSuccessfulAt, error: sync.error,
       // Old protocol-1 snapshots cannot grant the new recovery capability.
       controlRecoverable: sync.controlRecoverable === true,
+      serviceRecoverable: sync.serviceRecoverable === true,
+      ...(sync.indicator === undefined ? {} : { indicator: sync.indicator as BbsSyncIndicator }),
     },
   };
 }
@@ -118,7 +128,7 @@ async function managementRequest<T extends BbsSyncCommand>(action: Mutation | 'i
     // Durable recovery and expectedGroupId checks belong to the backend. This
     // client never silently retries a mutation or derives state from its result.
     if (record(error) && Object.keys(error).length === 1 && Object.hasOwn(error, 'code')
-      && (error.code === 'stale_signature' || error.code === 'worker_update_required' || error.code === 'sync_busy')) {
+      && isBbsSyncSafeActionErrorCode(error.code)) {
       throw new BbsSyncClientError(error.code);
     }
     throw new BbsSyncClientError(action);
@@ -178,6 +188,8 @@ export function bbsSyncStatusView(status: BbsSyncStatus): BbsSyncView {
     progress: status.sync.completed === null || status.sync.total === null ? null : { completed: status.sync.completed, total: status.sync.total },
     lastSuccessfulAt: status.sync.lastSuccessfulAt, error: status.sync.error,
     controlRecoverable: status.sync.controlRecoverable,
+    serviceRecoverable: status.sync.serviceRecoverable,
+    ...(status.sync.indicator === undefined ? {} : { indicator: status.sync.indicator }),
   };
 }
 

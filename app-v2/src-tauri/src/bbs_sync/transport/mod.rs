@@ -1,10 +1,13 @@
 //! Account-scoped, explicitly started transport. Importing/constructing policy
 //! starts no runtime, worker, timer or socket. The coordinator owns membership.
+#[cfg(test)]
+mod availability_tests;
+pub(crate) mod channel;
 pub(crate) mod control_channel;
-mod data_channel;
+pub(crate) mod data_channel;
 mod file_io;
 mod network_policy;
-mod protocol;
+pub(crate) mod protocol;
 mod runtime_host;
 mod session;
 mod signaling;
@@ -18,7 +21,7 @@ pub(crate) use session::{Connection, NetworkMode, PendingConnection};
 pub(crate) use signaling::{PeerIdentity, SessionRole, SignedDescription};
 
 use std::{fmt, sync::Arc};
-use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{watch, Notify, OwnedSemaphorePermit, Semaphore};
 
 pub(crate) const MAX_FRAME: usize = 16 * 1024;
 pub(crate) const DATA_WINDOW: usize = 32;
@@ -37,6 +40,8 @@ pub(crate) enum Error {
     InvalidResource,
     Protocol,
     ProtocolVersion,
+    RelaySessionLost,
+    CloudflareResourceLimit,
     Integrity,
     Io,
     Busy,
@@ -55,6 +60,8 @@ impl fmt::Display for Error {
             Self::InvalidResource => "invalid_sync_resource",
             Self::Protocol => "sync_protocol_error",
             Self::ProtocolVersion => "protocol_mismatch",
+            Self::RelaySessionLost => "relay_session_lost",
+            Self::CloudflareResourceLimit => "cloudflare_resource_limit",
             Self::Integrity => "sync_integrity_error",
             Self::Io => "sync_file_io_failed",
             Self::Busy => "sync_busy",
@@ -96,6 +103,9 @@ impl Cancellation {
 #[derive(Clone)]
 pub(crate) struct Limits {
     bytes: Arc<Semaphore>,
+    capacity: usize,
+    released: Arc<Notify>,
+    backing: Option<Arc<BytePermit>>,
     files: Arc<Semaphore>,
     connections: Arc<Semaphore>,
 }
@@ -103,20 +113,64 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             bytes: Arc::new(Semaphore::new(APP_QUEUE_BYTES)),
+            capacity: APP_QUEUE_BYTES,
+            released: Arc::new(Notify::new()),
+            backing: None,
             files: Arc::new(Semaphore::new(1)),
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         }
     }
 }
 impl Limits {
-    pub(crate) fn reserve(&self, size: usize) -> Result<OwnedSemaphorePermit> {
+    pub(crate) fn reserve(&self, size: usize) -> Result<BytePermit> {
         if size > APP_QUEUE_BYTES {
             return Err(Error::Protocol);
         }
-        self.bytes
+        let permit = self
+            .bytes
             .clone()
             .try_acquire_many_owned(size as u32)
-            .map_err(|_| Error::Busy)
+            .map_err(|_| Error::Busy)?;
+        Ok(BytePermit {
+            permit: Some(permit),
+            backing: self.backing.clone(),
+            released: self.released.clone(),
+        })
+    }
+    /// A readiness hint, not admission: waiting never reserves bytes or joins
+    /// the semaphore's fair acquire queue ahead of small frames. The caller
+    /// still uses reserve(), and owns cancellation/deadlines around this await.
+    pub(crate) async fn wait_for_bytes(&self, minimum: usize) -> Result<()> {
+        if minimum == 0 || minimum > self.capacity {
+            return Err(Error::Protocol);
+        }
+        loop {
+            let changed = self.released.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.bytes.is_closed() {
+                return Err(Error::Closed);
+            }
+            if self.bytes.available_permits() >= minimum {
+                return Ok(());
+            }
+            changed.await;
+        }
+    }
+    /// Carves out, never adds to, the account budget. Outstanding child buffers
+    /// retain the parent charge even after the pool/partition has been dropped.
+    pub(crate) fn partition(&self, size: usize) -> Result<Self> {
+        if size == 0 {
+            return Err(Error::Protocol);
+        }
+        Ok(Self {
+            backing: Some(Arc::new(self.reserve(size)?)),
+            bytes: Arc::new(Semaphore::new(size)),
+            capacity: size,
+            released: self.released.clone(),
+            files: self.files.clone(),
+            connections: self.connections.clone(),
+        })
     }
     fn file(&self) -> Result<OwnedSemaphorePermit> {
         self.files
@@ -124,11 +178,30 @@ impl Limits {
             .try_acquire_owned()
             .map_err(|_| Error::Busy)
     }
-    fn connection(&self) -> Result<OwnedSemaphorePermit> {
+    pub(crate) fn connection(&self) -> Result<OwnedSemaphorePermit> {
         self.connections
             .clone()
             .try_acquire_owned()
             .map_err(|_| Error::Busy)
+    }
+}
+
+pub(crate) struct BytePermit {
+    permit: Option<OwnedSemaphorePermit>,
+    backing: Option<Arc<BytePermit>>,
+    released: Arc<Notify>,
+}
+impl Drop for BytePermit {
+    fn drop(&mut self) {
+        // Publish the hint only after both this allocation and any final parent
+        // backing have returned credit. Shared payload views still own their
+        // original permit, so their intermediate drops do not announce credit.
+        let released = self.permit.as_ref().is_some_and(|p| p.num_permits() != 0);
+        drop(self.permit.take());
+        drop(self.backing.take());
+        if released {
+            self.released.notify_waiters();
+        }
     }
 }
 

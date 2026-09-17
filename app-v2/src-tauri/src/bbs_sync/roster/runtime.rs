@@ -248,6 +248,10 @@ impl Runtime {
         drop(p);
         this
     }
+    #[cfg(test)]
+    pub(crate) fn test_publish_source(&self, projects: Vec<Project>) {
+        self.published.write().unwrap().local = Some(Arc::new(wire::Local::new(projects).unwrap()));
+    }
     pub(crate) fn source(&self) -> Option<Arc<wire::Local>> {
         self.published.read().ok()?.local.clone()
     }

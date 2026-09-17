@@ -4,7 +4,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { BbsGroup, routeBbs } from './bbs_group';
 export { BbsGroup } from './bbs_group';
 
-const RELAY_VERSION = '0.1.3';
+const RELAY_VERSION = '0.1.4';
 const PROTOCOL_VERSION = 'kota-lm-standby.v1';
 const ONLINE_GRACE_MS = 90_000;
 const MAX_PULL_LIMIT = 50;

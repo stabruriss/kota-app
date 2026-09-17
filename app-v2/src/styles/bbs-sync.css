@@ -22,8 +22,17 @@ button.bbs-sync-manage, .bbs-modal-actions button.bbs-sync-manage { font: 600 11
 .bbs-sync-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #a6beae; flex: 0 0 5px; }
 .bbs-sync-dot.offline { background: #625e58; }
 .bbs-sync-round { display: flex; width: 100%; flex-wrap: wrap; align-items: center; gap: 8px; font: 11px var(--font-sans, sans-serif); color: var(--text-3, #817d77); }
-.bbs-sync-round .bbs-sync-now, .bbs-sync-round .bbs-sync-cancel { font: inherit; padding: 4px 8px; }
+.bbs-sync-round .bbs-sync-now { font: inherit; padding: 4px 8px; }
 .bbs-sync-last { margin-left: auto; }
+.bbs-sync-indicator { --sync-tone: var(--copper-hi); position: relative; min-height: 26px; cursor: help; }
+.bbs-sync-indicator[data-tone="yellow"] { --sync-tone: var(--buttercup); }
+.bbs-sync-indicator[data-tone="red"] { --sync-tone: var(--poppy); }
+.bbs-sync-indicator .st-dot.live { flex-shrink: 0; background: var(--sync-tone); box-shadow: 0 0 5px var(--sync-tone); }
+.bbs-sync-indicator[data-tone="red"] .st-dot { animation: none; }
+.bbs-sync-short-status { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bbs-sync-indicator .bbs-sync-tooltip { left: 0; right: auto; max-width: min(280px, calc(100vw - 76px)); pointer-events: auto; }
+.bbs-sync-indicator:hover .bbs-sync-tooltip, .bbs-sync-indicator:focus-within .bbs-sync-tooltip { visibility: visible; }
+.bbs-sync-indicator .bbs-sync-tooltip a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .bbs-sync-result.partial { color: #d6ae82; }
 .bbs-sync-result.failed, .bbs-sync-round-error { color: #dea299; }
 .bbs-sync-round-error { flex-basis: 100%; margin: 0; font: 11px/1.5 var(--font-sans, sans-serif); overflow-wrap: anywhere; }
@@ -98,4 +107,7 @@ button.bbs-sync-manage, .bbs-modal-actions button.bbs-sync-manage { font: 600 11
   .bbs-device-head h2 { font-size: 12px; }
   .bbs-sync-round { flex-basis: 100%; }
 }
-@media (prefers-reduced-motion: reduce) { .bbs-sync-spinner { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .bbs-sync-spinner, .bbs-sync-indicator .st-dot.live { animation: none; }
+  .bbs-sync-indicator .st-dot { transition: none; }
+}

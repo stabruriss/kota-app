@@ -29,6 +29,7 @@ export class MemoryState {
     setAlarm: async (at: number) => {
       this.alarm = at;
     },
+    getAlarm: async () => this.alarm,
     deleteAlarm: async () => {
       this.alarm = null;
     },

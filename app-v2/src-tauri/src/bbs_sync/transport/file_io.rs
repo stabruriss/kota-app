@@ -1,6 +1,8 @@
 //! One bounded account file worker. All open/read/write/hash/fsync/cleanup runs
 //! here, not on the async network executor. Callers only exchange one chunk.
-use super::{background_thread, Cancellation, Error, Limits, Result, BYTES_PER_SECOND, MAX_FRAME};
+use super::{
+    background_thread, BytePermit, Cancellation, Error, Limits, Result, BYTES_PER_SECOND, MAX_FRAME,
+};
 use crate::bbs_sync::{safe_id, valid_hash, FileStamp};
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
@@ -18,7 +20,27 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tokio::sync::{oneshot, OwnedSemaphorePermit};
+use tokio::sync::{oneshot, watch, OwnedSemaphorePermit};
+
+/// Counts real permit waiters and queued/executing operations. This is only
+/// liveness eligibility: it never increments activity bytes or a progress clock.
+#[derive(Clone)]
+struct FileWork(watch::Sender<usize>);
+struct Working(watch::Sender<usize>);
+impl FileWork {
+    fn new() -> Self {
+        Self(watch::channel(0).0)
+    }
+    fn begin(&self) -> Working {
+        self.0.send_modify(|count| *count += 1);
+        Working(self.0.clone())
+    }
+}
+impl Drop for Working {
+    fn drop(&mut self) {
+        self.0.send_modify(|count| *count -= 1);
+    }
+}
 
 pub(crate) const CHUNK_BYTES: usize = MAX_FRAME - 25;
 const IO_TICK: Duration = Duration::from_millis(20);
@@ -99,21 +121,26 @@ impl Resource {
 pub(crate) struct Chunk {
     pub(crate) bytes: BytesMut,
     pub(crate) offset: u64,
-    _bytes_permit: OwnedSemaphorePermit,
+    _bytes_permit: BytePermit,
 }
 enum Op {
-    Read(oneshot::Sender<Result<Option<Chunk>>>),
+    Read {
+        done: oneshot::Sender<Result<Option<Chunk>>>,
+        _work: Working,
+    },
     Write {
         offset: u64,
         bytes: BytesMut,
-        permit: OwnedSemaphorePermit,
+        permit: BytePermit,
         done: oneshot::Sender<Result<u64>>,
+        _work: Working,
     },
     Finish {
         hash: String,
         io: FileIo,
         permit: OwnedSemaphorePermit,
         done: oneshot::Sender<Result<VerifiedFile>>,
+        _work: Working,
     },
 }
 enum Job {
@@ -128,13 +155,17 @@ enum Job {
         parent_cancel: Cancellation,
         limits: Limits,
         ready: oneshot::Sender<Result<()>>,
+        opening: Working,
+        work: FileWork,
     },
     Cleanup {
         path: PathBuf,
         _permit: OwnedSemaphorePermit,
+        _work: Working,
     },
     RemoveSmall {
         path: PathBuf,
+        _work: Working,
     },
 }
 #[derive(Clone)]
@@ -142,6 +173,7 @@ pub(crate) struct FileIo {
     jobs: SyncSender<Job>,
     limits: Limits,
     activity: Arc<AtomicU64>,
+    work: FileWork,
     closing: Arc<AtomicBool>,
     finished: tokio::sync::watch::Receiver<bool>,
 }
@@ -171,7 +203,7 @@ impl FileIo {
                     match job {
                         Job::Stop => break,
                         Job::Local(work) => work(),
-                        Job::Cleanup { path, .. } | Job::RemoveSmall { path } => {
+                        Job::Cleanup { path, _work, .. } | Job::RemoveSmall { path, _work } => {
                             if fs::remove_file(path)
                                 .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
                             {
@@ -189,6 +221,8 @@ impl FileIo {
                             parent_cancel,
                             limits,
                             ready,
+                            opening,
+                            work,
                         } => {
                             let _ = transfer(
                                 resource,
@@ -199,6 +233,8 @@ impl FileIo {
                                 parent_cancel,
                                 limits,
                                 ready,
+                                opening,
+                                work,
                             );
                         }
                     }
@@ -210,6 +246,7 @@ impl FileIo {
             jobs,
             limits,
             activity: Arc::new(AtomicU64::new(0)),
+            work: FileWork::new(),
             closing: Arc::new(AtomicBool::new(false)),
             finished,
         })
@@ -237,10 +274,23 @@ impl FileIo {
     pub(crate) fn activity(&self) -> u64 {
         self.activity.load(Ordering::Relaxed)
     }
+    /// Memory-only observation. An idle FileHandle/VerifiedFile or roster read
+    /// is not work. Activity owners may use a nonzero count for small probes,
+    /// never for Working messages, file completion or timeout refreshes.
+    pub(crate) fn work_status(&self) -> watch::Receiver<usize> {
+        self.work.0.subscribe()
+    }
     /// Roster staging owns no transfer permit between pages. Dropping an RPC
     /// only schedules unlink; the network/IPC thread performs no filesystem I/O.
     pub(crate) fn remove_later(&self, path: PathBuf) {
-        if self.jobs.try_send(Job::RemoveSmall { path }).is_err() {
+        if self
+            .jobs
+            .try_send(Job::RemoveSmall {
+                path,
+                _work: self.work.begin(),
+            })
+            .is_err()
+        {
             crate::kota_debug_log(
                 "[bbs-roster] staging_cleanup_deferred; startup recovery required",
             );
@@ -258,11 +308,12 @@ impl FileIo {
         T: Send + 'static,
         F: FnOnce(&mut LocalIo) -> T + Send + 'static,
     {
+        let work = self.work.begin();
         let permit = tokio::select! {
             _=parent.cancelled()=>return Err(Error::Cancelled),
             p=self.limits.files.clone().acquire_owned()=>p.map_err(|_|Error::Closed)?,
         };
-        self.schedule(parent, move |io| {
+        self.schedule(parent, work, move |io| {
             let _permit = permit;
             operation(io)
         })
@@ -276,6 +327,7 @@ impl FileIo {
         T: Send + 'static,
         F: FnOnce(&mut LocalIo) -> T + Send + 'static,
     {
+        let work = self.work.begin();
         // Bound admission, not the whole scan/copy. Work that keeps making I/O
         // progress may legitimately exceed twenty seconds in a large library.
         let permit = tokio::select! {
@@ -283,10 +335,11 @@ impl FileIo {
             p=tokio::time::timeout(super::PROGRESS_TIMEOUT, self.limits.files.clone().acquire_owned()) =>
                 p.map_err(|_| Error::Timeout)?.map_err(|_| Error::Closed)?,
         };
-        self.schedule(parent, move |io| {
+        self.schedule(parent, work, move |io| {
             let _permit = permit;
             operation(io)
-        }).await
+        })
+        .await
     }
     /// Repository scans/hash/copies use the very same account file permit and
     /// background thread as network transfers. This starts no additional worker.
@@ -296,13 +349,13 @@ impl FileIo {
         F: FnOnce(&mut LocalIo) -> T + Send + 'static,
     {
         let permit = self.limits.file()?;
-        self.schedule(parent, move |io| {
+        self.schedule(parent, self.work.begin(), move |io| {
             let _permit = permit;
             operation(io)
         })
         .await
     }
-    async fn schedule<T, F>(&self, parent: &Cancellation, operation: F) -> Result<T>
+    async fn schedule<T, F>(&self, parent: &Cancellation, work: Working, operation: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut LocalIo) -> T + Send + 'static,
@@ -328,6 +381,9 @@ impl FileIo {
         let activity = self.activity.clone();
         self.jobs
             .try_send(Job::Local(Box::new(move || {
+                // The job owns this guard, even if the awaiting future is
+                // cancelled while a syscall/closure is still on the worker.
+                let _work = work;
                 let mut io = LocalIo {
                     activity,
                     own: worker_cancel,
@@ -372,6 +428,7 @@ impl FileIo {
             own_cancel: own_cancel.clone(),
             parent: parent.clone(),
             permit: Some(permit),
+            work: self.work.clone(),
         };
         self.jobs
             .try_send(Job::Transfer {
@@ -383,6 +440,8 @@ impl FileIo {
                 parent_cancel: parent.clone(),
                 limits: self.limits.clone(),
                 ready,
+                opening: self.work.begin(),
+                work: self.work.clone(),
             })
             .map_err(|_| Error::Busy)?;
         tokio::select! {
@@ -420,6 +479,7 @@ struct FileHandle {
     own_cancel: Cancellation,
     parent: Cancellation,
     permit: Option<OwnedSemaphorePermit>,
+    work: FileWork,
 }
 impl FileHandle {
     async fn reply<T>(&self, rx: oneshot::Receiver<Result<T>>) -> Result<T> {
@@ -443,7 +503,10 @@ impl FileReader {
         let (done, rx) = oneshot::channel();
         self.handle
             .tx
-            .try_send(Op::Read(done))
+            .try_send(Op::Read {
+                done,
+                _work: self.handle.work.begin(),
+            })
             .map_err(|_| Error::Closed)?;
         self.handle.reply(rx).await
     }
@@ -467,6 +530,7 @@ impl FileWriter {
                 bytes,
                 permit,
                 done,
+                _work: self.handle.work.begin(),
             })
             .map_err(|_| Error::Closed)?;
         self.handle.reply(rx).await
@@ -481,6 +545,7 @@ impl FileWriter {
                 io: self.io.clone(),
                 permit,
                 done,
+                _work: self.handle.work.begin(),
             })
             .map_err(|_| Error::Closed)?;
         // A cancelled reply drops VerifiedFile itself, so success cannot orphan
@@ -520,7 +585,7 @@ impl VerifiedFile {
     {
         self.io
             .clone()
-            .schedule(cancel, move |io| {
+            .schedule(cancel, self.io.work.begin(), move |io| {
                 let metadata = fs::symlink_metadata(self.path()).map_err(|_| Error::Io)?;
                 if !metadata.is_file()
                     || metadata.file_type().is_symlink()
@@ -549,6 +614,7 @@ impl Drop for VerifiedFile {
                     .try_send(Job::Cleanup {
                         path,
                         _permit: permit,
+                        _work: self.io.work.begin(),
                     })
                     .is_err()
                 {
@@ -574,7 +640,7 @@ pub(crate) struct LocalIo {
 }
 pub(crate) struct IoBuffer {
     pub(crate) bytes: BytesMut,
-    _permit: OwnedSemaphorePermit,
+    _permit: BytePermit,
 }
 impl LocalIo {
     #[cfg(test)]
@@ -651,6 +717,8 @@ fn transfer(
     parent: Cancellation,
     limits: Limits,
     ready: oneshot::Sender<Result<()>>,
+    opening: Working,
+    work: FileWork,
 ) -> Result<()> {
     let mut partial = None;
     let opened = (|| {
@@ -691,6 +759,9 @@ fn transfer(
             return Err(error);
         }
     };
+    // Keeping the file/permit open while waiting for the next network frame is
+    // not an I/O operation. Only each queued read/write/fsync is counted below.
+    drop(opening);
     let result = (|| {
         let mut offset = 0u64;
         let mut hash = Sha256::new();
@@ -705,7 +776,7 @@ fn transfer(
                 Err(_) => return Err(Error::Closed),
             };
             match op {
-                Op::Read(done) if !receive => {
+                Op::Read { done, _work } if !receive => {
                     let read = (|| {
                         pace(next_io, &own, &parent)?;
                         if offset == resource.size_bytes {
@@ -744,6 +815,7 @@ fn transfer(
                     bytes,
                     permit,
                     done,
+                    _work,
                 } if receive => {
                     let wrote = (|| {
                         if expected != offset
@@ -775,6 +847,7 @@ fn transfer(
                     io,
                     permit,
                     done,
+                    _work,
                 } if receive => {
                     let finished = (|| {
                         if offset != resource.size_bytes
@@ -813,6 +886,7 @@ fn transfer(
     })();
     drop(file);
     if let Some(path) = partial {
+        let _cleanup = work.begin();
         let _ = fs::remove_file(path);
     }
     result
@@ -822,6 +896,7 @@ fn transfer(
 mod tests {
     use super::*;
     use crate::bbs_sync::raw_sha256;
+    mod work;
     struct Root(PathBuf);
     impl Root {
         fn new() -> Self {

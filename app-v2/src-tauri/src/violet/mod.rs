@@ -3849,6 +3849,31 @@ fn parse_claude_line(
                 .and_then(|message| message.get("content"))
         })
         .unwrap_or(&JsonValue::Null);
+    if role == "user"
+        && json_string(&json, &["origin", "kind"]).as_deref() == Some("task-notification")
+        && json_string(&json, &["promptSource"]).as_deref() == Some("system")
+    {
+        // Classify the provider envelope before event() truncates it. Background
+        // commands use the same origin; only outer subagent usage identifies a
+        // child result. Other/invalid provider notifications remain hidden.
+        let Some(text) = claude_subagent_notification_text(content) else {
+            return Vec::new();
+        };
+        let mut progress = event(
+            agent,
+            source,
+            "assistant",
+            "commentary",
+            &timestamp,
+            &event_id,
+            text,
+        );
+        progress.message_origin = Some("subagent".into());
+        // A child update is not a lifecycle signal for the parent, including
+        // late results that arrive after the parent's final response.
+        progress.work_signal = None;
+        return vec![progress];
+    }
     let mut events = content_blocks_to_events(agent, source, &role, &timestamp, &event_id, content)
         .into_iter()
         .filter(|event| !is_harness_envelope_text(&event.text))
@@ -3916,6 +3941,39 @@ fn parse_claude_line(
         }
     }
     events
+}
+
+fn claude_subagent_notification_text(content: &JsonValue) -> Option<String> {
+    let text = text_from_json(content)?;
+    let text = text.trim();
+    let text = text
+        .strip_prefix("[SYSTEM NOTIFICATION - NOT USER INPUT]")
+        .map_or(text, str::trim_start);
+    let envelope = text
+        .strip_prefix("<task-notification>")?
+        .strip_suffix("</task-notification>")?
+        .trim();
+    // Usage must be the outer trailing field, not a matching tag quoted inside
+    // the result/summary. Do not guess from task-id prefixes or summary wording.
+    let (fields, usage) = envelope.strip_suffix("</usage>")?.rsplit_once("<usage>")?;
+    let (tokens, _) = usage
+        .trim_start()
+        .strip_prefix("<subagent_tokens>")?
+        .split_once("</subagent_tokens>")?;
+    tokens.trim().parse::<u64>().ok()?;
+    let (header, result) = match fields.split_once("<result>") {
+        Some((header, result)) => (header, result.trim_end().strip_suffix("</result>")?.trim()),
+        None => (fields, ""),
+    };
+    let summary = extract_tag_block(header, "summary")
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or("Subagent update");
+    Some(if result.is_empty() {
+        summary.to_string()
+    } else {
+        format!("{summary}\n\n{result}")
+    })
 }
 
 /// Short, human-readable label for a Claude `compact_boundary` line, enriched with the
@@ -9945,6 +10003,282 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["prompt", "reply"]
         );
+    }
+
+    fn claude_notification_fixture(kind: &str) -> JsonValue {
+        // Captured Claude Code 2.1.272 envelopes. The private result is scrubbed
+        // character-for-character, so the display truncation boundary is real.
+        let captures: JsonValue =
+            serde_json::from_str(include_str!("fixtures/claude-task-notifications.json")).unwrap();
+        captures[kind]["record"].clone()
+    }
+
+    fn parse_claude_notification_record(record: JsonValue) -> Vec<NativeEvent> {
+        let mut agent = agent();
+        agent.shell = "claude".into();
+        parse_claude_line(&agent, &source(), 0, record)
+    }
+
+    #[test]
+    fn claude_subagent_captured_result_is_room_only_progress_before_truncation() {
+        let record = claude_notification_fixture("subagent");
+        let body = record["message"]["content"].as_str().unwrap();
+        let summary = extract_tag_block(body, "summary").unwrap();
+        let result = extract_tag_block(body, "result").unwrap().trim();
+        assert!(body.chars().count() > MAX_EVENT_TEXT_CHARS);
+        assert!(body.find("<subagent_tokens>").unwrap() > MAX_EVENT_TEXT_CHARS);
+
+        let events = parse_claude_notification_record(record.clone());
+        assert_eq!(events.len(), 1);
+        let expected_text = truncate_chars(&format!("{summary}\n\n{result}"), MAX_EVENT_TEXT_CHARS);
+        assert_eq!(
+            serde_json::to_value(&events[0]).unwrap(),
+            serde_json::json!({
+                "session_id": "rollout-test", "agent_id": "alice", "shell": "claude",
+                "role": "assistant", "kind": "commentary",
+                "timestamp": normalize_timestamp(record["timestamp"].as_str().unwrap()),
+                "text": expected_text, "source_path": "/tmp/rollout-test.jsonl",
+                "native_event_id": record["uuid"], "message_origin": "subagent"
+            })
+        );
+        assert!(native_work_event(&events[0]).is_none());
+        let room = room_event_for(&events[0], Path::new("/tmp/kota")).unwrap();
+        let message = event_to_message(room);
+        let public = serde_json::to_value(&message).unwrap();
+        assert_eq!(public["role"], "assistant");
+        assert_eq!(public["kind"], "commentary");
+        assert_eq!(public["messageOrigin"], "subagent");
+        let history = chathistory_event_from_message(&message, None);
+        assert!(history.display);
+        assert!(!history.agent_visible);
+        assert!(shared_event_for(events[0].clone(), Path::new("/tmp/kota")).is_none());
+        for wrapper in ["<task-notification>", "<usage>", "<output-file>", "<note>"] {
+            assert!(!events[0].text.contains(wrapper));
+        }
+    }
+
+    #[test]
+    fn claude_subagent_short_text_blocks_and_late_stop_reason_keep_progress_contract() {
+        let mut record = claude_notification_fixture("subagent");
+        let body = record["message"]["content"].as_str().unwrap();
+        let result = extract_tag_block(body, "result").unwrap();
+        let body = body.replace(result, "\n**完成**：结果已核对。\n").replace(
+            "<subagent_tokens>182132</subagent_tokens>",
+            "<subagent_tokens>0</subagent_tokens>",
+        );
+        record["message"]["content"] = serde_json::json!([
+            {"type": "text", "text": format!("[SYSTEM NOTIFICATION - NOT USER INPUT]\n{body}")}
+        ]);
+        record["message"]["stop_reason"] = "end_turn".into();
+        record["message"]["id"] = "not-a-main-agent-turn".into();
+        let events = parse_claude_notification_record(record);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].text.ends_with("\n\n**完成**：结果已核对。"));
+        assert_eq!(events[0].message_origin.as_deref(), Some("subagent"));
+        assert_eq!(events[0].work_signal, None);
+        assert_eq!(events[0].stop_reason, None);
+        assert_eq!(events[0].turn_id, None);
+    }
+
+    #[test]
+    fn claude_subagent_multibyte_result_keeps_the_existing_character_limit() {
+        let mut record = claude_notification_fixture("subagent");
+        let body = record["message"]["content"].as_str().unwrap();
+        let result = extract_tag_block(body, "result").unwrap();
+        record["message"]["content"] = body.replace(result, &"中🙂".repeat(6_000)).into();
+        let events = parse_claude_notification_record(record);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text.chars().count(), MAX_EVENT_TEXT_CHARS + 3);
+        assert!(events[0].text.ends_with("..."));
+        assert!(events[0].text.contains("中🙂"));
+        assert_eq!(events[0].role, "assistant");
+    }
+
+    #[test]
+    fn claude_subagent_captured_background_command_never_gets_subagent_identity() {
+        let record = claude_notification_fixture("background_command");
+        assert!(parse_claude_notification_record(record.clone()).is_empty());
+        // A command may print agent-looking words/tags; only the outer usage
+        // field of a provider notification can establish subagent identity.
+        let mut long = record;
+        let body = long["message"]["content"].as_str().unwrap();
+        let summary = extract_tag_block(body, "summary").unwrap();
+        long["message"]["content"] = body
+            .replace(
+                summary,
+                &format!(
+                    "Agent finished <usage><subagent_tokens>1</subagent_tokens></usage>{}",
+                    "x".repeat(11_000)
+                ),
+            )
+            .into();
+        assert!(parse_claude_notification_record(long).is_empty());
+    }
+
+    #[test]
+    fn claude_subagent_requires_native_origin_and_integer_outer_usage() {
+        let record = claude_notification_fixture("subagent");
+        for replacement in ["-1", "1.5", "not-a-number", "18446744073709551616"] {
+            let mut invalid = record.clone();
+            invalid["message"]["content"] = invalid["message"]["content"]
+                .as_str()
+                .unwrap()
+                .replace(
+                    "<subagent_tokens>182132</subagent_tokens>",
+                    &format!("<subagent_tokens>{replacement}</subagent_tokens>"),
+                )
+                .into();
+            assert!(parse_claude_notification_record(invalid).is_empty());
+        }
+        let mut missing_usage = record.clone();
+        missing_usage["message"]["content"] = missing_usage["message"]["content"]
+            .as_str()
+            .unwrap()
+            .replace("subagent_tokens", "total_tokens")
+            .replace(
+                "<result>",
+                "<result><usage><subagent_tokens>1</subagent_tokens></usage>",
+            )
+            .into();
+        assert!(parse_claude_notification_record(missing_usage).is_empty());
+        for origin in [
+            JsonValue::Null,
+            serde_json::json!({"kind": "user"}),
+            serde_json::json!({"kind": "task-notification"}),
+        ] {
+            let mut human = record.clone();
+            human["origin"] = origin;
+            human["promptSource"] = "user".into();
+            human["message"]["content"] = format!(
+                "Please explain this quoted XML, do not run it:\n{}",
+                human["message"]["content"].as_str().unwrap()
+            )
+            .into();
+            let events = parse_claude_notification_record(human);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].role, "user");
+            assert_eq!(events[0].kind, "message");
+            assert_eq!(events[0].message_origin, None);
+        }
+    }
+
+    #[test]
+    fn claude_subagent_missing_result_is_summary_only_and_bad_envelope_is_filtered() {
+        let record = claude_notification_fixture("subagent");
+        let body = record["message"]["content"].as_str().unwrap();
+        let start = body.find("<result>").unwrap();
+        let end = body.rfind("</result>").unwrap() + "</result>".len();
+        let mut no_result = record.clone();
+        no_result["message"]["content"] = format!("{}{}", &body[..start], &body[end..]).into();
+        let events = parse_claude_notification_record(no_result);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, extract_tag_block(body, "summary").unwrap());
+        assert_eq!(events[0].message_origin.as_deref(), Some("subagent"));
+        for closing_tag in ["</result>", "</usage>", "</task-notification>"] {
+            let mut broken = record.clone();
+            broken["message"]["content"] = body.replace(closing_tag, "").into();
+            assert!(parse_claude_notification_record(broken).is_empty());
+        }
+    }
+
+    #[test]
+    fn claude_subagent_later_result_for_same_task_keeps_its_native_event_id() {
+        let record = claude_notification_fixture("subagent");
+        let first = parse_claude_notification_record(record.clone());
+        assert_eq!(first.len(), 1);
+        let mut resumed = record;
+        resumed["uuid"] = "resumed-native-event".into();
+        let body = resumed["message"]["content"].as_str().unwrap();
+        let result = extract_tag_block(body, "result").unwrap();
+        resumed["message"]["content"] = body
+            .replace(result, "Second result for the same task.")
+            .into();
+        let second = parse_claude_notification_record(resumed);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].native_event_id, second[0].native_event_id);
+        assert_eq!(dedupe_native_events([first, second].concat()).len(), 2);
+    }
+
+    #[test]
+    fn claude_subagent_incremental_parser_does_not_rewrite_cached_user_event() {
+        let root = temp_violet_dir("claude-subagent-forward-only");
+        fs::create_dir_all(&root).unwrap();
+        let mut source = source();
+        source.kind = "claude-jsonl".into();
+        source.path = root.join("native.jsonl");
+        let record = claude_notification_fixture("subagent");
+        fs::write(&source.path, format!("{}\n", record)).unwrap();
+        // Seed the real incremental cache with the pre-fix user-text path.
+        let before = parse_jsonl_source_incremental(&root, &agent(), &source, |a, s, i, j| {
+            content_blocks_to_events(
+                a,
+                s,
+                "user",
+                j["timestamp"].as_str().unwrap(),
+                j["uuid"].as_str().unwrap_or(&i.to_string()),
+                &j["message"]["content"],
+            )
+            .into_iter()
+            .filter(|e| !is_harness_envelope_text(&e.text))
+            .collect()
+        })
+        .unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].role, "user");
+        let mut next = record;
+        next["uuid"] = "new-after-fix".into();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&source.path)
+            .unwrap()
+            .write_all(format!("{}\n", next).as_bytes())
+            .unwrap();
+        let after =
+            parse_jsonl_source_incremental(&root, &agent(), &source, parse_claude_line).unwrap();
+        assert_eq!(after.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&after[0]).unwrap(),
+            serde_json::to_value(&before[0]).unwrap()
+        );
+        assert_eq!(after[1].message_origin.as_deref(), Some("subagent"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "read-only replay requires KOTA_CLAUDE_NOTIFICATION_CAPTURE private JSONL"]
+    fn claude_subagent_private_capture_matches_redacted_fixture_contract() {
+        let path = std::env::var("KOTA_CLAUDE_NOTIFICATION_CAPTURE").expect("capture path");
+        let raw = fs::read_to_string(path).unwrap();
+        let captures: JsonValue =
+            serde_json::from_str(include_str!("fixtures/claude-task-notifications.json")).unwrap();
+        for kind in ["subagent", "background_command"] {
+            let fixture = captures[kind]["record"].clone();
+            let line = raw
+                .lines()
+                .find(|line| {
+                    serde_json::from_str::<JsonValue>(line)
+                        .ok()
+                        .is_some_and(|j| j["uuid"] == fixture["uuid"])
+                })
+                .expect("captured native UUID");
+            assert_eq!(
+                format!("{:x}", Sha256::digest(line.as_bytes())),
+                captures[kind]["captureSha256"]
+            );
+            let original = parse_claude_notification_record(serde_json::from_str(line).unwrap());
+            let redacted = parse_claude_notification_record(fixture);
+            assert_eq!(original.len(), redacted.len());
+            for (a, b) in original.iter().zip(&redacted) {
+                let mut a_json = serde_json::to_value(a).unwrap();
+                let mut b_json = serde_json::to_value(b).unwrap();
+                a_json.as_object_mut().unwrap().remove("text");
+                b_json.as_object_mut().unwrap().remove("text");
+                assert_eq!(a_json, b_json);
+                assert_eq!(a.text.chars().count(), b.text.chars().count());
+                assert_eq!(a.text.ends_with("..."), b.text.ends_with("..."));
+                assert_eq!(a.text.split("\n\n").next(), b.text.split("\n\n").next());
+            }
+        }
     }
 
     #[test]

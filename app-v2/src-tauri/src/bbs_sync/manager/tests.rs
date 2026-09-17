@@ -5,6 +5,7 @@ use crate::bbs_sync::{
 };
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::atomic::AtomicUsize};
+mod indicator;
 struct Root(PathBuf);
 impl Drop for Root {
     fn drop(&mut self) {
@@ -377,6 +378,7 @@ async fn fresh_status_panel_reads_and_bootstrap_create_no_sync_files_or_owned_wo
     assert!(!m.0.store.state.identity_path().parent().unwrap().exists());
     assert!(m.0.worker.lock().unwrap().is_none());
     assert!(m.0.network.lock().unwrap().is_none());
+    assert!(m.0.relay.lock().unwrap().is_none());
     assert_eq!(stub.calls.load(Ordering::Relaxed), 0);
     let error = m
         .start(public::Command {
@@ -483,6 +485,7 @@ async fn actual_roster_ipc_is_memory_only_and_avatar_read_is_device_scoped_with_
     assert!(
         manager.0.worker.lock().unwrap().is_none() && manager.0.network.lock().unwrap().is_none()
     );
+    assert!(manager.0.relay.lock().unwrap().is_none());
     assert!(
         !manager.0.store.state.identity_path().exists()
             && !manager.0.store.state.control_path().exists()
@@ -630,7 +633,7 @@ async fn admitted_manual_stays_visible_after_ack_until_real_work_or_cancel() {
     manager.start(command.clone()).await.unwrap();
     let accepted = manager.status();
     assert_eq!(accepted.sync.phase, public::Phase::Connecting);
-    assert!(accepted.sync.error.is_none());
+    assert_eq!(accepted.sync.error, before.sync.error, "admission is not recovery");
     assert!(accepted.sync.completed.is_none() && accepted.sync.total.is_none());
     assert!(manager.0.manual.load(Ordering::Acquire), "work really was queued");
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -1055,8 +1058,7 @@ async fn retry_takes_over_released_lease_and_projects_real_control_fixture() {
     manager.start(retry_command()).await.unwrap();
     wait_until(|| {
         let status = manager.status();
-        // Connecting now intentionally hides the prior error during accepted
-        // work. No error alone no longer proves that the heartbeat has settled.
+        // Only a real heartbeat settles control recovery, not Retry admission.
         status.group.members.len() == 2 && status.sync.error.is_none()
             && status.sync.phase == public::Phase::Idle
     })
@@ -1126,7 +1128,7 @@ async fn retry_takes_over_released_lease_and_projects_real_control_fixture() {
     );
     let started = manager.status();
     assert_eq!(started.sync.phase, public::Phase::Syncing);
-    assert!(started.sync.error.is_none());
+    assert_eq!(started.sync.error, retained_exchange.sync.error);
 
     let details = [
         "sync_unavailable",
@@ -1322,8 +1324,41 @@ async fn healthy_control_clears_only_control_errors_and_obeys_cancel_epoch() {
         0,
         Notice::Exchange(exchange::Event::Started("peer".into())),
     );
-    assert!(manager.status().sync.error.is_none());
+    assert_eq!(manager.status().sync.error, Some(public::display_error("sync_protocol_error")));
     assert_eq!(manager.status().sync.phase, public::Phase::Syncing);
+}
+
+#[test]
+fn idle_recovery_status_reads_never_restart_work_or_restore_an_old_failure() {
+    let (_root, manager, stub, fence) = grouped_fixture();
+    let (tx, _rx) = mpsc::sync_channel(1);
+    *manager.0.worker.lock().unwrap() = Some(Worker { generation: 1, tx });
+    manager.notice(&fence, 0, 0, Notice::Error("peer".into(), transport::Error::Timeout));
+    let failed = manager.status();
+    manager.notice(&fence, 0, 0, Notice::Connecting("peer".into()));
+    let connecting = manager.status();
+    // A new attempt or Started is not completion: only a complete Finished
+    // clears this peer's debt, and neither admission nor memory reads advance Last sync.
+    assert_eq!(connecting.sync.phase, public::Phase::Connecting);
+    assert_eq!(connecting.sync.indicator, public::Indicator::Connecting);
+    assert_eq!(connecting.sync.error, failed.sync.error);
+    assert_eq!(connecting.sync.last_successful_at, failed.sync.last_successful_at);
+    manager.notice(&fence, 0, 0, Notice::Exchange(exchange::Event::Started("peer".into())));
+    let started = manager.status();
+    for _ in 0..3 { assert_eq!(manager.status(), started, "closing/reopening the UI just rereads memory"); }
+    assert_eq!(started.sync.error, failed.sync.error);
+    assert_eq!(started.sync.indicator, public::Indicator::Connecting);
+    assert_eq!(started.sync.last_successful_at, failed.sync.last_successful_at);
+    manager.notice(&fence, 0, 0, Notice::Exchange(exchange::Event::Finished("peer".into(), exchange::Outcome::default())));
+    let recovered = manager.status();
+    assert_eq!(recovered.sync.phase, public::Phase::Idle);
+    assert_eq!(recovered.sync.indicator, public::Indicator::Healthy);
+    assert!(recovered.sync.error.is_none());
+    assert_ne!(recovered.sync.last_successful_at, failed.sync.last_successful_at);
+    assert_eq!(manager.status(), recovered);
+    assert!(!manager.0.manual.load(Ordering::Acquire));
+    assert_eq!(stub.calls.load(Ordering::Relaxed), 0);
+    println!("KOTA_BBS_IDLE_RECOVERY_FIXTURE={}", json!({"failed":failed,"connecting":connecting,"started":started,"recovered":recovered}));
 }
 
 #[tokio::test]

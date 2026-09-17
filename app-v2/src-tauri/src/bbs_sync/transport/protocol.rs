@@ -1,9 +1,9 @@
 //! A small credit protocol over reliable ordered channels, not a second retry
 //! protocol. Any impossible offset/ACK aborts; there is no partial replay.
+use super::BytePermit;
 use super::{file_io::CHUNK_BYTES, Error, Limits, Resource, Result, DATA_WINDOW, MAX_FRAME};
 use bytes::BytesMut;
 use std::collections::VecDeque;
-use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TransferId(pub(crate) [u8; 16]);
@@ -14,13 +14,19 @@ impl TransferId {
 }
 pub(crate) struct Frame {
     pub(crate) bytes: BytesMut,
-    _permit: OwnedSemaphorePermit,
+    _permit: BytePermit,
 }
 impl Frame {
     pub(crate) fn allocate(limits: &Limits) -> Result<Self> {
-        let permit = limits.reserve(MAX_FRAME)?;
+        Self::allocate_sized(limits, MAX_FRAME)
+    }
+    fn allocate_sized(limits: &Limits, capacity: usize) -> Result<Self> {
+        if capacity == 0 || capacity > MAX_FRAME {
+            return Err(Error::Protocol);
+        }
+        let permit = limits.reserve(capacity)?;
         Ok(Self {
-            bytes: BytesMut::with_capacity(MAX_FRAME),
+            bytes: BytesMut::with_capacity(capacity),
             _permit: permit,
         })
     }
@@ -62,8 +68,23 @@ pub(crate) enum Data<'a> {
     },
 }
 impl Data<'_> {
+    pub(crate) fn compact_capacity(&self) -> usize {
+        match self {
+            Self::Ready(_) => 17,
+            Self::Ack { .. } => 25,
+            Self::Finish { .. } => 49,
+            Self::Complete { .. } => 57,
+            _ => MAX_FRAME,
+        }
+    }
     pub(crate) fn encode(&self, limits: &Limits) -> Result<Frame> {
-        let mut frame = Frame::allocate(limits)?;
+        self.encode_sized(limits, MAX_FRAME)
+    }
+    pub(crate) fn encode_sized(&self, limits: &Limits, capacity: usize) -> Result<Frame> {
+        if capacity != MAX_FRAME && capacity != self.compact_capacity() {
+            return Err(Error::Protocol);
+        }
+        let mut frame = Frame::allocate_sized(limits, capacity)?;
         let (tag, id) = match self {
             Self::Begin { id, .. } => (1, id),
             Self::Ready(id) => (2, id),
@@ -141,7 +162,17 @@ pub(crate) enum Control<'a> {
     Credit(u64),
 }
 pub(crate) fn encode_control(value: Control<'_>, limits: &Limits) -> Result<Frame> {
-    let mut frame = Frame::allocate(limits)?;
+    encode_control_sized(value, limits, MAX_FRAME)
+}
+pub(crate) fn encode_control_sized(
+    value: Control<'_>,
+    limits: &Limits,
+    capacity: usize,
+) -> Result<Frame> {
+    if capacity != MAX_FRAME && !(matches!(value, Control::Credit(_)) && capacity == 9) {
+        return Err(Error::Protocol);
+    }
+    let mut frame = Frame::allocate_sized(limits, capacity)?;
     match value {
         Control::Message { seq, bytes } => {
             if bytes.len() > MAX_FRAME - 9 {

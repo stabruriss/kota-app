@@ -360,13 +360,15 @@ impl PendingConnection {
         );
         self.established = true;
         Ok(Connection {
-            pc: self.pc.clone(),
+            carrier: Carrier::Rtc {
+                pc: self.pc.clone(),
+                policy: self.policy.clone(),
+            },
             control,
             incoming: Mutex::new(incoming),
             data,
             cancel: self.cancel.clone(),
             authorized: self.authorized.clone(),
-            policy: self.policy.clone(),
         })
     }
 }
@@ -385,14 +387,20 @@ async fn wait_open(dc: &Arc<dyn DataChannel>) -> Result<()> {
         }
     }
 }
+enum Carrier {
+    Rtc {
+        pc: Arc<dyn PeerConnection>,
+        policy: Arc<NetworkPolicy>,
+    },
+    Relay,
+}
 pub(crate) struct Connection {
-    pc: Arc<dyn PeerConnection>,
+    carrier: Carrier,
     control: Arc<ControlChannel>,
     incoming: Mutex<mpsc::Receiver<Delivery>>,
     data: Arc<DataPipe>,
     cancel: Cancellation,
     authorized: MembershipCheck,
-    pub(super) policy: Arc<NetworkPolicy>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -400,6 +408,39 @@ impl Drop for Connection {
     }
 }
 impl Connection {
+    /// Adopts channels that already completed the inner TLS possession checks.
+    /// The existing channel owners retain the same credit, FileIo and member
+    /// fence. This constructor creates no peer connection, socket or worker.
+    pub(crate) fn from_relay(
+        control: Arc<ControlChannel>,
+        incoming: mpsc::Receiver<Delivery>,
+        data: Arc<DataPipe>,
+        cancel: Cancellation,
+        authorized: MembershipCheck,
+    ) -> Result<Self> {
+        require_network_thread()?;
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if !authorized() {
+            return Err(Error::Unauthorized);
+        }
+        Ok(Self {
+            carrier: Carrier::Relay,
+            control,
+            incoming: Mutex::new(incoming),
+            data,
+            cancel,
+            authorized,
+        })
+    }
+    #[cfg(test)]
+    pub(super) fn rtc_policy(&self) -> &Arc<NetworkPolicy> {
+        match &self.carrier {
+            Carrier::Rtc { policy, .. } => policy,
+            Carrier::Relay => panic!("relay has no RTC network policy"),
+        }
+    }
     #[cfg(test)]
     pub(super) async fn debug_queued(&self) -> (usize, usize) {
         (
@@ -462,9 +503,13 @@ impl Connection {
         self.recheck_membership()?;
         self.data.expect_file(resource, staging).await
     }
-    pub(crate) async fn diagnostics(&self) -> Result<Diagnostics> {
+    pub(crate) async fn diagnostics(&self) -> Result<Option<Diagnostics>> {
         require_network_thread()?;
-        let report = self.pc.get_stats(Instant::now(), StatsSelector::None).await;
+        let Carrier::Rtc { pc, policy } = &self.carrier else {
+            // No ICE candidates or datagram counters exist for this carrier.
+            return Ok(None);
+        };
+        let report = pc.get_stats(Instant::now(), StatsSelector::None).await;
         let selected = report.iter().find_map(|entry| match entry {
             RTCStatsReportEntry::Transport(t) => Some(t.selected_candidate_pair_id.clone()),
             _ => None,
@@ -480,14 +525,8 @@ impl Connection {
             remote_candidate_type: None,
             remote_candidate_type_basis: None,
             remote_address: None,
-            sent_bytes: self
-                .policy
-                .sent_bytes
-                .load(std::sync::atomic::Ordering::Relaxed),
-            denied_datagrams: self
-                .policy
-                .denied
-                .load(std::sync::atomic::Ordering::Relaxed),
+            sent_bytes: policy.sent_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            denied_datagrams: policy.denied.load(std::sync::atomic::Ordering::Relaxed),
         };
         if let Some(pair) = pair {
             for entry in report.iter() {
@@ -513,14 +552,14 @@ impl Connection {
         // installation omits remote stats rows entirely (trickle registers them).
         // Fall back to the destination actually used by the native DTLS socket
         // and its signed candidate type; ambiguous types remain unavailable.
-        if let Some((address, kind, basis)) = self.policy.observed_peer() {
+        if let Some((address, kind, basis)) = policy.observed_peer() {
             result.remote_address = Some(address.to_string());
             if result.remote_candidate_type.is_none() {
                 result.remote_candidate_type = Some(kind);
                 result.remote_candidate_type_basis = Some(basis.into());
             }
         }
-        Ok(result)
+        Ok(Some(result))
     }
 }
 #[derive(Debug, Clone, Serialize)]

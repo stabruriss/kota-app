@@ -25,6 +25,12 @@ import {
   verifyProof,
   type Proof,
 } from './bbs_auth';
+import { assertCurrent, authenticateRelay, exactObject, RELAY_JSON_BYTES, relayJson, readRelayInput,
+  relayTarget, type RelayMembers } from './bbs_relay_auth';
+import { applyMutation, pairKey, pollMetadata, prepareMutation, type RelayStorage } from './bbs_relay_metadata';
+import { RelayMemory } from './bbs_relay_memory';
+import { verifyOffer, verifySession, type Wake } from './bbs_relay_session';
+import { relayReceiveResponse } from './bbs_relay_envelope';
 
 const SIGNAL_TTL_MS = 120_000;
 const SIGNAL_LIMIT = 128;
@@ -75,6 +81,7 @@ function expectedGroup(body: Record<string, unknown>): string {
 
 /** Only control metadata lives here. The fixed `owner` instance coordinates group lifetimes. */
 export class BbsGroup extends DurableObject<Env> {
+  private readonly relay = new RelayMemory(crypto.randomUUID().replaceAll('-', ''));
   private group(id: string) {
     return this.env.BBS_GROUP.get(this.env.BBS_GROUP.idFromName(id));
   }
@@ -204,9 +211,122 @@ export class BbsGroup extends DurableObject<Env> {
       return result.response;
     });
   }
+  private async relayMembers(storage: Pick<DurableObjectStorage, 'get'> = this.ctx.storage): Promise<RelayMembers> {
+    const state = await storage.get<GroupReducerState>('state');
+    if (!state) throw new ControlError('removed', 409);
+    return {
+      groupId: state.groupId,
+      dissolved: state.dissolved,
+      members: Object.fromEntries(Object.entries(state.members).map(([id, m]) => [id, {
+        deviceId: m.deviceId, publicKey: m.publicKey, membershipId: m.membershipId,
+      }])),
+    };
+  }
+  private relayStorage(storage: Pick<DurableObjectStorage, 'get' | 'put' | 'getAlarm' | 'setAlarm'> = this.ctx.storage): RelayStorage {
+    return {
+      get: <T>(key: string) => storage.get<T>(key),
+      put: <T>(key: string, value: T) => storage.put(key, value),
+      getAlarm: () => storage.getAlarm(),
+      setAlarm: (at: number) => storage.setAlarm(at),
+    };
+  }
+  private async relayWakeMembers(wake: Wake): Promise<RelayMembers> {
+    // Crypto verification may overlap a newer wake. These storage reads share
+    // the DO input gate; no non-storage await separates them from the reducer.
+    const current = await this.ctx.storage.get<Wake>(pairKey(wake.client, wake.server));
+    const members = await this.relayMembers();
+    if (!current || JSON.stringify(current) !== JSON.stringify(wake))
+      throw new ControlError('relay_wake_changed', 409);
+    return members;
+  }
+  private async relayRequest(request: Request): Promise<Response> {
+    const now = Date.now();
+    const target = relayTarget(request);
+    const initialMembers = await this.relayMembers();
+    const input = await authenticateRelay(request, initialMembers, now);
+    if (!limiter.allow(input.proof.device, target.route, now, 1500))
+      throw new ControlError('rate_limited', 429);
+    // Ed25519 verification yields to the DO. Re-read membership after that
+    // await and serialize the final check with the relay mutation/read.
+    const verifiedMembers = await this.relayMembers();
+    const members = verifiedMembers;
+    if (target.route === 'poll') {
+      const page = await pollMetadata(input, members, this.relayStorage(), now);
+      const current = await this.relayMembers();
+      assertCurrent(input, current);
+      type Item = (typeof page.items)[number] & { handshake: ReturnType<RelayMemory['handshake']> | null };
+      const items: Item[] = [];
+      let next = page.next;
+      for (const row of page.items) {
+        const peer = current.members[row.device];
+        if (!peer) continue;
+        const unchanged = members.members[row.device]?.membershipId === peer.membershipId;
+        const wake = unchanged ? row.wake : null;
+        const item = { ...row,
+          announcement: row.announcement?.membership === peer.membershipId ? row.announcement : null,
+          currentWake: unchanged ? row.currentWake : null,
+          wake,
+          handshake: wake ? this.relay.handshake(input, current, wake, now) : null,
+        };
+        // Include the largest possible next cursor while checking encoded size.
+        // Never split or silently omit an otherwise valid declaration item.
+        const bytes = new TextEncoder().encode(JSON.stringify({ boot: this.relay.boot,
+          items: [...items, item], next: row.device }));
+        if (bytes.length > RELAY_JSON_BYTES) {
+          if (!items.length) throw new ControlError('invalid_relay_metadata', 413);
+          next = items[items.length - 1].device;
+          break;
+        }
+        items.push(item);
+      }
+      return response({ boot: this.relay.boot, items, next });
+    }
+    if (target.route === 'announce' || target.route === 'wake') {
+      const prepared = await prepareMutation(input);
+      // Wake ID hashing is asynchronous too: a removal may have completed
+      // after authentication. The member read and all receipt/nonce/row writes
+      // share a storage transaction with membership changes; no crypto await
+      // or boot-local side effect occurs in a retriable transaction callback.
+      const result = await this.ctx.storage.transaction(async (storage) =>
+        applyMutation(prepared, await this.relayMembers(storage), this.relayStorage(storage), now));
+      if (result.replacedWake) this.relay.replaceWake(result.replacedWake);
+      return response(result);
+    }
+    if (target.route === 'ready') {
+      const body = relayJson(input);
+      const wakeId = typeof (body as any).wake === 'string' ? (body as any).wake : '';
+      const rows = await this.ctx.storage.list<Wake>({ prefix: 'relay:wake:' });
+      const wake = [...rows.values()].find((w) => w.id === wakeId);
+      if (!wake) throw new ControlError('relay_wake_expired');
+      return response(this.relay.ready(input, await this.relayWakeMembers(wake), wake, now));
+    }
+    if (target.route === 'open') {
+      const body = exactObject(relayJson(input), ['client', 'server']);
+      const value = body as { client?: { statement?: { wake?: string } }; server?: { statement?: { wake?: string } } };
+      const wakeId = value.client?.statement?.wake ?? value.server?.statement?.wake ?? '';
+      const rows = await this.ctx.storage.list<Wake>({ prefix: 'relay:wake:' });
+      const wake = [...rows.values()].find((w) => w.id === wakeId);
+      if (!wake) throw new ControlError('relay_wake_expired');
+      if (body.server === null) {
+        const offer = await verifyOffer(body.client, target.origin, wake, input.proof.boot, members, now);
+        return response(this.relay.offer(input, await this.relayWakeMembers(wake), wake, offer, now));
+      }
+      const session = await verifySession(body, target.origin, wake, input.proof.boot, members, now);
+      return response(this.relay.open(input, await this.relayWakeMembers(wake), wake, session, now));
+    }
+    if (target.route === 'send') return response(this.relay.send(input, members, now));
+    if (target.route === 'ack') return response(this.relay.ack(input, members, now));
+    if (target.route === 'receive') return relayReceiveResponse(input, this.relay.receive(input, members, now));
+    throw new ControlError('not_found', 404);
+  }
   async fetch(request: Request): Promise<Response> {
     try {
       const path = new URL(request.url).pathname;
+      if (path.startsWith('/bbs/relay/')) {
+        if (!limiter.allow(request.headers.get('cf-connecting-ip') ?? 'local', '/bbs/relay', Date.now(), 3000))
+          throw new ControlError('rate_limited', 429);
+        return await this.relayRequest(request);
+      }
       const route = path.replace(/\/groups\/[^/]+\//, '/groups/:id/');
       if (
         !limiter.allow(
@@ -244,6 +364,11 @@ export class BbsGroup extends DurableObject<Env> {
             : { kind: match[2] as 'status' | 'heartbeat' };
       return reply(await this.apply(groupId, { kind: 'member', ...proof }, action, proof));
     } catch (error) {
+      if (new URL(request.url).pathname.startsWith('/bbs/relay/')) {
+        // Platform exceptions are not evidence of a daily quota or reset time.
+        return response({ ok: false, error: error instanceof ControlError ? error.code : 'relay_service_limit' },
+          error instanceof ControlError ? error.status : 503);
+      }
       return replyError(error);
     }
   }
@@ -425,7 +550,25 @@ export class BbsGroup extends DurableObject<Env> {
   }
   async alarm(): Promise<void> {
     const now = Date.now();
+    // Relay ready/session state is intentionally boot-local, but its bounded
+    // TTL still needs the DO alarm to retire idle or revoked entries. The
+    // durable signal/nonce cleanup below remains independent.
+    const members = await this.relayMembers().catch(() => null);
+    if (members) this.relay.sweep(members, now);
     let remaining = false;
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const [key, value] of await this.ctx.storage.list<unknown>({ prefix: 'relay:' })) {
+      const expiresAt = typeof value === 'number'
+        ? value
+        : value && typeof value === 'object' && typeof (value as { expiresAt?: unknown }).expiresAt === 'number'
+          ? (value as { expiresAt: number }).expiresAt
+          : null;
+      if (expiresAt !== null && expiresAt <= now) await this.ctx.storage.delete(key);
+      else if (expiresAt !== null) {
+        remaining = true;
+        earliest = Math.min(earliest, expiresAt);
+      }
+    }
     for (const [key, signal] of await this.ctx.storage.list<Signal>({ prefix: 'signal:' })) {
       if (signal.expiresAt <= now) await this.ctx.storage.delete(key);
       else remaining = true;
@@ -434,7 +577,9 @@ export class BbsGroup extends DurableObject<Env> {
       if (expiresAt <= now) await this.ctx.storage.delete(key);
       else remaining = true;
     }
-    if (remaining) await this.ctx.storage.setAlarm(now + SIGNAL_TTL_MS);
+    if (remaining) await this.ctx.storage.setAlarm(
+      Number.isFinite(earliest) ? earliest : now + SIGNAL_TTL_MS,
+    );
   }
 }
 async function consumeNonce(
@@ -463,6 +608,12 @@ function replyError(error: unknown): Response {
 }
 export async function routeBbs(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname.startsWith('/bbs/relay/')) {
+    const groupId = url.searchParams.get('group');
+    if (!groupId || !/^[A-Za-z0-9_-]{16,80}$/.test(groupId))
+      return response(failure('invalid_relay_group'), 400);
+    return env.BBS_GROUP.get(env.BBS_GROUP.idFromName(groupId)).fetch(request);
+  }
   if (url.search) return response(failure('invalid_url'), 400);
   const group = url.pathname.match(/^\/bbs\/groups\/([A-Za-z0-9_-]{16,80})\//);
   if (

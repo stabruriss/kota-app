@@ -6,7 +6,9 @@ import {
 } from '../bbs-sync-view';
 import '../styles/bbs-sync.css';
 import { BBS_SYNC_ERROR_DETAILS } from '../bbs-sync-errors';
-import { BbsSyncError } from './BbsSyncError';
+import { bbsSyncIndicatorForView } from '../bbs-sync-indicator';
+import type { BbsSyncIndicator as Indicator } from '../types/bbs-sync';
+import { BbsSyncIndicator } from './BbsSyncIndicator';
 
 type IconKind = 'devices' | 'refresh' | 'copy' | 'close' | 'lock';
 
@@ -54,41 +56,47 @@ export function BbsSyncManageButton({ view, expanded = false, onManage }: {
 
 /** Pure controls: opening BBS never starts a sync through this component. */
 export function BbsSyncStatusBar({ view, pending = false, request = null,
-  error = view.error ?? (view.phase === 'failed' ? BBS_SYNC_ERROR_DETAILS.unknown : null), onSync, onCancel }: {
+  error = view.error ?? (view.phase === 'failed' ? BBS_SYNC_ERROR_DETAILS.unknown : null),
+  indicator, detail, expiredRequest = false, onSync }: {
   view: BbsSyncView;
   pending?: boolean;
   /** Local command feedback only; does not fabricate a backend round/progress. */
-  request?: 'start' | 'cancel' | null;
+  request?: 'start' | null;
   /** One merged status/action/read error, including when no group is available. */
   error?: string | null;
+  indicator?: Indicator;
+  detail?: string | null;
+  expiredRequest?: boolean;
   onSync: () => void;
-  onCancel: () => void;
 }) {
-  if (!view.group && !error) return null;
-  const busy = !view.controlRecoverable && (view.phase === 'connecting' || view.phase === 'syncing');
+  const visibleIndicator = indicator ?? bbsSyncIndicatorForView(view);
+  if (!view.group && !error && visibleIndicator === 'healthy') return null;
+  // Real exchange progress can coexist with a recovering control worker.
+  // Keep the actual transfer visible; the recovery lamp is independent.
+  const busy = view.phase === 'syncing' || (!view.controlRecoverable && view.phase === 'connecting');
   const waiting = request !== null;
   const peerCount = bbsSyncOnlinePeers(view);
-  const needsPeer = peerCount === 0 && !view.controlRecoverable;
-  const label = request === 'cancel' ? 'Cancelling…' : busy && view.phase === 'connecting' ? 'Connecting…'
-    : busy ? view.progress ? `Syncing ${view.progress.completed}/${view.progress.total}` : 'Syncing…'
-      : request === 'start' ? 'Starting…'
-        : view.controlRecoverable || view.phase === 'partial' || view.phase === 'failed' ? 'Retry sync' : 'Manual sync';
+  const needsPeer = peerCount === 0 && !view.controlRecoverable && !view.serviceRecoverable;
+  const label = busy && view.phase === 'syncing'
+    ? view.progress ? `Syncing ${view.progress.completed}/${view.progress.total}` : 'Syncing…'
+    : request === 'start' ? 'Starting…' : 'Manual sync';
   const syncButton = (
     <button type="button" className={`bbs-sync-now ${view.phase}`} onClick={onSync}
       aria-busy={waiting || busy} disabled={pending || waiting || busy || needsPeer}>
-      {busy || waiting ? <span className="bbs-sync-spinner" aria-hidden="true" /> : <Icon kind="refresh" />}{label}
+      {view.phase === 'syncing' || waiting ? <span className="bbs-sync-spinner" aria-hidden="true" /> : <Icon kind="refresh" />}{label}
     </button>
   );
   return (
     <div className="bbs-sync-controls">
-      {view.group && <div className="bbs-sync-round">
-        <span className="bbs-sync-online">{view.group.members.filter((member) => member.online).length} online</span>
-        {view.phase === 'partial' && !error && <span className="bbs-sync-result partial" role="status">Partially synced</span>}
-        <span className="bbs-sync-last">{bbsSyncTimeLabel(view.lastSuccessfulAt)}</span>
-        {needsPeer ? <Hint text="No other device online now.">{syncButton}</Hint> : syncButton}
-        {busy && <button type="button" className="bbs-sync-cancel" onClick={onCancel} disabled={pending || waiting}>Cancel</button>}
-      </div>}
-      {error && <BbsSyncError detail={error} />}
+      <div className="bbs-sync-round">
+        <BbsSyncIndicator indicator={visibleIndicator}
+          online={view.group?.members.filter((member) => member.online).length ?? 0}
+          detail={detail ?? (view.indicator === undefined ? error : null)} expiredRequest={expiredRequest} />
+        {view.group && <>
+          <span className="bbs-sync-last">{bbsSyncTimeLabel(view.lastSuccessfulAt)}</span>
+          {needsPeer ? <Hint text="No other device online now.">{syncButton}</Hint> : syncButton}
+        </>}
+      </div>
     </div>
   );
 }

@@ -31,7 +31,7 @@ const STANDBY_LOOP_SECS: u64 = 30;
 const STANDBY_PULL_LIMIT: usize = 20;
 const STANDBY_SEEN_RING_MAX: usize = 600;
 pub(crate) const STANDBY_PROTOCOL: &str = "kota-lm-standby.v1";
-pub(crate) const STANDBY_RECOMMENDED_VERSION: &str = "0.1.3";
+pub(crate) const STANDBY_RECOMMENDED_VERSION: &str = "0.1.4";
 const API_BASE: &str = "https://api.telegram.org";
 const MAX_TELEGRAM_TEXT_CHARS: usize = 3_800;
 const MAX_LOG_ENTRIES: usize = 500;
@@ -4055,7 +4055,7 @@ mod tests {
         };
         let old = standby_status_from_config(&config);
         assert!(old.update_available);
-        assert_eq!(old.recommended_version, "0.1.3");
+        assert_eq!(old.recommended_version, "0.1.4");
         // Same update performed by the existing heartbeat loop after an upgrade.
         config.relay_version = Some(STANDBY_RECOMMENDED_VERSION.into());
         assert!(!standby_status_from_config(&config).update_available);

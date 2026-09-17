@@ -6,7 +6,7 @@ import { useBbsSyncView, type BbsSyncViewSource } from '../src/chrome/useBbsSync
 const snapshot = (groupId: string | null = 'group-one'): BbsSyncView => ({
   deviceId: 'self', deviceName: 'Mac', workerAvailable: false, invitation: { state: 'none' },
   group: groupId ? { id: groupId, name: 'Group', role: 'member', members: [] } : null,
-  phase: 'idle', progress: null, lastSuccessfulAt: null, error: null, controlRecoverable: false,
+  phase: 'idle', progress: null, lastSuccessfulAt: null, error: null, controlRecoverable: false, serviceRecoverable: false,
 });
 
 function deferred<T>() {

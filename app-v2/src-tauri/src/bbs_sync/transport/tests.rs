@@ -108,8 +108,10 @@ async fn pair() -> Pair {
     );
     let a = Arc::new(a.unwrap());
     let b = Arc::new(b.unwrap());
-    a.policy.forbid_plaintext(b"KOTA-BBS-PLAINTEXT-TEST-MARKER");
-    b.policy.forbid_plaintext(b"KOTA-BBS-PLAINTEXT-TEST-MARKER");
+    a.rtc_policy()
+        .forbid_plaintext(b"KOTA-BBS-PLAINTEXT-TEST-MARKER");
+    b.rtc_policy()
+        .forbid_plaintext(b"KOTA-BBS-PLAINTEXT-TEST-MARKER");
     Pair {
         a,
         b,
@@ -226,7 +228,8 @@ async fn product_control_stops_at_credit_window_and_loses_no_message_when_consum
         let d = host
             .execute(move |_| async move { c.diagnostics().await })
             .await
-            .unwrap();
+            .unwrap()
+            .expect("RTC diagnostics remain available");
         assert_eq!(d.denied_datagrams, 0);
         assert!(d.sent_bytes > 0);
         assert_eq!(d.local_candidate_type.as_deref(), Some("host"));
@@ -306,8 +309,8 @@ async fn product_file_window_stalls_with_zero_writes_control_keeps_working_then_
     );
     drop(verified);
     root.assert_clean().await;
-    assert_eq!(p.a.policy.denied.load(Ordering::Relaxed), 0);
-    assert_eq!(p.b.policy.denied.load(Ordering::Relaxed), 0);
+    assert_eq!(p.a.rtc_policy().denied.load(Ordering::Relaxed), 0);
+    assert_eq!(p.b.rtc_policy().denied.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

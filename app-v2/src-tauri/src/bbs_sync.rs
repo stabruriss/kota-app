@@ -3,6 +3,7 @@ pub mod control;
 pub(crate) mod roster;
 pub(crate) mod reconcile;
 pub(crate) mod transport;
+pub(crate) mod relay;
 pub(crate) mod scheduler;
 pub(crate) mod rendezvous;
 pub(crate) mod public;

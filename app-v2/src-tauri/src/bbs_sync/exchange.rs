@@ -5,12 +5,13 @@ use super::{
     public::Failure,
     reconcile::{self, Catalog, Issue, ManifestReader},
     transport::{self, Cancellation, Connection, Context, Error, Resource, ResourceKind, Result},
-    Manifest, ManifestPhase, PostVersion,
+    valid_hash, Manifest, ManifestPhase, PostVersion,
 };
 use crate::bbs::sync::{ContentStore, GroupFence};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -19,9 +20,11 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 
+mod delta;
+
 const MAX_JOBS: usize = 32;
 // v3 adds direct-peer Roster RPC after the four content phases.
-const EXCHANGE_PROTOCOL_VERSION: u32 = 3;
+const EXCHANGE_PROTOCOL_VERSION: u32 = 4;
 const MAX_FAILURES: usize = 128;
 const PAGE_BUDGET: usize = 12_000;
 const PLAN_BUDGET: usize = 256 * 1024;
@@ -136,6 +139,8 @@ enum Request {
     Open {
         protocol_version: u32,
         round: String,
+        revision: String,
+        checkpoint: Option<String>,
     },
     Page {
         round: String,
@@ -189,6 +194,13 @@ struct Trace {
     incoming: Option<&'static str>,
     incoming_id: u64,
     remote_protocol: Option<u32>,
+    // Bounded wire evidence for checkpoint tests; absent from production and logs.
+    #[cfg(test)]
+    #[serde(skip)]
+    last_open: Option<(String, Option<String>)>,
+    #[cfg(test)]
+    #[serde(skip)]
+    manifest_items: [u64; 4],
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
@@ -214,6 +226,8 @@ enum Answer {
     Open {
         #[serde(rename = "protocolVersion")]
         protocol_version: u32,
+        revision: String,
+        checkpoint: Option<String>,
         failures: Vec<Failure>,
         omitted: u64,
     },
@@ -230,16 +244,25 @@ struct Pending {
 struct Session {
     id: Option<String>,
     stage: u8,
+    revision: String,
+    peer_revision: Option<String>,
     _permit: Option<OwnedSemaphorePermit>,
     done: Option<oneshot::Sender<Outcome>>,
     catalog: Option<Arc<Catalog>>,
     roster: Option<Arc<roster::wire::Local>>,
+    pages: Option<Arc<Catalog>>,
+    snapshot: Option<Snapshot>,
+    delta: Option<delta::Start>,
+    full: bool,
 }
 #[derive(Clone)]
 struct Snapshot {
     catalog: Arc<Catalog>,
+    roster: Option<Arc<roster::wire::Local>>,
+    revision: String,
     issues: Vec<Failure>,
     omitted: u64,
+    cache_bytes: Option<usize>,
 }
 /// All peers share these permits and one immutable source snapshot. Refreshing
 /// the snapshot uses the same file worker as transfers and blocks new rounds.
@@ -249,11 +272,21 @@ pub(crate) struct Engine {
     pub context: Context,
     rounds: Arc<Semaphore>,
     snapshot: Mutex<Option<Snapshot>>,
+    /// Last fully confirmed remote revision, scoped by device for this boot.
+    /// This is a rebuildable hint, never content authority.
+    checkpoints: Mutex<BTreeMap<String, String>>,
+    delta: Mutex<delta::Cache>,
     pub yield_requested: AtomicBool,
     observe: Observe,
     pub(crate) roster: Option<Arc<roster::runtime::Runtime>>,
+    #[cfg(test)]
+    manifest_items: [AtomicU64; 4],
 }
 impl Engine {
+    #[cfg(test)]
+    pub(crate) fn manifest_counts(&self) -> [u64; 4] {
+        std::array::from_fn(|i| self.manifest_items[i].load(Ordering::Relaxed))
+    }
     pub(crate) fn new(
         store: ContentStore,
         fence: GroupFence,
@@ -266,9 +299,13 @@ impl Engine {
             context,
             rounds: Arc::new(Semaphore::new(1)),
             snapshot: Mutex::new(None),
+            checkpoints: Mutex::new(BTreeMap::new()),
+            delta: Mutex::new(delta::Cache::default()),
             yield_requested: AtomicBool::new(false),
             observe,
             roster: None,
+            #[cfg(test)]
+            manifest_items: std::array::from_fn(|_| AtomicU64::new(0)),
         })
     }
     pub(crate) async fn refresh(&self, cancel: &Cancellation) -> Result<()> {
@@ -279,34 +316,83 @@ impl Engine {
             .map_err(|_| Error::Busy)?;
         let store = self.store.clone();
         let fence = self.fence.clone();
-        let (catalog, issues) = self
+        let roster = self.roster.as_ref().and_then(|r| r.source());
+        let flush = self.delta.lock().map_err(|_| Error::Runtime)?.flush(&store.state);
+        let generation = flush.generation;
+        let (snapshot, cached) = self
             .context
             .io
             .run_in_round(cancel, move |io| -> anyhow::Result<_> {
                 store.recover_staging(io)?;
                 let issues = store.refresh(&fence, io)?;
-                Ok((store.catalog(&fence)?, issues))
+                let catalog = store.catalog(&fence)?;
+                let revision = catalog
+                    .revision_with_roster(roster.as_ref().map(|r| r.version.as_str()));
+                let cache_bytes = delta::cache_bytes(&catalog);
+                let cached = flush.run(io).map_err(anyhow::Error::new)?;
+                let mut outcome = Outcome::default();
+                outcome.issues("local", issues);
+                Ok((Snapshot {
+                    catalog: Arc::new(catalog),
+                    roster,
+                    revision,
+                    issues: outcome.failures,
+                    omitted: outcome.omitted,
+                    cache_bytes,
+                }, cached))
             })
             .await?
             .map_err(|_| Error::Io)?;
-        let mut outcome = Outcome::default();
-        outcome.issues("local", issues);
-        *self.snapshot.lock().map_err(|_| Error::Runtime)? = Some(Snapshot {
-            catalog: Arc::new(catalog),
-            issues: outcome.failures,
-            omitted: outcome.omitted,
-        });
+        *self.snapshot.lock().map_err(|_| Error::Runtime)? = Some(snapshot);
+        self.delta.lock().map_err(|_| Error::Runtime)?.flushed(generation, cached);
         Ok(())
     }
-    async fn current_catalog(&self, cancel: &Cancellation) -> Result<Arc<Catalog>> {
-        let s = self.store.clone();
-        let f = self.fence.clone();
-        self.context
-            .io
-            .run_in_round(cancel, move |_| s.catalog(&f))
-            .await?
-            .map(Arc::new)
-            .map_err(|_| Error::Io)
+
+    pub(crate) fn revision(&self) -> Result<String> {
+        self.snapshot.lock().map_err(|_| Error::Runtime)?.as_ref()
+            .map(|s| s.revision.clone()).ok_or(Error::Busy)
+    }
+    pub(crate) fn forget_checkpoint(&self, remote: &str) {
+        if let Ok(mut values) = self.checkpoints.lock() { values.remove(remote); }
+        if let Ok(mut cache) = self.delta.lock() { cache.forget(remote); }
+    }
+    pub(crate) fn catalog_members(&self, peers: impl IntoIterator<Item = transport::PeerIdentity>) {
+        if let Ok(mut cache) = self.delta.lock() { cache.members(peers); }
+    }
+    pub(crate) fn force_full_catalogs(&self) {
+        if let Ok(mut cache) = self.delta.lock() { cache.force_full(); }
+    }
+    pub(crate) fn full_catalog_due(&self, remote: &str) -> bool {
+        self.delta.lock().is_ok_and(|cache| cache.due(remote, std::time::Instant::now()))
+    }
+    fn delta_start(&self, remote: &str) -> Result<Option<delta::Start>> {
+        let checkpoint = self.checkpoint(remote)?;
+        Ok(self.delta.lock().map_err(|_| Error::Runtime)?
+            .start(remote, checkpoint, std::time::Instant::now()))
+    }
+    pub(crate) fn checkpoint(&self, remote: &str) -> Result<Option<String>> {
+        Ok(self
+            .checkpoints
+            .lock()
+            .map_err(|_| Error::Runtime)?
+            .get(remote)
+            .cloned())
+    }
+
+    fn confirm_checkpoint(&self, remote: &str, revision: &str) -> Result<()> {
+        valid_hash(revision).map_err(|_| Error::Protocol)?;
+        self.checkpoints
+            .lock()
+            .map_err(|_| Error::Runtime)?
+            .insert(remote.to_owned(), revision.to_owned());
+        Ok(())
+    }
+    fn completed_catalog(&self, session: &Session) -> Result<()> {
+        if let (Some(start), Some(snapshot)) = (&session.delta, &session.snapshot) {
+            self.delta.lock().map_err(|_| Error::Runtime)?.complete(start,
+                snapshot.clone(), session.full, std::time::Instant::now());
+        }
+        Ok(())
     }
 }
 pub(crate) struct Link {
@@ -326,6 +412,8 @@ pub(crate) struct Link {
     reported: AtomicBool,
     roster_unavailable: AtomicBool,
     trace: Mutex<Trace>,
+    #[cfg(test)]
+    finish_credit: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 impl Link {
     fn emit(&self, event: Event) {
@@ -356,23 +444,30 @@ impl Link {
             reported: AtomicBool::new(false),
             roster_unavailable: AtomicBool::new(false),
             trace: Mutex::new(Trace::default()),
+            #[cfg(test)]
+            finish_credit: Mutex::new(None),
         });
         let (tx, rx) = mpsc::channel(1);
+        // Transport cancellation can make a loop return Ok. Every exit must
+        // release round state, without waiting for coordinator pruning.
         let l = link.clone();
         tokio::spawn(async move {
             if let Err(e) = l.pump(tx).await {
                 l.fail_at("control_receive", e)
             }
+            l.cancel();
         });
         let l = link.clone();
         tokio::spawn(async move {
             if let Err(e) = l.clone().serve(rx).await {
                 l.fail_at("serve", e)
             }
+            l.cancel();
         });
         let l = link.clone();
         tokio::spawn(async move {
             l.progress().await;
+            l.cancel();
         });
         link
     }
@@ -411,6 +506,13 @@ impl Link {
     }
     pub(crate) fn active(&self) -> bool {
         self.session.lock().map(|s| s.id.is_some()).unwrap_or(true)
+    }
+    #[cfg(test)]
+    pub(crate) fn defer_finish_credit(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, observed) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        *self.finish_credit.lock().unwrap() = Some((reached, released));
+        (observed, release)
     }
     pub(crate) async fn changed(&self) -> Result<()> {
         self.send(Packet::Changed).await
@@ -466,6 +568,10 @@ impl Link {
                         if let Request::Open { protocol_version, .. } = &body {
                             trace.remote_protocol = Some(*protocol_version);
                         }
+                        #[cfg(test)]
+                        if let Request::Open { revision, checkpoint, .. } = &body {
+                            trace.last_open = Some((revision.clone(), checkpoint.clone()));
+                        }
                     }
                     let slot = requests.try_reserve().map_err(|_| Error::Protocol)?;
                     // Return credits in wire order, after parsing and bounded
@@ -476,6 +582,10 @@ impl Link {
                     if let Answer::Open { protocol_version, .. } = &body {
                         self.trace.lock().unwrap().remote_protocol = Some(*protocol_version);
                     }
+                    #[cfg(test)]
+                    if let Answer::Open { revision, checkpoint, .. } = &body {
+                        self.trace.lock().unwrap().last_open = Some((revision.clone(), checkpoint.clone()));
+                    }
                     let pending = self
                         .pending
                         .lock()
@@ -483,6 +593,22 @@ impl Link {
                         .take()
                         .filter(|p| p.id == id)
                         .ok_or(Error::Protocol)?;
+                    #[cfg(test)]
+                    let gate = if matches!(body, Answer::Ok)
+                        && self.trace.lock().unwrap().outgoing == Some("finish")
+                    {
+                        self.finish_credit.lock().unwrap().take()
+                    } else {
+                        None
+                    };
+                    #[cfg(test)]
+                    let (retained, deferred) = if gate.is_some() {
+                        let (retained, credit) = delivery.defer_credit();
+                        (retained, Some(credit))
+                    } else {
+                        (delivery.acknowledge_retaining()?, None)
+                    };
+                    #[cfg(not(test))]
                     let retained = delivery.acknowledge_retaining()?;
                     pending
                         .reply
@@ -491,6 +617,15 @@ impl Link {
                             _delivery: retained,
                         }))
                         .map_err(|_| Error::Closed)?;
+                    #[cfg(test)]
+                    if let Some((reached, release)) = gate {
+                        let _ = reached.send(());
+                        tokio::select! {
+                            _ = self.stop.cancelled() => return Ok(()),
+                            value = release => value.map_err(|_| Error::Closed)?,
+                        }
+                        deferred.expect("gated credit")()?;
+                    }
                 }
                 Packet::Changed => {
                     delivery.acknowledge()?;
@@ -554,6 +689,8 @@ impl Link {
                 Request::Open {
                     protocol_version,
                     round,
+                    revision,
+                    checkpoint,
                 } => {
                     check_protocol_version(protocol_version)?;
                     if self.smaller
@@ -567,6 +704,11 @@ impl Link {
                     if self.active() {
                         return Err(Error::Protocol);
                     }
+                    if valid_hash(&revision).is_err()
+                        || checkpoint.as_deref().is_some_and(|v| valid_hash(v).is_err())
+                    {
+                        return Err(Error::Protocol);
+                    }
                     let permit = self.engine.rounds.clone().try_acquire_owned();
                     let snapshot = self
                         .engine
@@ -575,12 +717,25 @@ impl Link {
                         .map_err(|_| Error::Runtime)?
                         .clone();
                     if let (Ok(permit), Some(snapshot)) = (permit, snapshot) {
+                        let delta = self.engine.delta_start(&self.remote)?;
+                        let (pages, incremental) = delta.as_ref()
+                            .map(|d| d.select(&snapshot, checkpoint.as_deref()))
+                            .unwrap_or((snapshot.catalog.clone(), false));
+                        let answer_checkpoint = if incremental {
+                            delta.as_ref().and_then(|d| d.checkpoint.clone())
+                        } else { None };
                         *self.session.lock().map_err(|_| Error::Runtime)? = Session {
                             id: Some(round),
                             stage: 1,
+                            revision: snapshot.revision.clone(),
+                            peer_revision: Some(revision),
                             _permit: Some(permit),
-                            catalog: Some(snapshot.catalog),
-                            roster: self.engine.roster.as_ref().and_then(|r| r.source()),
+                            catalog: Some(snapshot.catalog.clone()),
+                            roster: snapshot.roster.clone(),
+                            pages: Some(pages),
+                            snapshot: Some(snapshot.clone()),
+                            delta,
+                            full: !incremental,
                             done: None,
                         };
                         self.emit(Event::Started(self.remote.clone()));
@@ -588,6 +743,8 @@ impl Link {
                             id,
                             body: Answer::Open {
                                 protocol_version: EXCHANGE_PROTOCOL_VERSION,
+                                revision: snapshot.revision,
+                                checkpoint: answer_checkpoint,
                                 omitted: snapshot.omitted
                                     + snapshot.issues.len().saturating_sub(16) as u64,
                                 failures: snapshot.issues.into_iter().take(16).collect(),
@@ -607,10 +764,20 @@ impl Link {
                     phase,
                     after,
                 } => {
-                    let catalog = self.catalog_for(&round)?;
+                    let _ = self.catalog_for(&round)?;
+                    let catalog = self.session.lock().map_err(|_| Error::Runtime)?
+                        .pages.clone().ok_or(Error::Protocol)?;
                     let (page, issues) = catalog
                         .page_with_budget(phase, after.as_ref(), PAGE_BUDGET)
                         .map_err(|_| Error::Protocol)?;
+                    #[cfg(test)]
+                    {
+                        let index = match phase { ManifestPhase::Tombstones => 0,
+                            ManifestPhase::Threads => 1, ManifestPhase::Versions => 2,
+                            ManifestPhase::Unavailable => 3 };
+                        self.trace.lock().unwrap().manifest_items[index] += page.items.len() as u64;
+                        self.engine.manifest_items[index].fetch_add(page.items.len() as u64, Ordering::Relaxed);
+                    }
                     let count = issues.len();
                     let failures = issues
                         .into_iter()
@@ -649,14 +816,13 @@ impl Link {
                     let store = self.engine.store.clone();
                     let fence = self.engine.fence.clone();
                     let r = resource.clone();
-                    let roster = self.engine.roster.clone();
+                    let roster = self.session.lock().map_err(|_| Error::Runtime)?.roster.clone();
                     let path = self
                         .engine
                         .context
                         .io
                         .run(&self.stop, move |_| {
-                            let current = roster.as_ref().and_then(|r| r.source());
-                            store.source_for_exchange(&fence, &r, &catalog, current.as_deref())
+                            store.source_for_exchange(&fence, &r, &catalog, roster.as_deref())
                         })
                         .await;
                     match path {
@@ -708,6 +874,25 @@ impl Link {
                                     .await;
                                 match expect_ok(sent.map(|response| response.answer)) {
                                     Ok(()) => {
+                                        let peer_revision = link
+                                            .session
+                                            .lock()
+                                            .ok()
+                                            .and_then(|s| s.peer_revision.clone());
+                                        if outcome.failures.is_empty()
+                                            && outcome.omitted == 0
+                                            && !outcome.more
+                                            && outcome.completed == outcome.total
+                                        {
+                                            if let Some(peer_revision) = peer_revision {
+                                                let _ = link.engine.confirm_checkpoint(
+                                                    &link.remote,
+                                                    &peer_revision,
+                                                );
+                                                let s = link.session.lock().unwrap();
+                                                let _ = link.engine.completed_catalog(&s);
+                                            }
+                                        }
                                         *link.session.lock().unwrap() = Session::default();
                                         link.emit(Event::Finished(link.remote.clone(), outcome));
                                     }
@@ -765,6 +950,8 @@ impl Link {
             .clone()
             .ok_or(Error::Busy)?;
         let round = uuid::Uuid::new_v4().to_string();
+        let delta = self.engine.delta_start(&self.remote)?;
+        let checkpoint = delta.as_ref().and_then(|d| d.checkpoint.clone());
         let (done, mut finished) = oneshot::channel();
         {
             let mut s = self.session.lock().map_err(|_| Error::Runtime)?;
@@ -774,18 +961,33 @@ impl Link {
             *s = Session {
                 id: Some(round.clone()),
                 stage: 1,
+                revision: snapshot.revision.clone(),
+                peer_revision: None,
                 _permit: Some(permit),
-                catalog: Some(snapshot.catalog),
+                catalog: Some(snapshot.catalog.clone()),
                 done: Some(done),
-                roster: self.engine.roster.as_ref().and_then(|r| r.source()),
+                roster: snapshot.roster.clone(),
+                pages: Some(snapshot.catalog.clone()),
+                snapshot: Some(snapshot.clone()),
+                delta,
+                full: true,
             };
         }
+        let revision = self
+            .session
+            .lock()
+            .map_err(|_| Error::Runtime)?
+            .revision
+            .clone();
         let mut peer_declined = false;
+        let mut remote_revision = None;
         let result = async {
             let response = self
                 .rpc(Request::Open {
                     protocol_version: EXCHANGE_PROTOCOL_VERSION,
                     round: round.clone(),
+                    revision: revision.clone(),
+                    checkpoint: checkpoint.clone(),
                 })
                 .await?;
             let mut outcome = Outcome::default();
@@ -796,10 +998,29 @@ impl Link {
                 }
                 Answer::Open {
                     protocol_version,
+                    revision,
+                    checkpoint,
                     failures,
                     omitted,
                 } => {
                     check_protocol_version(protocol_version)?;
+                    if valid_hash(&revision).is_err()
+                        || checkpoint.as_deref().is_some_and(|v| valid_hash(v).is_err())
+                    {
+                        return Err(Error::Protocol);
+                    }
+                    remote_revision = Some(revision);
+                    {
+                        let mut session = self.session.lock().map_err(|_| Error::Runtime)?;
+                        let (pages, _) = session.delta.as_ref()
+                            .map(|d| d.select(&snapshot, checkpoint.as_deref()))
+                            .unwrap_or((snapshot.catalog.clone(), false));
+                        session.pages = Some(pages);
+                        // A null response requests full in both directions.
+                        // Mismatched non-null baselines only force our outbound
+                        // full; do not falsely claim a full inbound repair.
+                        session.full = checkpoint.is_none();
+                    }
                     if failures.len() > 16 {
                         return Err(Error::Protocol);
                     }
@@ -818,11 +1039,11 @@ impl Link {
             drop(response._delivery);
             self.emit(Event::Started(self.remote.clone()));
             outcome.merge(self.pull(&round).await?);
-            let catalog = self.engine.current_catalog(&self.stop).await?;
             {
                 let mut session = self.session.lock().map_err(|_| Error::Runtime)?;
                 session.stage = 2;
-                session.catalog = Some(catalog);
+                // Keep the catalog and roster named by Open for both halves.
+                // Installs and local changes are offered after the next refresh.
             }
             if !matches!(self.rpc(Request::Turn { round }).await?.answer, Answer::Ok) {
                 return Err(Error::Protocol);
@@ -842,6 +1063,17 @@ impl Link {
                         }
                         progress = next;
                     }
+                }
+            }
+            if outcome.failures.is_empty()
+                && outcome.omitted == 0
+                && !outcome.more
+                && outcome.completed == outcome.total
+            {
+                if let Some(remote_revision) = remote_revision.as_deref() {
+                    self.engine.confirm_checkpoint(&self.remote, remote_revision)?;
+                    let session = self.session.lock().map_err(|_| Error::Runtime)?;
+                    self.engine.completed_catalog(&session)?;
                 }
             }
             Ok(outcome)

@@ -10767,6 +10767,16 @@ const LM_STANDBY_BBS_AUTH_TS: &str =
     include_str!("../../../relays/laughing-man-cloudflare/src/bbs_auth.ts");
 const LM_STANDBY_BBS_GROUP_TS: &str =
     include_str!("../../../relays/laughing-man-cloudflare/src/bbs_group.ts");
+const LM_STANDBY_BBS_RELAY_AUTH_TS: &str =
+    include_str!("../../../relays/laughing-man-cloudflare/src/bbs_relay_auth.ts");
+const LM_STANDBY_BBS_RELAY_MEMORY_TS: &str =
+    include_str!("../../../relays/laughing-man-cloudflare/src/bbs_relay_memory.ts");
+const LM_STANDBY_BBS_RELAY_ENVELOPE_TS: &str =
+    include_str!("../../../relays/laughing-man-cloudflare/src/bbs_relay_envelope.ts");
+const LM_STANDBY_BBS_RELAY_METADATA_TS: &str =
+    include_str!("../../../relays/laughing-man-cloudflare/src/bbs_relay_metadata.ts");
+const LM_STANDBY_BBS_RELAY_SESSION_TS: &str =
+    include_str!("../../../relays/laughing-man-cloudflare/src/bbs_relay_session.ts");
 const LM_STANDBY_COMMON_BIN_PATHS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 const LM_STANDBY_NPM_NOT_FOUND: &str = "npm not found in /opt/homebrew/bin or /usr/local/bin";
 
@@ -10845,6 +10855,11 @@ fn write_lm_standby_worker_template(worker_dir: &Path, relay_id: &str) -> Result
         ("src/bbs_group_reducer.ts", LM_STANDBY_BBS_GROUP_REDUCER_TS),
         ("src/bbs_auth.ts", LM_STANDBY_BBS_AUTH_TS),
         ("src/bbs_group.ts", LM_STANDBY_BBS_GROUP_TS),
+        ("src/bbs_relay_auth.ts", LM_STANDBY_BBS_RELAY_AUTH_TS),
+        ("src/bbs_relay_memory.ts", LM_STANDBY_BBS_RELAY_MEMORY_TS),
+        ("src/bbs_relay_envelope.ts", LM_STANDBY_BBS_RELAY_ENVELOPE_TS),
+        ("src/bbs_relay_metadata.ts", LM_STANDBY_BBS_RELAY_METADATA_TS),
+        ("src/bbs_relay_session.ts", LM_STANDBY_BBS_RELAY_SESSION_TS),
     ];
     for (relative, content) in files {
         let path = worker_dir.join(relative);
