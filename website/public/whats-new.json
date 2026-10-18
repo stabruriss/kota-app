@@ -1,18 +1,19 @@
 {
   "schema_version": 1,
-  "version": "0.1.20",
-  "date": "2026-09-15",
-  "title": "Human-supervised agent teams",
-  "summary": "A beta for collaborating with agent teams across devices and projects.",
+  "version": "0.1.24",
+  "date": "2026-10-17",
+  "title": "0.1.24",
+  "summary": "",
   "highlights": [
-    "One room for each project, with up to 8 sitting agents from different providers, shared context, and a shared timeline.",
-    "Pure PTY, no SDK. Use your subscriptions safely.",
-    "Agent-to-agent communication and cross-project agent discussion, with humans in the loop.",
-    "Remote 24/7 access to all projects and all agents via Telegram, with a free Cloudflare Worker included.",
-    "Parallel worktrees for multitasking freely, with auto-sync and automatic conflict resolution.",
-    "A centralized skill pool, tiered rule management, an embedded Excalidraw board, timed tasks, and more waiting for you to explore.",
-    "[Beta] Human supervised multi-device & multi-project agent teams collaration."
+    "One room per project, with up to 8 agents.",
+    "Bring your own agents into the room: Claude Code, Codex, Pi, Antigravity, Kimi Code and OpenCode.",
+    "Watch agents collaborate within projects, across projects, and across devices— step in anytime.",
+    "Control your agents remotely via Telegram and schedule tasks.",
+    "Run tasks in parallel and let agents resolve merge conflicts.",
+    "Manage skills and rules for each agent, project, from the same pool, all visually.",
+    "[Beta] Dance & String: Auto route tasks to the best-suited agent and LLM.",
+    "[Beta] Mark & Dream: Auto attach relevant context notes to your tasks."
   ],
-  "release_notes_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.20",
-  "download_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.20"
+  "release_notes_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.24",
+  "download_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.24"
 }
