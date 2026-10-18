@@ -51,7 +51,7 @@ function styleOf(cell: GridCell): React.CSSProperties {
   const fgRaw = rgbHex(cell.fg);
   const bgRaw = rgbHex(cell.bg);
   return {
-    color: inverse ? bgRaw ?? DEFAULT_BG : fgRaw ?? DEFAULT_FG,
+    color: inverse ? bgRaw ?? 'var(--term-bg, #090A0B)' : fgRaw ?? DEFAULT_FG,
     background: inverse ? fgRaw ?? DEFAULT_FG : bgRaw ?? DEFAULT_BG,
     fontWeight: a & ATTR_BOLD ? 700 : 400,
     fontStyle: a & ATTR_ITALIC ? 'italic' : 'normal',

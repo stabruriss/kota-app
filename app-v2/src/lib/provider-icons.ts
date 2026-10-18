@@ -4,8 +4,10 @@ import antigravity from '../assets/tavern/icons/providers/googlegemini.svg';
 import opencode from '../assets/tavern/icons/providers/opencode.svg';
 import kimi from '../assets/tavern/icons/providers/kimi.svg';
 import pi from '../assets/tavern/icons/providers/pi.svg';
+import tavernEntry from '../assets/tavern/icons/tavern-entry.svg';
 
 export const PROVIDER_ICONS = {
+  'kota-local': { id: 'kota-local', label: 'Kota Local', svg: tavernEntry },
   claude: { id: 'claude', label: 'Claude Code', svg: claude },
   codex: { id: 'codex', label: 'Codex', svg: codex },
   antigravity: { id: 'antigravity', label: 'Antigravity CLI', svg: antigravity },

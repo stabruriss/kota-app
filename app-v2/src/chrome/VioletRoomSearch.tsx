@@ -160,9 +160,10 @@ export function VioletRoomSearch({ projectRoot, projectName, agentMeta, onQuoteM
           <div className="room-search-controls">
             <div className="room-search-input-row">
               <RoomSearchIcon />
-              <input ref={input} type="search" aria-label="Search messages" placeholder="Search messages…" value={query} onChange={(event) => changeQuery(event.target.value)} />
+              <input ref={input} type="search" aria-label="Search messages" aria-describedby="room-search-phrase-hint" placeholder="Search messages…" value={query} onChange={(event) => changeQuery(event.target.value)} />
               {query && <button type="button" aria-label="Clear query" onClick={() => { changeQuery(''); input.current?.focus(); }}>×</button>}
             </div>
+            <p className="room-search-hint" id="room-search-phrase-hint">Use straight double quotes for a phrase, e.g. <code>"red fox"</code></p>
             <div className="room-search-options">
               <label><input type="checkbox" checked={humanOnly} onChange={(event) => {
                 setHumanOnly(event.target.checked); setSelectedId(null); restoreList.current = 0;

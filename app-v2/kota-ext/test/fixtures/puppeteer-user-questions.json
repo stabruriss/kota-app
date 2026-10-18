@@ -1,0 +1,22 @@
+[
+  {"model":{"type":"choice","instructions":"Fixture user file: first classification 😀.","criteria":{
+    "model-1":"First model-1: Complex work where quality matters, decisions, or work where a mistake is costly.",
+    "model-2":"First model-2: Light work or simple lookups.",
+    "model-3":"First model-3: Understand screenshots, compare visual layouts, and inspect images or visual UI details."
+  }}},
+  {"model":{"type":"choice","instructions":"Fixture user file: later classification.","criteria":{
+    "model-1":"Later model-1: Complex work where quality matters, decisions, or work where a mistake is costly.",
+    "model-2":"Later model-2: Light work or simple lookups.",
+    "model-3":"Later model-3: Understand screenshots, compare visual layouts, and inspect images or visual UI details."
+  }}},
+  {"target":{"type":"choice","instructions":"Fixture user file: context classification.","criteria":{
+    "agent-601f5ed996":"Context agent-601f5ed996.",
+    "agent-99d1b25ab6":"Context agent-99d1b25ab6.",
+    "agent-85eef8fe40":"Context agent-85eef8fe40."
+  }}},
+  {"target":{"type":"choice","instructions":"Fixture user file: rule classification.","criteria":{
+    "agent-601f5ed996":"Rule agent-601f5ed996: Build packages, verify release artifacts, signing, and local test app delivery.",
+    "agent-99d1b25ab6":"Rule agent-99d1b25ab6: Fix backend and queue behavior, session persistence, and drag interaction bugs.",
+    "agent-85eef8fe40":"Rule agent-85eef8fe40: Design UI mockups, refine English interface copy, and improve model picker layouts."
+  }}}
+]

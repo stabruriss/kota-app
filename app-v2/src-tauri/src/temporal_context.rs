@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Local, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
+use crate::message_origin::MessageOrigin;
 
 /// The exact cross-day context attached to one composer send. The user text
 /// stays separate, and only the recipients listed here received this context.
@@ -64,7 +65,7 @@ impl TemporalContextManager {
             .filter(|id| !id.is_empty() && seen.insert((*id).to_string()))
             .map(|id| {
                 let (payload, elapsed_days) =
-                    self.prepare_with_elapsed_days_best_effort(project_root, id, payload, now);
+                    self.prepare_with_elapsed_days_best_effort(MessageOrigin::User, project_root, id, payload, now);
                 if let Some(days) = elapsed_days {
                     elapsed_days_by_target.insert(id.to_string(), days);
                 }
@@ -111,24 +112,51 @@ impl TemporalContextManager {
         Ok((prepared, changed))
     }
 
+    /// Dance calls this only after its actual recipient is fixed. The returned payload,
+    /// including any existing temporal wrapper, is reused verbatim for delivery retries.
+    /// The ordinary composer entry point above is intentionally unchanged.
+    pub(crate) fn prepare_puppeteer_composer(
+        &self, project_root: &Path, message_id: &str, timestamp: &str,
+        target_agent_id: &str, payload: &str, now: DateTime<Local>,
+    ) -> Result<(PreparedComposerPrompt, Vec<std::path::PathBuf>), String> {
+        if message_id.trim().is_empty() || target_agent_id.trim().is_empty()
+            || DateTime::parse_from_rfc3339(timestamp).is_err() {
+            return Err("invalid composer message identity".into());
+        }
+        let (prepared_payload, elapsed_days) = self.prepare_with_elapsed_days_best_effort(
+            MessageOrigin::Puppeteer, project_root, target_agent_id, payload, now);
+        let temporal_gap = (prepared_payload != payload).then(|| ComposerTemporalGap {
+            current_time: now.to_rfc3339_opts(SecondsFormat::Secs, false),
+            prompt: render_temporal_gap_payload("", now),
+            target_agent_ids: vec![target_agent_id.to_string()],
+            elapsed_days_by_target: elapsed_days.map(|days| BTreeMap::from([(target_agent_id.to_string(),days)])).unwrap_or_default(),
+        });
+        let changed = crate::violet::record_puppeteer_composer_message(
+            project_root, message_id, timestamp, payload, target_agent_id, temporal_gap.as_ref())?;
+        Ok((PreparedComposerPrompt {target_agent_id:target_agent_id.to_string(),payload:prepared_payload,temporal_gap}, changed))
+    }
+
     pub fn prepare_payload_best_effort(
         &self,
+        origin: MessageOrigin,
         project_root: &Path,
         target_agent_id: &str,
         payload: &str,
         now: DateTime<Local>,
     ) -> String {
-        self.prepare_with_elapsed_days_best_effort(project_root, target_agent_id, payload, now)
+        self.prepare_with_elapsed_days_best_effort(origin, project_root, target_agent_id, payload, now)
             .0
     }
 
     fn prepare_with_elapsed_days_best_effort(
         &self,
+        origin: MessageOrigin,
         project_root: &Path,
         target_agent_id: &str,
         payload: &str,
         now: DateTime<Local>,
     ) -> (String, Option<i64>) {
+        if !origin.uses_temporal_gap() { return (payload.to_string(), None); }
         match self.prepare_payload(project_root, target_agent_id, payload, now) {
             Ok(prepared) => prepared,
             Err(err) => {
@@ -281,7 +309,7 @@ fn event_matches_agent(value: &serde_json::Value, target_agent_id: &str) -> bool
         == Some(target_agent_id)
 }
 
-fn render_temporal_gap_payload(payload: &str, now: DateTime<Local>) -> String {
+pub(crate) fn render_temporal_gap_payload(payload: &str, now: DateTime<Local>) -> String {
     format!(
         "<KOTA_TEMPORAL_GAP v=\"1\" current_time=\"{}\">\n{}\n</KOTA_TEMPORAL_GAP>\n{}",
         now.to_rfc3339_opts(SecondsFormat::Secs, false),
@@ -340,12 +368,15 @@ mod tests {
         .unwrap();
     }
 
+    mod puppeteer_tests { include!("temporal_context_puppeteer_tests.rs"); }
+    mod origin_tests { include!("temporal_context_origin_tests.rs"); }
+
     #[test]
     fn first_message_has_no_temporal_gap() {
         let root = temp_root("first-message");
         let manager = TemporalContextManager::default();
 
-        let prepared = manager.prepare_payload_best_effort(
+        let prepared = manager.prepare_payload_best_effort(MessageOrigin::User,
             &root,
             "agent-a",
             "hello",
@@ -364,8 +395,8 @@ mod tests {
         append_turn(&root, "agent-a", "turn-a", "2026-08-17T12:00:00-07:00");
 
         let now = local_time("2026-08-18T12:00:00-07:00");
-        let first = manager.prepare_payload_best_effort(&root, "agent-a", "hello", now);
-        let second = manager.prepare_payload_best_effort(&root, "agent-a", "again", now);
+        let first = manager.prepare_payload_best_effort(MessageOrigin::User, &root, "agent-a", "hello", now);
+        let second = manager.prepare_payload_best_effort(MessageOrigin::User, &root, "agent-a", "again", now);
 
         assert!(first
             .starts_with("<KOTA_TEMPORAL_GAP v=\"1\" current_time=\"2026-08-18T12:00:00-07:00\">"));
@@ -389,12 +420,12 @@ mod tests {
         append_turn(&root, "agent-a", "turn-a", "2026-08-15T12:00:00Z");
         let first_now = local_time("2026-08-17T12:00:00Z");
         assert!(manager
-            .prepare_payload_best_effort(&root, "agent-a", "first", first_now)
+            .prepare_payload_best_effort(MessageOrigin::User, &root, "agent-a", "first", first_now)
             .starts_with("<KOTA_TEMPORAL_GAP"));
 
         append_turn(&root, "agent-a", "turn-b", "2026-08-17T13:00:00Z");
         assert_eq!(
-            manager.prepare_payload_best_effort(
+            manager.prepare_payload_best_effort(MessageOrigin::User,
                 &root,
                 "agent-a",
                 "fresh",
@@ -403,7 +434,7 @@ mod tests {
             "fresh"
         );
         assert!(manager
-            .prepare_payload_best_effort(
+            .prepare_payload_best_effort(MessageOrigin::User,
                 &root,
                 "agent-a",
                 "stale again",
@@ -421,7 +452,7 @@ mod tests {
         append_turn(&root, "agent-b", "turn-b", "2026-08-18T11:59:00Z");
 
         assert!(manager
-            .prepare_payload_best_effort(
+            .prepare_payload_best_effort(MessageOrigin::User,
                 &root,
                 "agent-a",
                 "hello a",
@@ -429,7 +460,7 @@ mod tests {
             )
             .starts_with("<KOTA_TEMPORAL_GAP"));
         assert_eq!(
-            manager.prepare_payload_best_effort(
+            manager.prepare_payload_best_effort(MessageOrigin::User,
                 &root,
                 "agent-b",
                 "hello b",

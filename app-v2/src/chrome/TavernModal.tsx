@@ -1,4 +1,6 @@
+import '../styles/tavern-source.css';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { LocalModelCredit, localModelProvider, localModelOptionCredit } from './LocalModelCredit';
 import type { ReactNode } from 'react';
 import type { AgentCli } from '../types/agent-pty';
 import type { MagiProvider } from '../types/smart-terminal';
@@ -67,6 +69,7 @@ import {
   loadTavernHeroProfiles,
   openAccountSkillFolder,
   openAccountSkillsFolder,
+  openExternalUrl,
   revealTavernHeroFile,
   refreshProviderModelOptions,
   resetDefaultAccountRules,
@@ -87,10 +90,11 @@ import {
   type AccountRuleSaveRequest,
   type GhAuthInfo,
   type OAuthConfigStatus,
-  type ProjectAgentRecord,
   type StorageMeasurementStatus,
   type SupportedShellStatus,
   type TavernHeroProfileDraft,
+  type TavernHeroSource,
+  type TavernHeroSourceState,
   type WorkspaceProject,
 } from '../pty-client';
 import {
@@ -140,12 +144,20 @@ import tableStar from '../assets/tavern/optimized/tables/star.webp';
 import tableTerminal from '../assets/tavern/optimized/tables/terminal.webp';
 import tableWalnut from '../assets/tavern/optimized/tables/walnut.webp';
 import tableWarm from '../assets/tavern/optimized/tables/warm.webp';
-import iconCommends from '../assets/tavern/icons/commends.svg';
 import iconGhost from '../assets/tavern/icons/ghost.svg';
 import iconShell from '../assets/tavern/icons/shell.svg';
 import iconSkills from '../assets/tavern/icons/skills.svg';
-import iconTurns from '../assets/tavern/icons/turns.svg';
 import { PROVIDER_ICONS, type ProviderId } from '../lib/provider-icons';
+import { KOTA_LOCAL_ENABLED } from '../lib/local-rpc';
+import { KOTA_LOCAL_LINK_EVENT, catalogModel, linkedCatalogProviders, localThinkingForModel, requestKotaLocalLink, type KotaLocalLinkTarget } from '../lib/local-auth';
+import { useJevSettings } from '../lib/jev';
+import { AUTO_ROUTE_MODEL, stringDraftComplete, stringGroupToDraft, stringGroupYaml, type AutoRouteGroup } from '../lib/string-routing';
+import { StringLocalModelPicker, StringRoutingSummary } from './StringLocalModelPicker';
+import { PuppeteerTavernConfig } from './PuppeteerTavernConfig';
+import { tavernLocalState, useTavernLocal, type TavernLocal } from '../lib/tavern-local';
+import { localModelLabel } from '../lib/local-magpie';
+import { TAVERN_LOCAL_LABELS, TavernLocalAction, TavernLocalStatus } from './TavernLocalControls';
+import { KotaLocalLinkCard } from './KotaLocalLinkCard';
 import { LaughingManSettings } from './LaughingManSettings';
 
 interface TavernModalProps {
@@ -155,6 +167,7 @@ interface TavernModalProps {
   ghosttyTerminalEnhancement?: boolean;
   onGhosttyTerminalEnhancementChange?: (enabled: boolean) => void;
   initialTab?: TavernTab;
+  localLinkIntent?: { target: KotaLocalLinkTarget; request: number } | null;
   onWorkspaceResumed?: (workspace: WorkspaceProject) => void;
 }
 
@@ -200,11 +213,15 @@ interface HeroDraft {
   provider: ProviderId;
   model: string;
   effort?: string;
+  autoRoute?: AutoRouteGroup | null;
   avatarId: HeroAvatarId;
   skills: string[];
   ghost: string;
   shell: string;
-  record?: ProjectAgentRecord | null;
+  source?: TavernHeroSource;
+  sourceState?: TavernHeroSourceState;
+  sourceProjectName?: string;
+  sourceReason?: string;
   archived?: boolean;
   dismissed?: boolean;
 }
@@ -302,8 +319,6 @@ const TAVERN_PRELOAD_ASSETS = [
   avatarPuppeteer,
   avatarBartender,
   avatarUserDefault,
-  iconCommends,
-  iconTurns,
   iconSkills,
   iconShell,
   iconGhost,
@@ -524,9 +539,13 @@ const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     defaultAvatarId: 'kimi',
     beta: true,
   },
+  'kota-local': {
+    id: 'kota-local', name: 'Kota Local', cli: 'kota-local', icon: PROVIDER_ICONS['kota-local'].svg,
+    installUrl: 'https://pi.dev', defaultModel: '', defaultAvatarId: 'pi', beta: true,
+  },
 };
 
-const PROVIDER_IDS = Object.keys(PROVIDERS) as ProviderId[];
+const PROVIDER_IDS = (Object.keys(PROVIDERS) as ProviderId[]).filter((id) => id !== 'kota-local' || KOTA_LOCAL_ENABLED);
 
 const HERO_TEMPLATES: AgentCardSpec[] = [
   { id: 'hero-cc', kind: 'custom', provider: 'claude', name: 'CC' },
@@ -596,7 +615,7 @@ const SYSTEM_HEROES: SystemHeroSpec[] = [
     name: 'Puppeteer',
     role: 'Routing',
     avatarClass: 'system-puppeteer',
-    description: 'A future topic-based routing mechanism. Placeholder only for now.',
+    description: KOTA_LOCAL_ENABLED ? 'String selects a model. Dance selects an agent.' : 'A future topic-based routing mechanism. Placeholder only for now.',
     configKind: 'placeholder',
   },
   {
@@ -705,6 +724,7 @@ function ruleSaveRequest(rule: AccountRuleDraft): AccountRuleSaveRequest {
 }
 
 const LEGACY_TEMPLATE_NAMES: Record<ProviderId, readonly string[]> = {
+  'kota-local': [],
   claude: ['CC', 'Alice', 'Claude', 'Claude Code', 'Amber Clerk'],
   codex: ['Dex', 'Bob', 'Codex', 'Glass Scribe'],
   antigravity: ['Agy', 'Gem', 'David', 'Gemini', 'Gemini CLI', 'Antigravity', 'Antigravity CLI', 'Twin Star'],
@@ -743,9 +763,11 @@ export function TavernModal({
   ghosttyTerminalEnhancement = false,
   onGhosttyTerminalEnhancementChange,
   initialTab = 'heroes',
+  localLinkIntent,
   onWorkspaceResumed,
 }: TavernModalProps) {
-  const [tab, setTab] = useState<TavernTab>('heroes');
+  const [tab, setTab] = useState<TavernTab>(initialTab);
+  const local = useTavernLocal(KOTA_LOCAL_ENABLED && open && tab === 'heroes');
   const [config, setConfig] = useState<OAuthConfigStatus | null>(null);
   const [storageMeasurement, setStorageMeasurement] = useState<StorageMeasurementStatus | null>(null);
   const [ghAuth, setGhAuth] = useState<GhAuthInfo | null>(initialGhAuth);
@@ -755,6 +777,8 @@ export function TavernModal({
   const [customHeroes, setCustomHeroes] = useState<AgentCardSpec[]>(() => loadCustomHeroes());
   const [selectedHeroId, setSelectedHeroId] = useState(HERO_TEMPLATES[0].id);
   const [profileTarget, setProfileTarget] = useState<ProfileTarget | null>(null);
+  const [linkFocus, setLinkFocus] = useState<KotaLocalLinkTarget | null>(null);
+  const [jevFocusRequest, setJevFocusRequest] = useState(0);
   const [profiles, setProfiles] = useState<Record<string, Partial<HeroDraft>>>(() =>
     loadProfileDrafts(),
   );
@@ -1143,33 +1167,29 @@ export function TavernModal({
     return () => document.removeEventListener('keydown', onKeyDown, true);
   }, [deleteRuleTarget, deleteSkillTarget, onClose, open, profileTarget, promptResetTarget, resetHeroesOpen, skillImportDialog]);
 
+  const openLocalSettings = useCallback((target: KotaLocalLinkTarget) => {
+    if (target === 'kota-local') {
+      setProfileTarget(null); setTab('link'); setLinkFocus(target);
+    } else {
+      setLinkFocus(null); setTab('heroes'); setProfileTarget({ type: 'system', id: 'puppeteer' });
+      setJevFocusRequest(request => request + 1);
+    }
+  }, []);
   useEffect(() => {
-    if (!open) return;
-    const refreshHeroRecords = () => {
-      if (resetHeroesBusyRef.current) return;
-      void loadTavernHeroProfiles()
-        .then((savedProfiles) => {
-          if (resetHeroesBusyRef.current) return;
-          setProfiles((prev) => {
-            const next = { ...prev };
-            for (const profile of savedProfiles) {
-              next[profile.heroId] = {
-                ...next[profile.heroId],
-                record: profile.record ?? next[profile.heroId]?.record ?? null,
-              };
-            }
-            lastSavedProfilesPayloadRef.current = serializeTavernProfilesForPersistence(
-              profilePersistenceHeroesRef.current,
-              next,
-            );
-            return next;
-          });
-        })
-        .catch((err) => setError(String(err)));
+    if (!open || !KOTA_LOCAL_ENABLED || !localLinkIntent) return;
+    openLocalSettings(localLinkIntent.target);
+  }, [open, localLinkIntent, openLocalSettings]);
+
+  useEffect(() => {
+    if (!open || !KOTA_LOCAL_ENABLED) return;
+    const onLink = (event: Event) => {
+      const target = (event as CustomEvent<{ target?: KotaLocalLinkTarget }>).detail?.target;
+      if (target === 'kota-local' || target === 'kota-local-jev' || target === 'puppeteer-jev') openLocalSettings(target);
     };
-    window.addEventListener(TAVERN_HERO_CREDIT_CHANGED_EVENT, refreshHeroRecords);
-    return () => window.removeEventListener(TAVERN_HERO_CREDIT_CHANGED_EVENT, refreshHeroRecords);
-  }, [open]);
+    window.addEventListener(KOTA_LOCAL_LINK_EVENT, onLink);
+    return () => window.removeEventListener(KOTA_LOCAL_LINK_EVENT, onLink);
+  }, [open, openLocalSettings]);
+  const clearLinkFocus = useCallback(() => setLinkFocus(null), []);
 
   useEffect(() => {
     try {
@@ -1368,7 +1388,7 @@ export function TavernModal({
     const status = await ghAuthStatus();
     setGhAuth(status);
     if (status.cliMissing) {
-      window.open(GITHUB_CLI_INSTALL_URL, '_blank', 'noopener,noreferrer');
+      void openExternalUrl(GITHUB_CLI_INSTALL_URL).catch(() => {});
       return;
     }
     window.dispatchEvent(new CustomEvent('kota:smart-run', {
@@ -1408,6 +1428,7 @@ export function TavernModal({
     name: string,
     nameFields: ProjectAgentNameFields,
   ): boolean => {
+    if (heroSourceReadOnly(profiles[hero.id])) return false;
     const next = name.trim();
     const duplicate = duplicateTavernHeroName(next, hero.id);
     if (duplicate) {
@@ -1417,11 +1438,15 @@ export function TavernModal({
     setError(null);
     updateHero(hero, { name: next, nameFields });
     return true;
-  }, [duplicateTavernHeroName]);
+  }, [duplicateTavernHeroName, profiles]);
   const refreshModelsForProvider = useCallback(async (providerId: ProviderId) => {
     setModelRefreshBusy(providerId);
     setError(null);
     try {
+      if (providerId === 'kota-local') {
+        await Promise.all([local.auth.refresh(), local.catalog.refresh()]);
+        return;
+      }
       const modelOptions = await refreshProviderModelOptions(providerId);
       setShells((prev) => prev.map((shell) => (
         shell.id === providerId ? { ...shell, modelOptions } : shell
@@ -1431,7 +1456,7 @@ export function TavernModal({
     } finally {
       setModelRefreshBusy((current) => (current === providerId ? null : current));
     }
-  }, []);
+  }, [local.auth.refresh, local.catalog.refresh]);
 
   const saveAccountUser = useCallback(async (identity: AccountUserIdentity) => {
     setAccountUserSaving(true);
@@ -1472,12 +1497,20 @@ export function TavernModal({
   const updateHero = (hero: AgentCardSpec, patch: Partial<HeroDraft>) => {
     setProfiles((prev) => {
       const current = normalizeDraft(hero, prev[hero.id]);
+      if (heroSourceReadOnly(current)) {
+        // The source owns content; Tavern still owns archive/remove.
+        const archived = patch.archived ?? current.archived;
+        const dismissed = patch.dismissed ?? current.dismissed;
+        if (archived === current.archived && dismissed === current.dismissed) return prev;
+        return { ...prev, [hero.id]: { ...current, archived, dismissed } };
+      }
       const next = { ...current, ...patch };
       next.model = normalizeModelIdForProvider(next.provider, next.model);
       if (
         patch.provider != null ||
         patch.model != null ||
         'effort' in patch ||
+        'autoRoute' in patch ||
         patch.skills != null
       ) {
         next.shell = buildShellYaml(next);
@@ -1609,12 +1642,14 @@ export function TavernModal({
 
   const commitHeroSkills = (hero: AgentCardSpec, skills: string[]) => {
     const draft = normalizeDraft(hero, profiles[hero.id]);
+    if (heroSourceReadOnly(draft)) return;
     if (draft.skills.join('\n') === skills.join('\n')) return;
     updateHero(hero, { skills });
   };
 
   const revealRawFile = async (hero: AgentCardSpec, fileName: RawHeroFile) => {
     const draft = normalizeDraft(hero, profiles[hero.id]);
+    if (heroSourceReadOnly(draft)) return;
     await run(`open ${fileName}`, async () => {
       await revealTavernHeroFile({
         heroId: hero.id,
@@ -1923,7 +1958,6 @@ export function TavernModal({
                       <b>{draft.name}</b>
                       <span>{heroProvider.name}</span>
                     </span>
-                    <HeroCardMerits record={draft.record} />
                   </button>
                 );
               })}
@@ -1950,6 +1984,7 @@ export function TavernModal({
             <SupportedProviders
               shells={shells}
               shellsLoading={!!loadingTasks.shells}
+              local={local}
             />
           </section>
 
@@ -2191,6 +2226,10 @@ export function TavernModal({
             onAction={ghAuth?.authenticated || ghAuth == null ? undefined : () => run('github cli', beginGithubCliLogin)}
           />
 
+          {KOTA_LOCAL_ENABLED && (
+            <KotaLocalLinkCard focusTarget={linkFocus} onFocusHandled={clearLinkFocus} />
+          )}
+
           <section className="tavern-section full tavern-terminal-enhancement">
             <div className="tavern-card-head">
               <div>
@@ -2296,6 +2335,7 @@ export function TavernModal({
           hero={heroes.find((hero) => hero.id === profileTarget.id) ?? selectedHero}
           profiles={profiles}
           shellById={shellById}
+          local={local}
           accountSkills={accountSkills}
           skillsLoading={skillsLoading}
           modelRefreshBusy={modelRefreshBusy}
@@ -2316,6 +2356,7 @@ export function TavernModal({
 
       {profileTarget?.type === 'system' && (
         <SystemProfileOverlay
+          jevFocusRequest={jevFocusRequest}
           hero={SYSTEM_HEROES.find((hero) => hero.id === profileTarget.id) ?? SYSTEM_HEROES[0]}
           draft={{
             ...defaultSystemDraft(profileTarget.id, systemPromptTemplates),
@@ -2551,6 +2592,7 @@ function AgentProfileOverlay({
   hero,
   profiles,
   shellById,
+  local,
   accountSkills,
   skillsLoading,
   modelRefreshBusy,
@@ -2570,6 +2612,7 @@ function AgentProfileOverlay({
   hero: AgentCardSpec;
   profiles: Record<string, Partial<HeroDraft>>;
   shellById: Map<string, SupportedShellStatus>;
+  local: TavernLocal;
   accountSkills: AccountSkillDraft[];
   skillsLoading: boolean;
   modelRefreshBusy: ProviderId | null;
@@ -2587,6 +2630,7 @@ function AgentProfileOverlay({
   onRemove: (hero: AgentCardSpec) => void;
 }) {
   const draft = normalizeDraft(hero, profiles[hero.id]);
+  const readOnly = heroSourceReadOnly(draft);
   const provider = PROVIDERS[draft.provider];
   const selectedEffort = draft.effort ?? '';
   // SHELL edits are staged locally and only committed on Save Shell, so the
@@ -2596,22 +2640,39 @@ function AgentProfileOverlay({
   const [editProvider, setEditProvider] = useState<ProviderId>(draft.provider);
   const [editModel, setEditModel] = useState(draft.model);
   const [editEffort, setEditEffort] = useState(selectedEffort);
+  const [editAutoRoute, setEditAutoRoute] = useState<AutoRouteGroup | null>(draft.autoRoute ?? null);
+  const [stringValid, setStringValid] = useState(true);
   const providerControlRef = useRef<HTMLDivElement | null>(null);
   const shellProviderId = shellEditing ? editProvider : draft.provider;
   const editProviderSpec = PROVIDERS[editProvider];
   const editShellStatus = shellById.get(editProvider);
-  const editModelSeed = editShellStatus?.modelOptions?.length
+  const editingLocal = editProvider === 'kota-local';
+  const jev = useJevSettings(shellProviderId === 'kota-local');
+  const automatic = editingLocal && editModel === AUTO_ROUTE_MODEL;
+  const showingAutoRoute = shellProviderId === 'kota-local' && (shellEditing ? editModel : draft.model) === AUTO_ROUTE_MODEL;
+  const localState = tavernLocalState(local.auth, shellEditing ? editModel : draft.model);
+  const localProviderState = tavernLocalState(local.auth);
+  const modelSlash = editModel.indexOf('/');
+  const localModel = catalogModel(local.catalog.data, editModel.slice(0, modelSlash), editModel.slice(modelSlash + 1));
+  const editModelSeed = editingLocal
+    ? linkedCatalogProviders(local.catalog.loading || local.catalog.failed ? null : local.catalog.data).flatMap((provider) => provider.models.map((model) => ({
+      id: `${provider.providerId}/${model.modelId}`, label: model.name, source: 'provider',
+    })))
+    : editShellStatus?.modelOptions?.length
     ? editShellStatus.modelOptions
     : [{ id: editProviderSpec.defaultModel, label: editProviderSpec.defaultModel, source: 'default' }];
-  const editEffortSeed = editShellStatus?.effortOptions ?? [];
+  const editEffortSeed = editingLocal
+    ? (localModel?.thinkingLevels ?? []).map((value) => ({ value, label: value }))
+    : editShellStatus?.effortOptions ?? [];
   const modelComboOptions = uniqueShellComboOptions([
-    { id: 'default', label: 'CLI default', source: 'default' },
+    !editingLocal ? { id: 'default', label: 'CLI default', source: 'default' } : null,
     ...editModelSeed.map((option) => ({
       id: option.id,
       label: option.label || option.id,
       source: option.source || 'seed',
+      ...(editingLocal && option.id.startsWith('magpie/') ? { displayLabel: localModelLabel('magpie', option.id.slice(7), option.label) } : {}),
     })),
-    editModel.trim() ? { id: editModel.trim(), label: editModel.trim(), source: 'current' } : null,
+    !editingLocal && editModel.trim() ? { id: editModel.trim(), label: editModel.trim(), source: 'current' } : null,
   ]);
   const effortComboOptions = uniqueShellComboOptions([
     ...editEffortSeed.map((option) => ({
@@ -2619,9 +2680,19 @@ function AgentProfileOverlay({
       label: option.label || option.value,
       source: 'provider',
     })),
-    editEffort.trim() ? { id: editEffort.trim(), label: editEffort.trim(), source: 'current' } : null,
+    !editingLocal && editEffort.trim() ? { id: editEffort.trim(), label: editEffort.trim(), source: 'current' } : null,
   ]);
-  const editModelRefreshing = modelRefreshBusy === editProvider;
+  const editModelRefreshing = modelRefreshBusy === editProvider || (editingLocal && local.catalog.loading);
+  const localSelectionReady = automatic ? stringValid && !!jev.settings?.ready && !jev.loading && !jev.failed
+    && !!editAutoRoute && stringDraftComplete(stringGroupToDraft(editAutoRoute))
+    : !local.catalog.loading && !local.catalog.failed && editModelSeed.some(model => model.id === editModel.trim())
+      && !!localModel?.thinkingLevels.includes(editEffort);
+  const localMissingModel = editingLocal && (!editModel.trim() || editModel.trim().toLowerCase() === 'default');
+  useEffect(() => {
+    if (shellEditing && editingLocal && localModel && !localModel.thinkingLevels.includes(editEffort)) {
+      setEditEffort(localThinkingForModel(localModel.thinkingLevels, editEffort));
+    }
+  }, [shellEditing, editingLocal, localModel, editEffort]);
   const [skillDraftIds, setSkillDraftIds] = useState<string[]>(() => draft.skills);
   const skillDraftRef = useRef(skillDraftIds);
   const skillEntries = skillLoomEntries(accountSkills, skillDraftIds);
@@ -2630,7 +2701,7 @@ function AgentProfileOverlay({
     setProviderMenuOpen(false);
     setSkillDraftIds(draft.skills);
     skillDraftRef.current = draft.skills;
-  }, [hero.id, provider.id]);
+  }, [hero.id, provider.id, readOnly]);
   useEffect(() => {
     if (!providerMenuOpen) return undefined;
     const onPointerDown = (event: PointerEvent) => {
@@ -2645,6 +2716,7 @@ function AgentProfileOverlay({
     skillDraftRef.current = skillDraftIds;
   }, [skillDraftIds]);
   const commitSkillDraft = () => {
+    if (readOnly) return;
     const nextSkills = skillDraftRef.current;
     if (draft.skills.join('\n') !== nextSkills.join('\n')) {
       onCommitSkills(hero, nextSkills);
@@ -2672,6 +2744,7 @@ function AgentProfileOverlay({
     return () => document.removeEventListener('keydown', onKeyDown, true);
   });
   const setSkillActive = (skillId: string, active: boolean) => {
+    if (readOnly) return;
     setSkillDraftIds((current) => {
       const selected = current.includes(skillId);
       if (selected === active) return current;
@@ -2679,9 +2752,15 @@ function AgentProfileOverlay({
     });
   };
   const startShellEdit = () => {
+    if (readOnly) return;
     setEditProvider(draft.provider);
-    setEditModel(draft.model);
-    setEditEffort(selectedEffort);
+    const localModelValue = draft.model.trim().toLowerCase() === 'default' ? '' : draft.model;
+    const selected = draft.provider === 'kota-local' ? localModelValue : draft.model;
+    setEditModel(selected);
+    setEditAutoRoute(draft.autoRoute ?? null); setStringValid(true);
+    const slash = selected.indexOf('/');
+    const selectedModel = catalogModel(local.catalog.data, selected.slice(0, slash), selected.slice(slash + 1));
+    setEditEffort(draft.provider === 'kota-local' ? selected === AUTO_ROUTE_MODEL ? 'off' : selectedModel ? localThinkingForModel(selectedModel.thinkingLevels, selectedEffort) : selectedEffort : selectedEffort);
     setProviderMenuOpen(false);
     setShellEditing(true);
   };
@@ -2691,17 +2770,21 @@ function AgentProfileOverlay({
       setEditProvider(providerId);
       setEditModel(spec.defaultModel);
       setEditEffort(spec.defaultEffort ?? '');
+      setStringValid(true);
     }
     setProviderMenuOpen(false);
   };
   const saveShell = () => {
+    if (readOnly) return;
+    if (editingLocal && !localSelectionReady) return;
     const spec = PROVIDERS[editProvider];
     const nextModel = editModel.trim() || spec.defaultModel;
     const nextEffort = editEffort.trim();
     if (editProvider !== draft.provider) {
       onSelectProvider(hero, editProvider);
     }
-    const patch: Partial<HeroDraft> = { model: nextModel, effort: nextEffort || undefined };
+    const patch: Partial<HeroDraft> = { model: nextModel, effort: automatic ? 'off' : nextEffort || undefined,
+      ...(editingLocal ? { autoRoute: editAutoRoute } : {}) };
     onUpdate(hero, patch);
     setProviderMenuOpen(false);
     setShellEditing(false);
@@ -2713,7 +2796,6 @@ function AgentProfileOverlay({
         <button type="button" className="tavern-profile-back" onClick={closeProfile}>
           Back
         </button>
-        <HeroMeritBar record={draft.record} />
 
         <div className="tavern-profile-layout">
           <section className="tavern-profile-panel shell-panel" aria-label="SHELL">
@@ -2739,6 +2821,15 @@ function AgentProfileOverlay({
                   <div className="tavern-shell-provider-menu" role="listbox" aria-label="Provider">
                     {PROVIDER_IDS.map((providerId) => {
                       const spec = PROVIDERS[providerId];
+                      if (providerId === 'kota-local') return (
+                        <button key={providerId} type="button" role="option" aria-selected={editProvider === providerId}
+                          className={`tavern-shell-provider-option ${editProvider === providerId ? 'active' : ''}`}
+                          onClick={() => { chooseEditProvider(providerId); void onRefreshModels(providerId); }}>
+                          <span className="project-agent-shell-provider-icon tavern-shell-provider-option-icon provider-kota-local" aria-hidden="true" />
+                          <strong>{spec.name}</strong>
+                          <span className="tavern-local-option-status">{TAVERN_LOCAL_LABELS[localProviderState]}</span>
+                        </button>
+                      );
                       const status = shellById.get(providerId);
                       const shellStatusLoaded = shellById.size > 0;
                       const checking = !shellStatusLoaded;
@@ -2772,42 +2863,79 @@ function AgentProfileOverlay({
                 <div className="project-agent-shell-edit-fields">
                   <div className="tavern-profile-field">
                     <span>Model</span>
-                    <ShellComboBox
+                    {editingLocal ? <>
+                      <StringLocalModelPicker key={hero.id} ownerKey={hero.id} owner={draft.name} surface="hero"
+                        model={editModel} group={editAutoRoute} catalog={local.catalog.data} jev={jev}
+                        onSelect={choice => {
+                          setEditModel(`${choice.providerId}/${choice.modelId}`); setStringValid(true);
+                          const selected = catalogModel(local.catalog.data, choice.providerId, choice.modelId);
+                          if (selected) setEditEffort(localThinkingForModel(selected.thinkingLevels, editEffort));
+                        }}
+                        onAutoRouteChange={group => { setEditAutoRoute(group); setEditModel(AUTO_ROUTE_MODEL); setEditEffort('off'); }}
+                        onValidityChange={setStringValid} onOpen={() => void local.openModels()}
+                        onJevSettings={() => requestKotaLocalLink('puppeteer-jev')} />
+                      {local.catalog.failed && <button type="button" className="local-model-text" onClick={() => void local.catalog.refresh()}>Update model list</button>}
+                      <small role="status">{local.catalog.loading ? 'Fetching model IDs...' : local.catalog.failed ? 'Model catalog unavailable' : `${editModelSeed.length} ${editModelSeed.length === 1 ? 'model' : 'models'} from signed-in providers`}</small>
+                    </> : <ShellComboBox
                       value={editModel}
                       options={modelComboOptions}
-                      placeholder="Exact model ID"
+                      optionSuffix={editingLocal ? localModelOptionCredit : undefined}
+                      placeholder={editingLocal ? 'Choose a model' : 'Exact model ID'}
                       status={editModelRefreshing
                         ? 'Fetching model IDs...'
+                        : editingLocal && local.catalog.failed ? 'Model catalog unavailable'
+                        : editingLocal ? `${editModelSeed.length} ${editModelSeed.length === 1 ? 'model' : 'models'} from signed-in providers`
                         : `${editModelSeed.length} model IDs in catalog`}
                       refreshing={editModelRefreshing}
-                      onChange={setEditModel}
+                      onChange={(value) => {
+                        setEditModel(value);
+                        if (editingLocal) {
+                          const slash = value.indexOf('/');
+                          const selected = catalogModel(local.catalog.data, value.slice(0, slash), value.slice(slash + 1));
+                          if (selected) setEditEffort(localThinkingForModel(selected.thinkingLevels, editEffort));
+                        }
+                      }}
+                      onOpen={editingLocal ? () => void local.openModels() : undefined}
                       onRefresh={() => void onRefreshModels(editProvider)}
-                    />
+                    />}
                   </div>
-                  {effortComboOptions.length > 0 && (
+                  {(editingLocal || effortComboOptions.length > 0) && (
                     <div className="tavern-profile-field">
-                      <span>Effort</span>
-                      <ShellComboBox
-                        value={editEffort}
+                      <span>{editingLocal ? 'Thinking' : 'Effort'}</span>
+                      {editingLocal ? <select aria-label="Thinking" value={automatic ? 'off' : editEffort}
+                        disabled={automatic || !localModel || local.catalog.loading || local.catalog.failed}
+                        onChange={event => setEditEffort(event.target.value)}>
+                        {automatic ? <option value="off">By Auto String</option> : <>
+                          {!localModel?.thinkingLevels.includes(editEffort) && <option value={editEffort}>{localModel ? editEffort : 'Choose a model first'}</option>}
+                          {localModel?.thinkingLevels.map(level => <option key={level} value={level}>{level}</option>)}
+                        </>}
+                      </select> : <ShellComboBox
+                        value={editingLocal && !localModel ? '' : editEffort}
                         options={effortComboOptions}
-                        placeholder="default"
+                        placeholder={editingLocal ? localModel ? '' : 'Choose a model first' : 'default'}
+                        disabled={editingLocal && (!localModel || local.catalog.loading || local.catalog.failed)}
                         onChange={setEditEffort}
-                      />
+                      />}
                     </div>
                   )}
                 </div>
               ) : (
                 <div className="project-agent-shell-summary" aria-label="Current SHELL settings">
-                  <code title={draft.model}>{draft.model}</code>
-                  <code title={selectedEffort || 'default'}>{selectedEffort || 'default'}</code>
+                  <code title={draft.model}>{showingAutoRoute ? 'Auto String' : draft.provider === 'kota-local' && draft.model.startsWith('magpie/') ? localModelLabel('magpie', draft.model.slice(7), catalogModel(local.catalog.data, 'magpie', draft.model.slice(7))?.name) : draft.model}{draft.provider === 'kota-local' && !showingAutoRoute && <LocalModelCredit providerId={localModelProvider(draft.model)} />}</code>
+                  <code title={selectedEffort || 'default'}>{showingAutoRoute ? 'By Auto String' : selectedEffort || 'default'}</code>
                 </div>
               )}
             </div>
+            {shellProviderId === 'kota-local' && !showingAutoRoute && (
+              <TavernLocalStatus state={localState} onRetry={() => void local.auth.refresh()} />
+            )}
+            {!shellEditing && showingAutoRoute && draft.autoRoute && <StringRoutingSummary group={draft.autoRoute} catalog={local.catalog.data} surface="hero" />}
+            {showingAutoRoute && !shellEditing && <p className="tavern-local-auth-note" role="status">{jev.loading ? 'Checking Jev…' : jev.failed ? 'Jev settings unavailable. Retry in Puppeteer.' : jev.settings?.ready ? 'Jev configured' : jev.settings?.keys.find(key => key.providerId === jev.settings!.provider)?.status === 'rejected' ? 'Jev key rejected. Update it in Puppeteer.' : 'Set up Jev to use Auto String'}{!jev.settings?.ready && <button type="button" onClick={() => requestKotaLocalLink('puppeteer-jev')}>Jev settings</button>}</p>}
             {shellEditing && (
-              <div className="project-agent-shell-apply-note">Apply on Next Incarnation</div>
+              <div className="project-agent-shell-apply-note">{editingLocal && !stringValid ? 'Finish the Auto String configuration before saving.' : localMissingModel ? 'Choose a model before saving.' : 'Apply on Next Incarnation'}</div>
             )}
             <div className="tavern-profile-actions">
-              <button type="button" onClick={shellEditing ? saveShell : startShellEdit}>
+              <button type="button" disabled={readOnly || (shellEditing && editingLocal && !localSelectionReady)} onClick={shellEditing ? saveShell : startShellEdit}>
                 {shellEditing ? 'Save Shell' : 'Edit Shell'}
               </button>
             </div>
@@ -2815,6 +2943,7 @@ function AgentProfileOverlay({
 
           <section className="tavern-profile-center" aria-label="Hero identity">
             <TavernHeroNameEditor
+              readOnly={readOnly}
               name={draft.name}
               nameFields={draft.nameFields}
               duplicateNameFor={(name) => duplicateNameFor(name, hero.id)}
@@ -2822,17 +2951,21 @@ function AgentProfileOverlay({
                 <HeroAvatarPicker
                   provider={draft.provider}
                   value={draft.avatarId}
+                  disabled={readOnly}
                   className="profile"
                   onChange={(avatarId) => onUpdate(hero, { avatarId })}
                 />
               )}
               onChange={(name, nameFields) => onUpdateName(hero, name, nameFields)}
             />
+            {draft.sourceState === 'linked' && <div className="tavern-source-origin" title={`from project ${draft.sourceProjectName} · read only`}>from project {draft.sourceProjectName} · read only</div>}
+            {draft.sourceState === 'dangling' && draft.sourceReason && <p className="tavern-source-reason">{draft.sourceReason}</p>}
             <section className={`tavern-ghost-scroll ${ghostExpanded ? 'expanded' : ''}`}>
               <PanelTitle icon={iconGhost}>GHOST</PanelTitle>
               {ghostExpanded ? (
                 <textarea
                   value={draft.ghost}
+                  readOnly={readOnly}
                   onChange={(e) => onUpdate(hero, { ghost: e.currentTarget.value })}
                   spellCheck={false}
                   autoFocus
@@ -2843,10 +2976,10 @@ function AgentProfileOverlay({
                 </button>
               )}
               <div className="tavern-profile-actions">
-                <button type="button" onClick={() => onGhostExpanded(!ghostExpanded)}>
-                  {ghostExpanded ? 'Save GHOST' : 'Edit GHOST'}
+                <button type="button" disabled={readOnly} onClick={() => onGhostExpanded(!ghostExpanded)}>
+                  {readOnly ? 'Read only' : ghostExpanded ? 'Save GHOST' : 'Edit GHOST'}
                 </button>
-                <button type="button" onClick={() => void onRevealRawFile(hero, 'GHOST.md')}>
+                <button type="button" disabled={readOnly} onClick={() => void onRevealRawFile(hero, 'GHOST.md')}>
                   Open raw file
                 </button>
               </div>
@@ -2858,6 +2991,7 @@ function AgentProfileOverlay({
 
           <section className="tavern-profile-panel skills-panel" aria-label="SKILLS">
             <PanelTitle icon={iconSkills}>SKILLS</PanelTitle>
+            {draft.sourceState === 'linked' && <p className="tavern-source-note">SHELL, GHOST and skills are read from the source incarnation.</p>}
             {skillsLoading && accountSkills.length === 0 ? (
               <TavernLoadingBlock label="Skills" />
             ) : skillEntries.length === 0 ? (
@@ -2865,6 +2999,7 @@ function AgentProfileOverlay({
             ) : (
               <SkillActivationList
                 entries={skillEntries}
+                disabled={readOnly}
                 onChange={setSkillActive}
                 onOpenSkillFolder={(skill) => void onOpenSkillFolder(skill)}
               />
@@ -2877,6 +3012,7 @@ function AgentProfileOverlay({
 }
 
 function SystemProfileOverlay({
+  jevFocusRequest,
   hero,
   draft,
   templates,
@@ -2887,6 +3023,7 @@ function SystemProfileOverlay({
   promptResetBusy,
   onResetPromptFiles,
 }: {
+  jevFocusRequest: number;
   hero: SystemHeroSpec;
   draft: SystemHeroDraft;
   templates: SystemPromptTemplates;
@@ -2915,6 +3052,7 @@ function SystemProfileOverlay({
             <TavernLoadingBlock label={promptsLoading ? 'Prompts' : 'Prompt files'} />
           ) : (
             <SystemHeroConfig
+              jevFocusRequest={jevFocusRequest}
               hero={hero}
               draft={draft}
               templates={templates}
@@ -2938,6 +3076,7 @@ function systemHeroNeedsPromptTemplates(hero: SystemHeroSpec): boolean {
 }
 
 function SystemHeroConfig({
+  jevFocusRequest,
   hero,
   draft,
   templates,
@@ -2945,6 +3084,7 @@ function SystemHeroConfig({
   promptResetBusy,
   onResetPromptFiles,
 }: {
+  jevFocusRequest: number;
   hero: SystemHeroSpec;
   draft: SystemHeroDraft;
   templates: SystemPromptTemplates;
@@ -2952,6 +3092,7 @@ function SystemHeroConfig({
   promptResetBusy: boolean;
   onResetPromptFiles: () => void;
 }) {
+  if (hero.id === 'puppeteer' && KOTA_LOCAL_ENABLED) return <PuppeteerTavernConfig jevFocusRequest={jevFocusRequest} />;
   if (hero.configKind === 'magi') {
     const provider = normalizeMagiProvider(draft.provider);
     const [primaryProvider, backupProvider] = magiProviderOrder(provider);
@@ -3199,36 +3340,15 @@ function SystemHeroConfig({
   );
 }
 
-function HeroMeritBar({ record }: { record?: ProjectAgentRecord | null }) {
-  const merits = heroMerits(record);
-  return (
-    <div className="tavern-merit-bar" aria-label="Hero merits">
-      {merits.map((merit) => (
-        <MeritBadge key={merit.label} image={merit.icon} label={merit.label} value={merit.value} />
-      ))}
-    </div>
-  );
-}
-
-function MeritBadge({ image, label, value }: { image: string; label: string; value: string }) {
-  return (
-    <div className="tavern-merit-badge">
-      <img src={image} alt="" aria-hidden />
-      <span>
-        <b>{value}</b>
-        <small>{label}</small>
-      </span>
-    </div>
-  );
-}
-
 function TavernHeroNameEditor({
+  readOnly = false,
   name,
   nameFields,
   duplicateNameFor,
   renderAvatar,
   onChange,
 }: {
+  readOnly?: boolean;
   name: string;
   nameFields?: ProjectAgentNameFields | null;
   duplicateNameFor?: (name: string) => string | null;
@@ -3239,8 +3359,9 @@ function TavernHeroNameEditor({
   const [draft, setDraft] = useState<ProjectAgentNameFields>(() => nameFields ?? projectAgentNameFields(name));
 
   useEffect(() => {
-    if (!editing) setDraft(nameFields ?? projectAgentNameFields(name));
-  }, [editing, name, nameFields]);
+    if (!editing || readOnly) setDraft(nameFields ?? projectAgentNameFields(name));
+    if (readOnly) setEditing(false);
+  }, [editing, name, nameFields, readOnly]);
 
   const editedName = editing ? composeProjectAgentName(draft).trim() : name.trim();
   const duplicateName = editing && editedName ? duplicateNameFor?.(editedName) ?? null : null;
@@ -3258,13 +3379,14 @@ function TavernHeroNameEditor({
     setEditing(false);
   };
 
-  if (!editing) {
+  if (!editing || readOnly) {
     return (
       <>
         {renderAvatar()}
         <button
           type="button"
           className="profile-name-button"
+          disabled={readOnly}
           title={name}
           data-full-name={name}
           onClick={() => setEditing(true)}
@@ -3331,33 +3453,6 @@ function TavernHeroNameEditor({
       </div>
     </>
   );
-}
-
-function heroMerits(record?: ProjectAgentRecord | null) {
-  return [
-    { icon: iconTurns, label: 'Turns', value: formatHeroRecordValue(record?.turns ?? 0) },
-    { icon: iconCommends, label: 'Commends', value: formatHeroRecordValue(record?.commends ?? 0) },
-  ];
-}
-
-function HeroCardMerits({ record }: { record?: ProjectAgentRecord | null }) {
-  const merits = heroMerits(record);
-  return (
-    <span className="tavern-card-merits" aria-label="Hero merits">
-      {merits.map((merit) => (
-        <span key={merit.label} className="tavern-card-merit" title={`${merit.label}: ${merit.value}`}>
-          <img src={merit.icon} alt="" aria-hidden />
-          <b>{merit.value}</b>
-        </span>
-      ))}
-    </span>
-  );
-}
-
-function formatHeroRecordValue(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`;
-  return String(value);
 }
 
 function PanelTitle({ icon, children }: { icon: string; children: ReactNode }) {
@@ -3451,9 +3546,11 @@ function TavernLoadingBlock({ label }: { label: string }) {
 function SupportedProviders({
   shells,
   shellsLoading,
+  local,
 }: {
   shells: SupportedShellStatus[];
   shellsLoading: boolean;
+  local: TavernLocal;
 }) {
   const shellById = new Map(shells.map((shell) => [shell.id, shell]));
   return (
@@ -3462,6 +3559,16 @@ function SupportedProviders({
       <div className="tavern-provider-lights">
         {PROVIDER_IDS.map((providerId) => {
           const provider = PROVIDERS[providerId];
+          if (providerId === 'kota-local') {
+            const state = tavernLocalState(local.auth);
+            return (
+              <div key={providerId} className="tavern-local-provider-chip" data-auth={state} aria-label="Kota Local availability" role="status">
+                <span className="tavern-provider-icon" aria-hidden="true"><img src={provider.icon} alt="" /></span>
+                <span className="tavern-local-provider-copy"><span className="tavern-provider-name">{provider.name}</span><small>{TAVERN_LOCAL_LABELS[state]}</small></span>
+                <TavernLocalAction state={state} onRetry={() => void local.auth.refresh()} />
+              </div>
+            );
+          }
           const shell = shellById.get(providerId);
           const checking = shellsLoading && !shell;
           const installed = !!shell?.installed;
@@ -3683,6 +3790,10 @@ function Readout({ label, value, detail }: { label: string; value: string; detai
   );
 }
 
+function heroSourceReadOnly(draft?: { sourceState?: TavernHeroSourceState }): boolean {
+  return draft?.sourceState === 'linked' || draft?.sourceState === 'dangling';
+}
+
 function normalizeDraft(hero: AgentCardSpec, draft?: Partial<HeroDraft>): HeroDraft {
   const provider = providerIdFromStored(draft?.provider, hero.provider) ?? hero.provider;
   const providerSpec = PROVIDERS[provider];
@@ -3695,11 +3806,15 @@ function normalizeDraft(hero: AgentCardSpec, draft?: Partial<HeroDraft>): HeroDr
     provider,
     model,
     effort: draft?.effort ?? providerSpec.defaultEffort,
+    autoRoute: draft?.autoRoute,
     avatarId,
     skills: draft?.skills ?? DEFAULT_SKILLS,
     ghost: normalizeFactoryGhost(hero, providerSpec, draft?.ghost),
     shell: draft?.shell ?? '',
-    record: draft?.record ?? null,
+    source: draft?.source,
+    sourceState: draft?.sourceState,
+    sourceProjectName: draft?.sourceProjectName,
+    sourceReason: draft?.sourceReason,
     archived: draft?.archived ?? false,
     dismissed: draft?.dismissed ?? false,
   };
@@ -3765,7 +3880,7 @@ function isLegacyFactoryGhost(hero: AgentCardSpec, ghost: string): boolean {
   );
 }
 
-function buildShellYaml(draft: HeroDraft): string {
+export function buildShellYaml(draft: HeroDraft): string {
   const provider = PROVIDERS[draft.provider];
   const model = normalizeModelIdForProvider(draft.provider, draft.model);
   const skills = draft.skills.length
@@ -3781,7 +3896,8 @@ function buildShellYaml(draft: HeroDraft): string {
     `command: ${provider.cli}`,
     'cwd: "$KOTA_WORKTREE_ROOT"',
     `model: ${model}`,
-    draft.effort ? `effort: ${draft.effort}` : undefined,
+    draft.provider === 'kota-local' && model === AUTO_ROUTE_MODEL ? 'effort: off' : draft.effort ? `effort: ${draft.effort}` : undefined,
+    draft.provider === 'kota-local' && draft.autoRoute ? stringGroupYaml(draft.autoRoute) : undefined,
     'skills:',
     skills,
     'args:',
@@ -3792,6 +3908,7 @@ function buildShellYaml(draft: HeroDraft): string {
 
 function providerCli(provider: ProviderId): AgentCli {
   switch (provider) {
+    case 'kota-local': return 'kota-local';
     case 'claude':
       return 'claude';
     case 'codex':
@@ -3839,11 +3956,15 @@ function tavernProfileToDraft(profile: TavernHeroProfileDraft): Partial<HeroDraf
     provider,
     model: provider ? normalizeModelIdForProvider(provider, profile.model) : profile.model,
     effort: profile.effort ?? undefined,
+    autoRoute: profile.autoRoute,
     avatarId: normalizeHeroAvatarId(profile.avatarId, profile.provider),
     skills: [...profile.skills],
     ghost: profile.ghost,
     shell: profile.shell,
-    record: profile.record ?? null,
+    source: profile.source,
+    sourceState: profile.sourceState,
+    sourceProjectName: profile.sourceProjectName,
+    sourceReason: profile.sourceReason,
     archived: profile.archived,
     dismissed: profile.dismissed,
   };
@@ -3862,6 +3983,7 @@ function tavernProfilesForPersistence(
       provider: draft.provider,
       model: draft.model,
       effort: draft.effort ?? null,
+      ...(draft.provider === 'kota-local' && draft.autoRoute ? { autoRoute: draft.autoRoute } : {}),
       avatarId: draft.avatarId,
       skills: [...draft.skills],
       ghost: draft.ghost,
@@ -3869,7 +3991,7 @@ function tavernProfilesForPersistence(
       archived: !!draft.archived,
       dismissed: !!draft.dismissed,
       kind: hero.kind,
-      record: draft.record ?? null,
+      ...(draft.source ? { source: draft.source } : {}),
     }];
   });
 }
@@ -3887,6 +4009,7 @@ function resetTavernHeroProfiles(saved: TavernHeroProfileDraft[]): TavernHeroPro
     ...factory,
     ...others.map((hero) => {
       if (hero.dismissed) return hero;
+      if (heroSourceReadOnly(hero)) return { ...hero, archived: true };
       let name = hero.name;
       if (factoryNames.has(tavernHeroNameKey(name))) {
         do { name += '(1)'; } while (usedNames.has(tavernHeroNameKey(name)));
@@ -3908,9 +4031,11 @@ function serializeTavernProfilesForPersistence(
 function launchArgs(draft: HeroDraft): string[] {
   const model = normalizeModelIdForProvider(draft.provider, draft.model);
   const modelArgs = model === 'default' ? [] : ['--model', model];
-  const effort = draft.effort?.trim();
+  const effort = draft.provider === 'kota-local' && model === AUTO_ROUTE_MODEL ? 'off' : draft.effort?.trim();
   const effortArgs = effort && effort !== 'default' ? [effort] : [];
   switch (draft.provider) {
+    case 'kota-local':
+      return [...modelArgs, ...(effortArgs.length ? ['--thinking', ...effortArgs] : [])];
     case 'claude':
       return [...modelArgs, ...(effortArgs.length ? ['--effort', ...effortArgs] : []), '--dangerously-skip-permissions'];
     case 'codex':
@@ -3966,6 +4091,7 @@ function tavernHeroNameKey(name: string): string {
 
 function tavernShellProviderClass(providerId: ProviderId): string {
   switch (providerId) {
+    case 'kota-local': return 'provider-kota-local';
     case 'claude': return 'provider-claude';
     case 'codex': return 'provider-codex';
     case 'antigravity': return 'provider-gemini';
@@ -4075,7 +4201,10 @@ export function loadTavernWorkingHeroes(shells?: readonly SupportedShellStatus[]
     .map((hero) => {
       const draft = normalizeDraft(hero, profiles[hero.id]);
       const shell = shellByProvider?.get(draft.provider);
-      const available = shell ? shell.installed : undefined;
+      // Legacy Local templates need an explicit choice in Tavern. Concrete
+      // selections still go through D4's fresh credential gate at recruitment.
+      const modelRequired = draft.provider === 'kota-local' && (!draft.model.trim() || draft.model.trim().toLowerCase() === 'default');
+      const available = draft.provider === 'kota-local' ? modelRequired ? false : undefined : shell ? shell.installed : undefined;
       return {
         id: hero.id,
         templateId: hero.id,
@@ -4085,7 +4214,7 @@ export function loadTavernWorkingHeroes(shells?: readonly SupportedShellStatus[]
         avatarId: draft.avatarId,
         avatarClass: avatarClassForId(draft.avatarId, draft.provider),
         available,
-        unavailableReason: available === false ? `${PROVIDERS[draft.provider].name} CLI unavailable` : undefined,
+        unavailableReason: modelRequired ? 'Choose a model for this Hero in Tavern.' : available === false ? `${PROVIDERS[draft.provider].name} CLI unavailable` : undefined,
       };
     });
 }

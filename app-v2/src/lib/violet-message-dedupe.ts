@@ -15,17 +15,19 @@ export function prepareComposerDeliveryDedupeText(text: string): PreparedDedupeT
 }
 
 export function hasLeadingTemporalGap(text: string): boolean {
-  const prepared = prepareLeadingEnvelopeText(text);
+  const prepared = prepareLeadingEnvelopeText(stripLeadingMarks(text));
   return TEMPORAL_GAP_BLOCK.test(prepared);
 }
 
-export function stripLeadingTemporalGap(text: string): string {
+export function stripLeadingTemporalGap(raw: string): string {
+  const text = stripLeadingMarks(raw);
   const prepared = prepareLeadingEnvelopeText(text);
   const match = prepared.match(TEMPORAL_GAP_BLOCK);
   return match ? prepared.slice(match[0].length) : text;
 }
 
-export function stripLeadingTemporalGapForDisplay(text: string): string {
+export function stripLeadingTemporalGapForDisplay(raw: string): string {
+  const text = stripLeadingMarks(raw);
   const prepared = prepareLeadingEnvelopeText(text);
   const match = prepared.match(TEMPORAL_GAP_BLOCK);
   if (!match) return text;
@@ -123,6 +125,15 @@ const TEMPORAL_GAP_BLOCK = new RegExp(
   `^<KOTA_TEMPORAL_GAP v="1" current_time="[^"\\r\\n]{1,64}">\\r?\\n${TEMPORAL_GAP_COPY.replaceAll('.', '\\.')}` +
   '\\r?\\n</KOTA_TEMPORAL_GAP>(?:\\r?\\n|$)',
 );
+
+// The host puts its marks/Dreams envelope first, ahead of any temporal gap. Peeled
+// by syntax, like the gap: typed text that starts with this exact block is too.
+const MARKS_BLOCK = /^\s*<KOTA_MARKS v="1" revision="\d+">\r?\n[\s\S]*?\r?\n<\/KOTA_MARKS>(?:\r?\n|$)/;
+
+function stripLeadingMarks(text: string): string {
+  const match = text.match(MARKS_BLOCK);
+  return match ? text.slice(match[0].length) : text;
+}
 
 function prepareLeadingEnvelopeText(text: string): string {
   let rest = text.replace(/^[\s\u0000-\u001f\u007f-\u009f]+/u, '');

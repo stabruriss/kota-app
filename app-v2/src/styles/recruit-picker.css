@@ -1,0 +1,47 @@
+.shortcut-recruit-layer.soul-recruit-layer {
+  position: fixed;
+  z-index: 6600;
+  padding: 20px;
+  overscroll-behavior: contain;
+}
+.shortcut-recruit-panel.soul-recruit-panel {
+  display: flex; flex-direction: column;
+  width: min(480px, 100%);
+  max-height: min(610px, calc(100dvh - 40px)); min-height: 0;
+}
+.soul-recruit-panel .shortcut-recruit-head { flex: none; }
+.soul-recruit-scroll { overflow-y: auto; min-height: 0; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.soul-recruit-group + .soul-recruit-group { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 8px; }
+.soul-recruit-group-toggle, .soul-recruit-project-toggle {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  width: 100%; min-height: 36px; border: 0; border-radius: var(--r-sm);
+  background: none; text-align: left; color: var(--text-2); cursor: pointer;
+}
+.soul-recruit-group-toggle { font: 700 11px var(--font-display); letter-spacing: .6px; }
+.soul-recruit-group-toggle span:last-child, .soul-recruit-project-toggle span:last-child { flex: none; font: 11px var(--font-mono); color: var(--text-4); }
+.soul-recruit-panel .working-hero-picker.modal { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.soul-recruit-panel .working-hero-pill { min-width: 0; }
+.soul-recruit-panel .working-hero-copy { overflow: hidden; }
+.soul-recruit-panel .working-hero-copy b { overflow: hidden; text-overflow: ellipsis; }
+.soul-recruit-show { border: 0; background: none; color: var(--brass-hi); font: 11px var(--font-mono); cursor: pointer; padding: 9px 0 2px; }
+.soul-recruit-project { border: 1px solid var(--border); border-radius: var(--r-sm); margin-top: 6px; overflow: hidden; }
+.soul-recruit-project-toggle { padding: 8px 10px; font: 12px var(--font-sans); }
+.soul-recruit-project-toggle span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.soul-recruit-agents { padding: 0 6px 6px; }
+.soul-recruit-incarnation { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 43px; padding: 5px 8px; border: 0; border-radius: var(--r-sm); background: none; color: var(--text); text-align: left; cursor: pointer; }
+.soul-recruit-incarnation:hover, .soul-recruit-project-toggle:hover, .soul-recruit-group-toggle:hover { background: rgba(218,214,204,.06); }
+.soul-recruit-incarnation > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.soul-recruit-incarnation .working-hero-avatar { position: relative; flex: none; width: 30px; height: 30px; }
+.soul-recruit-panel p { font: 11px/1.5 var(--font-sans); color: var(--text-3); padding: 0 6px; }
+.soul-recruit-panel .soul-recruit-error, .soul-recruit-confirm .soul-recruit-error { color: var(--terra-hi); overflow-wrap: anywhere; }
+.kota-confirm-card.soul-recruit-confirm { width: min(460px, 100%); padding: 23px; max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; }
+.kota-confirm-card.soul-recruit-confirm.plain-copy h2 { font: 600 23px var(--font-serif); color: var(--text); margin-bottom: 18px; }
+.soul-recruit-origin { display: flex; align-items: center; gap: 13px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: rgba(0,0,0,.13); margin: 0 0 18px; overflow-wrap: anywhere; }
+.soul-recruit-origin .working-hero-avatar { position: relative; flex: none; width: 49px; height: 49px; }
+.soul-recruit-origin small { font: 11px var(--font-sans); color: var(--text-3); }
+.soul-recruit-origin strong { display: block; font: 600 23px/1.2 var(--font-serif); }
+.soul-recruit-confirm p { font: 12px/1.75 var(--font-sans); color: var(--text-2); }
+.soul-recruit-confirm .soul-recruit-reason { padding-left: 12px; border-left: 2px solid var(--terra); color: var(--terra-hi); font-size: 11px; }
+.soul-recruit-confirm .kota-confirm-actions { margin-top: 24px; gap: 10px; }
+.soul-recruit-confirm .kota-confirm-actions button { height: 34px; min-width: 65px; }
+.soul-recruit-layer button:disabled { opacity: .45; cursor: default; }

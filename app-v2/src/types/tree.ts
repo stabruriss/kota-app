@@ -122,6 +122,31 @@ export interface WorkspaceTreePathRequest {
   relativePath?: string;
 }
 
+export interface WorkspaceNameSearchRequest {
+  projectId: string;
+  rootKind: WorkspaceTreeRootKind;
+  includeIgnored: boolean;
+  generation: number;
+  queryRevision: number;
+  query: string;
+  cancel?: boolean;
+}
+
+export interface WorkspaceNameSearchResult {
+  generation: number;
+  queryRevision: number;
+  root: WorkspaceTreeRootInfo | null;
+  /** Only capped hits and their ancestors, never the native name catalogue. */
+  entries: WorkspaceTreeEntry[];
+  matchedCount: number;
+  indexedCount: number;
+  truncated: boolean;
+  indexTruncated: boolean;
+  readFailed: boolean;
+  gitFailed: boolean;
+  cancelled: boolean;
+}
+
 // Legacy preview-tree types are kept so old static preview fixtures keep
 // compiling while the live left column moves to WorkspaceTreeEntry.
 export interface TreeFile {

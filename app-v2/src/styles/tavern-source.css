@@ -1,0 +1,25 @@
+.tavern-source-origin {
+  max-width: 100%;
+  margin: 4px 0 12px;
+  color: var(--copper-hi);
+  font: 11px/1.5 var(--font-sans);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tavern-source-reason,
+.tavern-source-note {
+  font: 11px/1.65 var(--font-sans);
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.tavern-source-reason {
+  margin: 4px 0 12px;
+}
+
+.tavern-profile-center .profile-name-button:disabled {
+  opacity: 1;
+  cursor: default;
+}

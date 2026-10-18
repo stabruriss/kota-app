@@ -1,0 +1,40 @@
+{
+  "piVersion": "1.1.0",
+  "sourceCommit": "abe508e1b89912adde45528136c3221eb69acdd7",
+  "runtimeArchiveSha256": "58671d6c7c79f5dd813ed05112cfbd746b672c769c1c96f8a2ec5a8bf188277d",
+  "purpose": "Real bundled Pi 1.1.0 session, generated with loopback fake model/Jev and stdio MCP; no user data.",
+  "normalization": "Generated cwd/HOME/runtime paths replaced with /synthetic paths. Other content, entry IDs, parent links and routing state are unchanged.",
+  "sha256": "be66a0b9d8f2e0a879448e3816e58a5c8cbca1c0758a47be439217bfc055262f",
+  "sessionId": "11111111-3333-4333-8333-555555555555",
+  "fileName": "2026-10-16T18-41-16-894Z_11111111-3333-4333-8333-555555555555.jsonl",
+  "group": {
+    "models": [
+      {
+        "id": "model-1",
+        "providerId": "kota-fake",
+        "modelId": "fixture",
+        "thinkingLevel": "off",
+        "intent": "Synthetic intent 1"
+      },
+      {
+        "id": "model-2",
+        "providerId": "kota-fake",
+        "modelId": "fixture-alternate",
+        "thinkingLevel": "off",
+        "intent": "Synthetic intent 2"
+      }
+    ],
+    "defaultModel": "model-1",
+    "threshold": 0.85
+  },
+  "expectedKotaIds": [
+    "legacy-a#agent-fixture",
+    "legacy-b#agent-fixture"
+  ],
+  "expectedModelRequests": [
+    "fixture",
+    "fixture",
+    "fixture-alternate"
+  ],
+  "entries": 13
+}

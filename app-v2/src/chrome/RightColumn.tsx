@@ -57,6 +57,7 @@ import {
   bartenderSyncReceipt,
   emberDeliverHumanReminder,
   emberConsolidateDreams,
+  emberExportEpisodes,
   emberPrepareDreams,
   emberScheduleSave,
   emberScheduleState,
@@ -99,6 +100,8 @@ import {
 } from '../bbs-post-versions';
 import { BbsSyncScope, BbsSyncControlButton, BbsSyncActivity, BbsThreadSharing } from './BbsSyncControls';
 import { LaughingManSettings } from './LaughingManSettings';
+import { PuppeteerDanceCard } from './PuppeteerDanceCard';
+import type { DanceController } from '../lib/dance-settings';
 import { MarkdownText } from './VioletRoomPanel';
 import { EmberScheduleInstrument } from './EmberScheduleInstrument';
 import { KotaVersionLabel } from './KotaVersionLabel';
@@ -1196,6 +1199,8 @@ export function RightColumn({
   footerSlot,
   workingStartedAt,
   onDreamingStatusAgentsChange,
+  danceController,
+  danceSeedTarget = null,
 }: {
   sceneKey: SceneKey;
   onOpenHotMem: () => void;
@@ -1216,6 +1221,9 @@ export function RightColumn({
   footerSlot?: ReactNode;
   workingStartedAt?: ReadonlyMap<AgentId, string>;
   onDreamingStatusAgentsChange?: (agentIds: readonly AgentId[]) => void;
+  danceController?: DanceController;
+  /** Composer's selected agent (null for a group send); seeds the sentinel when Dance turns on. */
+  danceSeedTarget?: AgentId | null;
 }) {
   const scene = SCENES[sceneKey]!;
   const { hotMem } = scene;
@@ -2321,6 +2329,13 @@ export function RightColumn({
     return () => window.clearTimeout(timer);
   }, [dreamConsolidationPending, dreamCountdownPaused, dreamDueAt, dreamOverlay, runDreamNow]);
 
+  // Episodes catch up as the countdown appears; consolidation moves the Dreams it
+  // archives afterwards. Not awaited: the backend logs its own failures.
+  const exportDreamEpisodes = useCallback(() => {
+    const projectRoots = dreamTargetProjects.map((project) => project.projectRoot);
+    if (projectRoots.length > 0) void emberExportEpisodes(projectRoots).catch(() => undefined);
+  }, [dreamTargetProjects]);
+
   // While agents are still working we hold on the "wrapping up" scene; once the room
   // goes idle, begin the normal 10-minute countdown automatically.
   useEffect(() => {
@@ -2329,7 +2344,8 @@ export function RightColumn({
     setDreamCountdownPaused(false);
     setDreamPausedRemainingSeconds(null);
     setDreamOverlay('countdown');
-  }, [dreamOverlay, workingCount]);
+    exportDreamEpisodes();
+  }, [dreamOverlay, exportDreamEpisodes, workingCount]);
 
   const startDreamCountdown = useCallback(() => {
     if (dreamOverlay !== 'off') return;
@@ -2349,7 +2365,8 @@ export function RightColumn({
     }
     setDreamDueAt(Date.now() + 10 * 60 * 1000);
     setDreamOverlay('countdown');
-  }, [dreamOverlay, dreamTargetNames, dreamTargetProjects, workingCount]);
+    exportDreamEpisodes();
+  }, [dreamOverlay, dreamTargetNames, dreamTargetProjects, exportDreamEpisodes, workingCount]);
 
   const pauseDreamCountdown = useCallback(() => {
     if (dreamOverlay !== 'countdown' || dreamCountdownPaused || !dreamDueAt) return;
@@ -3811,6 +3828,8 @@ export function RightColumn({
             </div>
             {emberMessage && <div className="ember-status">{emberMessage}</div>}
           </section>
+          {danceController && <PuppeteerDanceCard controller={danceController} owner={workspace?.repoFullName || workspace?.projectId || 'This project'} seedTarget={danceSeedTarget}
+            agents={roomAgents.map(id => ({ id, name: agentMeta?.[id]?.name ?? id, avatarId: agentMeta?.[id]?.avatarId }))} />}
           <div
             className={`lm-card ${lm?.lastError ? 'error' : ''} ${lm?.selected?.muted ? 'muted' : ''}`}
             role="button"

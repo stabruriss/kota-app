@@ -36,6 +36,11 @@ type WhiteboardPanelProps = {
     pagePath: string;
     title: string;
   }) => Promise<WhiteboardCanvasLoadResult>;
+  onDeletePage: (request: {
+    projectRoot?: string | null;
+    pagePath: string;
+    activePagePath?: string | null;
+  }) => Promise<WhiteboardCanvasLoadResult>;
   onSaveSnapshot: (request: {
     projectRoot?: string | null;
     pagePath: string;
@@ -179,6 +184,7 @@ export function WhiteboardPanel({
   onLoadCanvas,
   onSaveCanvas,
   onRenamePage,
+  onDeletePage,
   onSaveSnapshot,
 }: WhiteboardPanelProps) {
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
@@ -191,6 +197,10 @@ export function WhiteboardPanel({
   const pagesMenuRef = useRef<HTMLDivElement | null>(null);
   const editorRootRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
+  const canvasRequestsRef = useRef(new Set<Promise<WhiteboardCanvasLoadResult>>());
+  const requestGenerationRef = useRef(0);
+  const deletingRef = useRef(false);
+  const activePagePathRef = useRef<string | null>(null);
   const [canvas, setCanvas] = useState<WhiteboardCanvasLoadResult | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [status, setStatus] = useState('Loading canvas...');
@@ -200,6 +210,25 @@ export function WhiteboardPanel({
   const [renameDraft, setRenameDraft] = useState('');
   const [styleControlsAvailable, setStyleControlsAvailable] = useState(false);
   const [shapePaletteOpen, setShapePaletteOpen] = useState(false);
+  const [deletePage, setDeletePage] = useState<WhiteboardPage | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Delete waits for prior writes/reads (load also updates the manifest). Results
+  // from before deletion must never restore a removed page in the editor.
+  const trackCanvasRequest = useCallback(async (request: Promise<WhiteboardCanvasLoadResult>) => {
+    const generation = requestGenerationRef.current;
+    canvasRequestsRef.current.add(request);
+    try {
+      const result = await request;
+      return generation === requestGenerationRef.current ? result : null;
+    } catch (error) {
+      if (generation !== requestGenerationRef.current) return null;
+      throw error;
+    } finally {
+      canvasRequestsRef.current.delete(request);
+    }
+  }, []);
 
   useEffect(() => {
     // The whiteboard is modal: pull focus off the chat composer when it opens, so pasted
@@ -215,6 +244,7 @@ export function WhiteboardPanel({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (deletePage) return; // The confirmation consumes Escape at window capture.
       if (pagesMenuOpen) {
         event.preventDefault();
         setPagesMenuOpen(false);
@@ -231,10 +261,10 @@ export function WhiteboardPanel({
     };
     document.addEventListener('keydown', handleKeyDown, true);
     return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [onClose, pagesMenuOpen, shapePaletteOpen]);
+  }, [deletePage, onClose, pagesMenuOpen, shapePaletteOpen]);
 
   useEffect(() => {
-    if (!pagesMenuOpen) return undefined;
+    if (!pagesMenuOpen || deletePage) return undefined;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
@@ -243,7 +273,7 @@ export function WhiteboardPanel({
     };
     document.addEventListener('pointerdown', handlePointerDown, true);
     return () => document.removeEventListener('pointerdown', handlePointerDown, true);
-  }, [pagesMenuOpen]);
+  }, [deletePage, pagesMenuOpen]);
 
   useEffect(() => {
     if (pagesMenuOpen) return;
@@ -271,6 +301,7 @@ export function WhiteboardPanel({
   }, [canvas]);
 
   const applyCanvasResult = useCallback((next: WhiteboardCanvasLoadResult, options: { updateScene: boolean }) => {
+    activePagePathRef.current = next.pagePath;
     setCanvas(next);
     setLoadError(null);
     const nextPage = next.pages.find((page) => page.path === next.pagePath);
@@ -301,8 +332,8 @@ export function WhiteboardPanel({
 
   useEffect(() => {
     let cancelled = false;
-    void onLoadCanvas(projectRoot, readLastCanvasPage(projectRoot)).then((next) => {
-      if (cancelled) return;
+    void trackCanvasRequest(onLoadCanvas(projectRoot, readLastCanvasPage(projectRoot))).then((next) => {
+      if (cancelled || !next) return;
       applyCanvasResult(next, { updateScene: false });
     }).catch((err) => {
       if (cancelled) return;
@@ -312,7 +343,7 @@ export function WhiteboardPanel({
     return () => {
       cancelled = true;
     };
-  }, [applyCanvasResult, onLoadCanvas, projectRoot]);
+  }, [applyCanvasResult, onLoadCanvas, projectRoot, trackCanvasRequest]);
 
   useEffect(() => {
     const root = editorRootRef.current;
@@ -349,13 +380,16 @@ export function WhiteboardPanel({
   }, [canvas?.pagePath, shapePaletteOpen]);
 
   const saveData = useCallback(async (dataJson: string, pagePath: string) => {
+    if (deletingRef.current) return;
     const hash = simpleHash(dataJson);
     if (hash === lastHashRef.current) return;
     lastHashRef.current = hash;
     setStatus('Saving canvas...');
     try {
-      const next = await onSaveCanvas({ projectRoot, pagePath, dataJson });
+      const next = await trackCanvasRequest(onSaveCanvas({ projectRoot, pagePath, dataJson }));
+      if (!next) return;
       lastModifiedRef.current = next.modifiedMs;
+      activePagePathRef.current = next.pagePath;
       setCanvas(next);
       const nextPage = next.pages.find((page) => page.path === next.pagePath);
       setStatus(`Saved ${nextPage?.title ?? next.pageId}`);
@@ -363,17 +397,18 @@ export function WhiteboardPanel({
       setLoadError(err instanceof Error ? err.message : String(err));
       setStatus('Save failed');
     }
-  }, [onSaveCanvas, projectRoot]);
+  }, [onSaveCanvas, projectRoot, trackCanvasRequest]);
 
   const scheduleSave = useCallback(() => {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
       // Serialize once, when the debounce settles — not on every onChange. serializeAsJSON walks
       // the whole scene, so doing it per change made large canvases stutter while drawing. The
       // snapshot carries its own pagePath so a page switch mid-debounce still saves to the
       // page the edit happened on.
       const scene = latestSceneRef.current;
-      if (!scene) return;
+      if (!scene || deletingRef.current) return;
       const dataJson = serializeAsJSON(...scene.args);
       void saveData(dataJson, scene.pagePath);
     }, SAVE_DEBOUNCE_MS);
@@ -381,13 +416,15 @@ export function WhiteboardPanel({
 
   useEffect(() => () => {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    requestGenerationRef.current += 1;
   }, []);
 
   useEffect(() => {
     if (!canvas?.pagePath) return undefined;
     const timer = window.setInterval(() => {
-      void onLoadCanvas(projectRoot, canvas.pagePath).then((next) => {
-        if (next.pagePath !== canvas.pagePath) return;
+      if (deletingRef.current) return;
+      void trackCanvasRequest(onLoadCanvas(projectRoot, canvas.pagePath)).then((next) => {
+        if (!next || next.pagePath !== canvas.pagePath) return;
         // Cheap mtime guard first: only hash the (possibly large) canvas JSON when the file
         // actually changed on disk, instead of re-hashing the whole document every poll tick.
         if (next.modifiedMs === lastModifiedRef.current) return;
@@ -399,36 +436,37 @@ export function WhiteboardPanel({
       });
     }, EXTERNAL_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [applyCanvasResult, canvas?.pagePath, onLoadCanvas, projectRoot]);
+  }, [applyCanvasResult, canvas?.pagePath, onLoadCanvas, projectRoot, trackCanvasRequest]);
 
   const switchPage = useCallback((pagePath: string) => {
     setStatus('Loading page...');
     setPagesMenuOpen(false);
     setRenamingPagePath(null);
-    void onLoadCanvas(projectRoot, pagePath)
-      .then((next) => applyCanvasResult(next, { updateScene: false }))
+    void trackCanvasRequest(onLoadCanvas(projectRoot, pagePath))
+      .then((next) => { if (next) applyCanvasResult(next, { updateScene: false }); })
       .catch((err) => {
         setLoadError(err instanceof Error ? err.message : String(err));
         setStatus('Could not load page');
       });
-  }, [applyCanvasResult, onLoadCanvas, projectRoot]);
+  }, [applyCanvasResult, onLoadCanvas, projectRoot, trackCanvasRequest]);
 
   const renamePage = useCallback((page: WhiteboardPage, title: string) => {
     const nextTitle = title.trim().replace(/\s+/g, ' ');
     if (!nextTitle || nextTitle === page.title) return;
     setStatus('Renaming page...');
-    void onRenamePage({
+    void trackCanvasRequest(onRenamePage({
       projectRoot,
       pagePath: page.path,
       title: nextTitle,
-    }).then((next) => {
+    })).then((next) => {
+      if (!next) return;
       applyCanvasResult(next, { updateScene: false });
       setStatus(`Renamed ${nextTitle}`);
     }).catch((err) => {
       setLoadError(err instanceof Error ? err.message : String(err));
       setStatus('Rename failed');
     });
-  }, [applyCanvasResult, onRenamePage, projectRoot]);
+  }, [applyCanvasResult, onRenamePage, projectRoot, trackCanvasRequest]);
 
   const finishRenamePage = useCallback((page: WhiteboardPage, title: string) => {
     setRenamingPagePath(null);
@@ -446,11 +484,12 @@ export function WhiteboardPanel({
       pagePath = pagePathForIndex(canvas.canvasDir, index);
     }
     setStatus('Creating page...');
-    void onSaveCanvas({
+    void trackCanvasRequest(onSaveCanvas({
       projectRoot,
       pagePath,
       dataJson: defaultExcalidrawJson(),
-    }).then((next) => {
+    })).then((next) => {
+      if (!next) return;
       applyCanvasResult(next, { updateScene: false });
       setPagesMenuOpen(false);
     })
@@ -458,7 +497,45 @@ export function WhiteboardPanel({
         setLoadError(err instanceof Error ? err.message : String(err));
         setStatus('Could not create page');
       });
-  }, [applyCanvasResult, canvas, onSaveCanvas, projectRoot]);
+  }, [applyCanvasResult, canvas, onSaveCanvas, projectRoot, trackCanvasRequest]);
+
+  const closeDelete = useCallback(() => {
+    if (deletingRef.current) return;
+    setDeletePage(null);
+    setDeleteError(null);
+    titleButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const confirmDelete = useCallback(async () => {
+    if (!deletePage || !canvas || deletingRef.current) return;
+    deletingRef.current = true;
+    setDeleting(true);
+    setDeleteError(null);
+    requestGenerationRef.current += 1;
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = null;
+    const scene = latestSceneRef.current;
+    latestSceneRef.current = null;
+    try {
+      await Promise.allSettled([...canvasRequestsRef.current]);
+      // Keep unsaved edits to a different page. Edits to the deleted page are discarded.
+      if (scene && scene.pagePath !== deletePage.path) {
+        await onSaveCanvas({ projectRoot, pagePath: scene.pagePath, dataJson: serializeAsJSON(...scene.args) });
+      }
+      const next = await onDeletePage({ projectRoot, pagePath: deletePage.path, activePagePath: canvas.pagePath });
+      applyCanvasResult(next, { updateScene: false });
+      setDeletePage(null);
+      setPagesMenuOpen(false);
+      titleButtonRef.current?.focus({ preventScroll: true });
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : String(error));
+      latestSceneRef.current = scene;
+      if (scene) scheduleSave();
+    } finally {
+      deletingRef.current = false;
+      setDeleting(false);
+    }
+  }, [applyCanvasResult, canvas, deletePage, onDeletePage, onSaveCanvas, projectRoot, scheduleSave]);
 
   const insertToChat = useCallback(async () => {
     const api = apiRef.current;
@@ -593,6 +670,15 @@ export function WhiteboardPanel({
                           >
                             Rename
                           </button>
+                          <button
+                            type="button"
+                            className="wb-page-menu-edit wb-page-menu-delete"
+                            disabled={saving}
+                            aria-label={`Delete ${page.title}`}
+                            onClick={() => { setDeleteError(null); setDeletePage(page); }}
+                          >
+                            Delete
+                          </button>
                         </>
                       )}
                     </div>
@@ -644,7 +730,7 @@ export function WhiteboardPanel({
                 handleKeyboardGlobally={false}
                 name={canvas.pageId}
                 onChange={(elements, appState, files: BinaryFiles) => {
-                  if (applyingExternalRef.current) return;
+                  if (applyingExternalRef.current || deletingRef.current || canvas.pagePath !== activePagePathRef.current) return;
                   const hasSelection = Object.keys(appState.selectedElementIds ?? {}).length > 0;
                   const toolType = appState.activeTool?.type;
                   const styleable = hasSelection || (toolType !== undefined && STYLEABLE_TOOLS.has(toolType));
@@ -680,6 +766,50 @@ export function WhiteboardPanel({
           </div>
         </div>
       </div>
+      {deletePage && (
+        <DeletePageConfirmation page={deletePage} deleting={deleting} error={deleteError}
+          onCancel={closeDelete} onConfirm={() => { void confirmDelete(); }} />
+      )}
     </div>
   );
+}
+
+function DeletePageConfirmation({ page, deleting, error, onCancel, onConfirm }: {
+  page: WhiteboardPage; deleting: boolean; error: string | null;
+  onCancel: () => void; onConfirm: () => void;
+}) {
+  const cardRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!deleting) onCancel();
+      }
+      if (event.key === 'Tab') {
+        const buttons = cardRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+        event.preventDefault();
+        if (!buttons?.length) return;
+        const index = Array.from(buttons).indexOf(document.activeElement as HTMLButtonElement);
+        buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus();
+      }
+    };
+    window.addEventListener('keydown', keydown, true);
+    return () => window.removeEventListener('keydown', keydown, true);
+  }, [deleting, onCancel]);
+  return <div className="kota-confirm-layer" onMouseDown={() => { if (!deleting) onCancel(); }}>
+    <section ref={cardRef} className="kota-confirm-card danger" role="alertdialog" aria-modal="true"
+      aria-label="Delete page?" aria-describedby="whiteboard-delete-description" aria-busy={deleting}
+      onMouseDown={event => event.stopPropagation()}>
+      <h2>Delete page?</h2>
+      <pre id="whiteboard-delete-description">{`“${page.title}” and everything on it will be deleted.\n\nImages already inserted in chat will be kept.`}</pre>
+      {error && <p role="alert">{error}</p>}
+      <div className="kota-confirm-actions">
+        <button type="button" autoFocus disabled={deleting} onClick={onCancel}>Cancel</button>
+        <button type="button" className="confirm" disabled={deleting} onClick={onConfirm}>
+          {deleting ? 'Deleting…' : 'Delete page'}
+        </button>
+      </div>
+    </section>
+  </div>;
 }

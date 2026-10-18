@@ -1,3 +1,4 @@
+import type { LocalStartupOptions } from './lib/local-startup';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TopBar } from './chrome/TopBar';
 import { Stage } from './chrome/Stage';
@@ -18,6 +19,7 @@ import { SmartTerminal } from './chrome/SmartTerminal';
 import { AgentWindowsLayer, type AgentWindowsLayerHandle } from './chrome/AgentWindowsLayer';
 import { BroadcastTargetPopover } from './chrome/BroadcastTargetPopover';
 import { ShortcutRecruitModal } from './chrome/ShortcutRecruitModal';
+import { SoulDismissErrorDialog, type SoulDismissChoice } from './chrome/SoulDismissErrorDialog';
 import {
   IncarnationProgressBar,
   normalizeIncarnationProgressStep,
@@ -46,6 +48,11 @@ import {
   useAgentRuntime,
   type AgentRuntimeExitContext,
 } from './hooks/useAgentRuntime';
+import { LocalWorkbenchHost } from './chrome/LocalWorkbenchHost';
+import { EMPTY_LOCAL_QUEUE_GUARDS, localQueueGuardKey } from './lib/local-queue';
+import { KOTA_LOCAL_ENABLED, localInputTargets, submitLocal, type LocalComposerInput } from './lib/local-rpc';
+import { KOTA_LOCAL_LINK_EVENT, type KotaLocalLinkTarget } from './lib/local-auth';
+import { recruitFromIncarnation, type IncarnationRecruitSource, type RecruitPreview } from './lib/reincarnation';
 import {
   isAgentCli,
   type AgentCli,
@@ -78,17 +85,24 @@ import {
   lmStatus,
   lmUpdateWorkingAgents,
   materializeComposerAttachmentPath,
+  openExternalUrl,
   openWorkspaceProject,
   onVioletRoomSynced,
   onIncarnationProgressEvent,
   resolveProjectAgentLaunch,
+  checkProjectAgentSession,
+  isSessionUnavailableError,
+  SESSION_UNAVAILABLE_MESSAGE,
   resolveWorkspaceAgentLaunch,
   resolveDevProjectRoot,
   saveComposerClipboardImage,
   startFreshProjectAgentSession,
   loadWhiteboardCanvas,
   prepareComposerTemporalContext,
+  readVioletRoomCache,
+  peekVioletRoomMessages,
   renameWhiteboardCanvasPage,
+  deleteWhiteboardCanvasPage,
   saveWhiteboardCanvas,
   saveWhiteboardCanvasSnapshot,
   setVioletPrivacy,
@@ -103,6 +117,7 @@ import {
   type ProjectAgentRecord,
   type SupportedShellStatus,
   type TavernHeroProfileDraft,
+  type SoulInput,
   type VioletChatMessage,
   type WorkspaceAgentSpec,
   type WorkspaceProject,
@@ -114,12 +129,16 @@ import type { Project, ProjectId } from './types/project';
 import type { WorkingHero } from './types/agentbar';
 import {
   composeProjectAgentName,
+  projectAgentNameFields,
   incarnationNameFields,
   splitProjectAgentName,
   type ProjectAgentNameFields,
 } from './chrome/ProjectAgentName';
 import { avatarClassForId, refreshUserHeroAvatars } from './lib/hero-avatars';
-import { emitVioletComposerSent, recordVioletComposerTemporalGap } from './chrome/violet-room-events';
+import { emitVioletComposerSent, emitVioletComposerDelivery, recordVioletComposerTemporalGap, violetComposerSentHistory } from './chrome/violet-room-events';
+import { useDanceSettings, danceErrorText } from './lib/dance-settings';
+import { prepareDanceDelivery, type DanceComposerDraft, type DanceDelivery } from './lib/dance-composer';
+import { sortVioletMessages } from './chrome/VioletRoomPanel';
 import { reconcileVioletComposerAfterAgentExit } from './chrome/violet-composer-exit';
 import { formatAgentPromptInput, normalizeAgentPromptPayload } from './lib/agent-prompt';
 import { mintProjectAgentId } from './lib/project-agent-ids';
@@ -225,12 +244,11 @@ const ROMAN_SUFFIXES: Record<number, string> = {
   10: 'X',
 };
 
-interface IncarnationLaunchProfile {
-  templateId: string;
+type IncarnationLaunchProfile = {
   displayName: string;
   nameFields: ProjectAgentNameFields;
-  profile: TavernHeroProfileDraft;
-}
+} & ({ templateId: string; profile: TavernHeroProfileDraft; source?: never }
+  | { source: IncarnationRecruitSource; templateId?: never; profile?: never });
 
 interface RecruitProgressOptions {
   progressId?: string | null;
@@ -432,7 +450,7 @@ function notifyRecruitFailure(agentId: AgentId, err: unknown) {
 }
 
 function notifyExistingAgentLaunchFailure(agentId: AgentId, err: unknown) {
-  const summary = err instanceof Error && err.message.trim()
+  const summary = isSessionUnavailableError(err) ? SESSION_UNAVAILABLE_MESSAGE : err instanceof Error && err.message.trim()
     ? err.message
     : typeof err === 'string' && err.trim()
       ? err
@@ -1080,7 +1098,7 @@ export function App() {
   const [shortcutRecruitSeatIndex, setShortcutRecruitSeatIndex] = useState<number | null>(null);
   const [incarnationProgress, setIncarnationProgress] = useState<IncarnationProgressView | null>(null);
   const incarnationProgressIdRef = useRef<string | null>(null);
-  const incarnationRetryPayloadRef = useRef<{ hero: WorkingHero; seatIndex: number } | null>(null);
+  const incarnationRetryPayloadRef = useRef<{ hero: WorkingHero; seatIndex: number; source?: IncarnationRecruitSource; preview?: RecruitPreview } | null>(null);
   const incarnationProgressHideTimerRef = useRef<number | null>(null);
   const [workingHeroes, setWorkingHeroes] = useState<readonly WorkingHero[]>(() =>
     loadTavernWorkingHeroes(),
@@ -1099,6 +1117,8 @@ export function App() {
   const [tavernPreparing, setTavernPreparing] = useState(false);
   const [tavernPrepareItems, setTavernPrepareItems] = useState<TavernLoadingLogItem[]>([]);
   const [tavernInitialTab, setTavernInitialTab] = useState<TavernTab>('heroes');
+  const [tavernLocalLinkIntent, setTavernLocalLinkIntent] = useState<{ target: KotaLocalLinkTarget; request: number } | null>(null);
+  const localLinkReturnRef = useRef<{ projectRoot: string; agentId: AgentId } | null>(null);
   const [projectSetupOpen, setProjectSetupOpen] = useState(false);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceProject | null>(null);
   const [workspaceInitialLoadComplete, setWorkspaceInitialLoadComplete] = useState(() => !hasTauriRuntime());
@@ -1114,12 +1134,39 @@ export function App() {
   });
   const projectAgentRoot = activeWorkspace ? null : recruitProjectRoot;
   const violetProjectRoot = activeWorkspace?.localRoot ?? projectAgentRoot;
+  const dance = useDanceSettings(violetProjectRoot ?? null, KOTA_LOCAL_ENABLED);
+  const danceEnabled = !!dance.settings?.enabled;
+  // A late route must not select an agent in another room or after manual exit,
+  // even if the user has since returned to the same room or re-enabled Dance.
+  const danceSelectionScopeRef = useRef({ root: violetProjectRoot, enabled: danceEnabled });
+  if (danceSelectionScopeRef.current.root !== violetProjectRoot || danceSelectionScopeRef.current.enabled !== danceEnabled) {
+    danceSelectionScopeRef.current = { root: violetProjectRoot, enabled: danceEnabled };
+  }
+  const [danceSendError, setDanceSendError] = useState<{ root: string; text: string } | null>(null);
+  const [localWorkbench, setLocalWorkbench] = useState<{ projectRoot: string; agentId: AgentId; section?: 'queue'; focusRequest: number; resumeOnOpen?: boolean; linkReturnRequest?: number } | null>(null);
+  const openLocalWorkbench = useCallback((agentId: AgentId, section?: 'queue', resumeOnOpen = false) => {
+    if (!violetProjectRoot) return;
+    setLocalWorkbench((previous) => ({ projectRoot: violetProjectRoot, agentId, section, resumeOnOpen,
+      focusRequest: (previous?.focusRequest ?? 0) + 1,
+      linkReturnRequest: previous?.projectRoot === violetProjectRoot && previous.agentId === agentId ? previous.linkReturnRequest : undefined,
+    }));
+  }, [violetProjectRoot]);
+  const [localQueueGuards, setLocalQueueGuards] = useState<ReadonlySet<string>>(EMPTY_LOCAL_QUEUE_GUARDS);
+  const localQueueGuardsRef = useRef(localQueueGuards);
+  const updateLocalQueueGuards = useCallback((keys: ReadonlySet<string>) => { localQueueGuardsRef.current = keys; setLocalQueueGuards(keys); }, []);
+  const closeLocalWorkbench = useCallback(() => setLocalWorkbench(null), []);
+  useEffect(() => { setLocalWorkbench(null); }, [violetProjectRoot]);
+
   const projectRulesDir = activeWorkspace?.rulesDir ?? (projectAgentRoot ? `${projectAgentRoot}/project-rules` : null);
   const [agentContextMenu, setAgentContextMenu] = useState<AgentContextMenuState>(null);
   const [projectAgentDetailId, setProjectAgentDetailId] = useState<AgentId | null>(null);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archivedAgents, setArchivedAgents] = useState<ProjectAgentDetail[]>([]);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
+  const [soulDismissDialog, setSoulDismissDialog] = useState<{ name: string; id: number } | null>(null);
+  const soulDismissResolveRef = useRef<((choice: SoulDismissChoice) => void) | null>(null);
+  const soulDismissSequenceRef = useRef(0);
+  const dismissAgentBusyRef = useRef(false);
   const agentPromptQueuesRef = useRef<Map<AgentId, Promise<void>>>(new Map());
   const existingAgentLaunchesRef = useRef<Map<AgentId, Promise<ExistingAgentLaunchResult>>>(new Map());
   const emberSchedulerInFlightRef = useRef(false);
@@ -1274,6 +1321,20 @@ export function App() {
       return null;
     });
   }, []);
+  const chooseSoulDismiss = useCallback((choice: SoulDismissChoice) => {
+    const resolve = soulDismissResolveRef.current;
+    soulDismissResolveRef.current = null;
+    setSoulDismissDialog(null);
+    resolve?.(choice);
+  }, []);
+  const confirmSoulDismiss = useCallback((name: string) => new Promise<SoulDismissChoice>(resolve => {
+    soulDismissResolveRef.current = resolve;
+    setSoulDismissDialog({ name, id: ++soulDismissSequenceRef.current });
+  }), []);
+  useEffect(() => () => {
+    soulDismissResolveRef.current?.('cancel');
+    soulDismissResolveRef.current = null;
+  }, []);
   const refreshFileTree = useCallback(() => {
     setFileTreeRefreshToken((token) => token + 1);
   }, []);
@@ -1390,9 +1451,9 @@ export function App() {
     })
   ), []);
   const agentRuntime = useAgentRuntime({ onExit: handleRuntimeAgentExit });
-  const recruitWithLeaseTakeover = useCallback(async (request: AgentSpawnRequest): Promise<boolean> => {
+  const recruitWithLeaseTakeover = useCallback(async (request: AgentSpawnRequest, startup?: LocalStartupOptions): Promise<boolean> => {
     try {
-      await agentRuntime.recruit(request);
+      await agentRuntime.recruit(request, startup);
       return true;
     } catch (err) {
       if (!isAgentSessionLeaseConflictError(err)) throw err;
@@ -1408,11 +1469,16 @@ export function App() {
         },
       );
       if (!confirmed) return false;
-      await agentRuntime.recruit({ ...request, takeover: true });
+      await agentRuntime.recruit({ ...request, takeover: true }, startup);
       return true;
     }
   }, [agentName, agentRuntime, confirmInApp]);
   const [agentPtySummaries, setAgentPtySummaries] = useState<AgentSummary[]>([]);
+  useEffect(() => { agentRuntime.observeLocal(agentPtySummaries); }, [agentPtySummaries, agentRuntime.observeLocal]);
+  const isLocalAgent = useCallback((id: AgentId) => (
+    agentRuntime.isLocal(id)
+    || (agentPtySummaries.find((entry) => entry.agentId === id)?.cli ?? agentMeta[id]?.provider) === 'kota-local'
+  ), [agentMeta, agentPtySummaries, agentRuntime]);
   const refreshAgentPtySummaries = useCallback(async () => {
     try {
       setAgentPtySummaries(await listAgentPtys());
@@ -2313,8 +2379,9 @@ export function App() {
   const minimizeAllAgents = useCallback(() => {
     setMinimized(new Set(activeLiveAgents));
     setTerminalFocusedAgent(null);
+    closeLocalWorkbench();
     focusComposerEndSoon();
-  }, [activeLiveAgents, focusComposerEndSoon]);
+  }, [activeLiveAgents, closeLocalWorkbench, focusComposerEndSoon]);
 
   const resetRoomUiState = useCallback((provisionalLayout?: AgentLayoutState | null) => {
     invalidateAgentHydration();
@@ -2559,14 +2626,19 @@ export function App() {
     visibleWorkspaceTabs,
   ]);
 
-  const selectComposerTarget = useCallback((id: AgentId) => {
+  const exitDance = useCallback(async () => {
+    if (!dance.settings?.enabled) return true;
+    return !!await dance.save(current => ({ ...current, enabled: false }));
+  }, [dance.settings, dance.save]);
+  const selectComposerTarget = useCallback(async (id: AgentId) => {
     if (unsupportedAgentProviders.has(id)) return;
+    if (danceEnabled && !await exitDance()) return;
     setComposerTarget(id);
     setComposerBroadcast(false);
     setBroadcastPopupOpen(false);
     setTerminalFocusedAgent(null);
     focusComposerSoon();
-  }, [focusComposerSoon, unsupportedAgentProviders]);
+  }, [danceEnabled, exitDance, focusComposerSoon, unsupportedAgentProviders]);
   useEffect(() => {
     setComposerTarget((current) => (
       current && unsupportedAgentProviders.has(current) ? null : current
@@ -2576,7 +2648,8 @@ export function App() {
       return new Set([...current].filter((id) => !unsupportedAgentProviders.has(id)));
     });
   }, [unsupportedAgentProviders]);
-  const openTargetPicker = useCallback(() => {
+  const openTargetPicker = useCallback(async () => {
+    if (danceEnabled && !await exitDance()) return;
     setBroadcastRecipients(() => {
       if (composerBroadcast) return new Set(broadcastRecipients);
       return composerTarget ? new Set([composerTarget]) : new Set();
@@ -2584,7 +2657,7 @@ export function App() {
     setBroadcastPopupOpen(true);
     setTerminalFocusedAgent(null);
     focusComposerSoon();
-  }, [broadcastRecipients, composerBroadcast, composerTarget, focusComposerSoon]);
+  }, [danceEnabled, exitDance, broadcastRecipients, composerBroadcast, composerTarget, focusComposerSoon]);
   const toggleBroadcastRecipient = useCallback((id: AgentId) => {
     if (unsupportedAgentProviders.has(id)) return;
     setBroadcastRecipients((prev) => {
@@ -2626,12 +2699,13 @@ export function App() {
   }, [broadcastPopupOpen, composerBroadcast, groupChatOpen]);
 
   const focusAgent = useCallback((id: AgentId) => {
+    if (isLocalAgent(id)) { openLocalWorkbench(id); return; }
     clearPendingComposerFocus();
     restoreAgent(id);
     setTerminalFocusedAgent(id);
     syncComposerTargetForTerminalFocus(id);
     windowsRef.current?.bringToFront(id);
-  }, [clearPendingComposerFocus, restoreAgent, syncComposerTargetForTerminalFocus]);
+  }, [clearPendingComposerFocus, restoreAgent, syncComposerTargetForTerminalFocus, isLocalAgent, openLocalWorkbench]);
 
   const swapAgentSeats = useCallback((fromIndex: number, toIndex: number) => {
     if (fromIndex === toIndex) return;
@@ -2749,13 +2823,13 @@ export function App() {
   // Seat / ribbon: single-click = switch target; double-click opens the terminal.
   const handleSeatClick = useCallback((id: AgentId) => {
     if (agentsHydrating) return;
-    if (composerBroadcast) return;
+    if (composerBroadcast && !danceEnabled) return;
     selectComposerTarget(id);
-  }, [agentsHydrating, composerBroadcast, selectComposerTarget]);
+  }, [agentsHydrating, composerBroadcast, danceEnabled, selectComposerTarget]);
 
   const handleRibbonAgentClick = useCallback(async (id: AgentId) => {
     if (agentsHydrating) return;
-    if (!composerBroadcast) {
+    if (!composerBroadcast || danceEnabled) {
       selectComposerTarget(id);
       return;
     }
@@ -2770,14 +2844,37 @@ export function App() {
     }
     setBroadcastRecipients(new Set());
     selectComposerTarget(id);
-  }, [agentName, agentsHydrating, composerBroadcast, confirmInApp, focusComposerSoon, selectComposerTarget]);
+  }, [agentName, agentsHydrating, composerBroadcast, danceEnabled, confirmInApp, focusComposerSoon, selectComposerTarget]);
 
   const closeTavern = useCallback(() => {
     tavernPrepareSeqRef.current += 1;
     setTavernPreparing(false);
     setTavernPrepareItems([]);
     setTavernOpen(false);
+    setTavernLocalLinkIntent(null);
+    const owner = localLinkReturnRef.current;
+    localLinkReturnRef.current = null;
+    if (owner) setLocalWorkbench(previous => previous?.projectRoot === owner.projectRoot && previous.agentId === owner.agentId
+      ? { ...previous, linkReturnRequest: (previous.linkReturnRequest ?? 0) + 1 } : previous);
   }, []);
+
+  // An event sent while Tavern is closed has no TavernModal listener. Open
+  // the requested settings and deliver its focus intent as state.
+  useEffect(() => {
+    if (!KOTA_LOCAL_ENABLED || tavernOpen) return;
+    const onLocalLink = (event: Event) => {
+      const target = (event as CustomEvent<{ target?: KotaLocalLinkTarget }>).detail?.target;
+      if (target !== 'kota-local' && target !== 'kota-local-jev' && target !== 'puppeteer-jev') return;
+      localLinkReturnRef.current = localWorkbench ? { projectRoot: localWorkbench.projectRoot, agentId: localWorkbench.agentId } : null;
+      tavernPrepareSeqRef.current += 1;
+      setTavernPreparing(false); setTavernPrepareItems([]);
+      setTavernInitialTab(target === 'kota-local' ? 'link' : 'heroes');
+      setTavernLocalLinkIntent(previous => ({ target, request: (previous?.request ?? 0) + 1 }));
+      setTavernOpen(true);
+    };
+    window.addEventListener(KOTA_LOCAL_LINK_EVENT, onLocalLink);
+    return () => window.removeEventListener(KOTA_LOCAL_LINK_EVENT, onLocalLink);
+  }, [tavernOpen, localWorkbench]);
 
   const openTavern = useCallback(() => {
     if (tavernOpen) {
@@ -3311,7 +3408,15 @@ export function App() {
       let request: AgentSpawnRequest;
       if (incarnation) {
         try {
-          const result = await incarnateTavernHero({
+          const result = incarnation.source ? await recruitFromIncarnation({
+            sourceProjectRoot: incarnation.source.projectRoot,
+            sourceAgentId: incarnation.source.agent.agentId,
+            agentId,
+            displayName: incarnation.displayName,
+            nameFields: incarnation.nameFields,
+            projectRoot: activeWorkspace ? null : recruitProjectRoot,
+            progressId: progress?.progressId,
+          }) : await incarnateTavernHero({
             agentId,
             templateId: incarnation.templateId,
             displayName: incarnation.displayName,
@@ -3406,7 +3511,7 @@ export function App() {
     [activeWorkspace, placeRecruitedAgent, recruitProjectRoot, recruitWithLeaseTakeover, refreshAgentPtySummaries, refreshFileTree],
   );
 
-  const handleIncarnateHero = useCallback(async (hero: WorkingHero, seatIndex?: number) => {
+  const handleIncarnateHero = useCallback(async (hero: WorkingHero, seatIndex?: number, source?: IncarnationRecruitSource, preview?: RecruitPreview) => {
     const targetSeatIndex =
       typeof seatIndex === 'number' ? seatIndex : agentLayout.tableSlots.findIndex((slot) => slot == null);
     if (
@@ -3418,7 +3523,7 @@ export function App() {
     }
     const progressId = makeIncarnationProgressId();
     incarnationProgressIdRef.current = progressId;
-    incarnationRetryPayloadRef.current = { hero, seatIndex: targetSeatIndex };
+    incarnationRetryPayloadRef.current = { hero, seatIndex: targetSeatIndex, source, preview };
     clearIncarnationProgressHideTimer();
     setRecruitSeatIndex(null);
     setShortcutRecruitSeatIndex(null);
@@ -3431,9 +3536,14 @@ export function App() {
       phase: 'running',
     });
     const templateId = hero.templateId ?? hero.id;
-    const profile = loadTavernHeroIncarnationProfile(templateId);
+    const profile = source ? null : loadTavernHeroIncarnationProfile(templateId);
+    const sourceFields = source?.agent.nameFields;
+    const fields = sourceFields ? {
+      titleId: sourceFields.titleId ?? null, given: sourceFields.given,
+      middle: sourceFields.middle ?? '', surname: sourceFields.surname ?? '',
+    } : preview && preview.state !== 'native' ? projectAgentNameFields(preview.heroName) : profile?.nameFields;
     const fieldsForIndex = (index: number) => incarnationFields(
-      profile?.name ?? hero.name, index, activeProjectName, profile?.nameFields,
+      source?.agent.displayName ?? (preview && preview.state !== 'native' ? preview.heroName : profile?.name ?? hero.name), index, activeProjectName, fields,
     );
     let existingProjectAgents: ProjectAgentIdentity[] = [];
     try {
@@ -3492,14 +3602,14 @@ export function App() {
     const instance: WorkingHero = {
       ...hero,
       id: agentId,
-      templateId,
+      templateId: source ? undefined : templateId,
       name: displayName,
     };
     const ok = await handleRecruitTest(
       agentId,
       profile?.cli ?? hero.cli,
       targetSeatIndex,
-      profile
+      source ? { source, displayName: instance.name, nameFields } : profile
         ? {
             templateId,
             displayName: instance.name,
@@ -3520,7 +3630,7 @@ export function App() {
         upsertProjectAgentIdentity(prev, {
           agentId,
           displayName: instance.name,
-          sourceHeroId: templateId,
+          sourceHeroId: source ? '' : templateId,
           status: 'active',
           provider: instance.cli,
           avatarId: instance.avatarId ?? null,
@@ -3549,7 +3659,7 @@ export function App() {
   const retryIncarnationProgress = useCallback(() => {
     const payload = incarnationRetryPayloadRef.current;
     if (!payload) return;
-    void handleIncarnateHero(payload.hero, payload.seatIndex);
+    void handleIncarnateHero(payload.hero, payload.seatIndex, payload.source, payload.preview);
   }, [handleIncarnateHero]);
 
   const refreshArchivedAgents = useCallback(async () => {
@@ -3597,10 +3707,53 @@ export function App() {
     violetProjectRoot,
   ]);
 
+  const sessionRecoveryRef = useRef(new Map<string, Promise<boolean>>());
+  const sessionRecoveryTailRef = useRef<Promise<unknown>>(Promise.resolve());
+  const composerDraftRevisionRef = useRef(0);
+  const pendingDanceDeliveryRef = useRef<{ root: string; revision: number; delivery: DanceDelivery; text: string; mentions?: { agentId: AgentId; aka: string }[] } | null>(null);
+  const failPendingDance = useCallback((pending: NonNullable<typeof pendingDanceDeliveryRef.current>) => {
+    const { root, delivery, text, mentions } = pending;
+    const targets = [delivery.prepared.targetAgentId];
+    if (!violetComposerSentHistory(root).some(message => message.id === delivery.messageId)) {
+      emitVioletComposerSent({ projectRoot: root, id: delivery.messageId, timestamp: delivery.timestamp,
+        text, mentions, targetAgentIds: targets, privacy: false, messageOrigin: 'puppeteer', temporalGap: delivery.prepared.temporalGap });
+    }
+    emitVioletComposerDelivery({ id: delivery.messageId, status: 'failed', reason: 'Prompt was not delivered.', retryTargetAgentIds: targets });
+  }, []);
+  const clearPartialSessionSend = useCallback(() => {
+    composerDraftRevisionRef.current += 1;
+    const pending = pendingDanceDeliveryRef.current;
+    pendingDanceDeliveryRef.current = null;
+    if (pending) failPendingDance(pending);
+  }, [failPendingDance]);
+  useEffect(clearPartialSessionSend, [violetProjectRoot, clearPartialSessionSend]);
+  const recoverUnavailableSession = useCallback((id: AgentId): Promise<boolean> => {
+    const key = JSON.stringify([projectAgentRoot, id]);
+    const existing = sessionRecoveryRef.current.get(key);
+    if (existing) return existing;
+    // Share same-agent requests and serialize different agents so the existing
+    // single confirmation modal never loses another request's resolver.
+    const task = sessionRecoveryTailRef.current.then(async () => {
+      const confirmed = await confirmInApp(
+        "Session can't resume",
+        SESSION_UNAVAILABLE_MESSAGE,
+        { cancelLabel: 'Cancel', confirmLabel: 'OK', plainCopy: true },
+      );
+      if (!confirmed) return false;
+      if (!await performStartFreshSession(id)) return false;
+      refreshFileTree();
+      return true;
+    });
+    sessionRecoveryRef.current.set(key, task);
+    sessionRecoveryTailRef.current = task.catch(() => {});
+    void task.finally(() => sessionRecoveryRef.current.delete(key)).catch(() => {});
+    return task;
+  }, [projectAgentRoot, confirmInApp, performStartFreshSession, refreshFileTree]);
+
   const launchExistingProjectAgent = useCallback(async (
     id: AgentId,
     seatIndex?: number | null,
-    options: { selectComposer?: boolean } = {},
+    options: { selectComposer?: boolean; inlineLocalFailure?: boolean; localStartup?: LocalStartupOptions } = {},
   ): Promise<ExistingAgentLaunchResult> => {
     const unsupportedProvider = unsupportedAgentProviders.get(id);
     if (unsupportedProvider) {
@@ -3618,23 +3771,11 @@ export function App() {
           projectRoot: projectAgentRoot,
         });
         if (resolution.status === 'sessionUnavailable') {
-          const confirmed = await confirmInApp(
-            "Session can't resume",
-            'The saved session has expired. Start a new session?',
-            {
-              cancelLabel: 'Cancel',
-              confirmLabel: 'OK',
-              plainCopy: true,
-            },
-          );
-          if (!confirmed) return false;
-          if (!await performStartFreshSession(id)) return false;
-          refreshFileTree();
-          return true;
+          return recoverUnavailableSession(id);
         }
         const request = resolution.request;
         requestVioletProjectAgentSync(violetProjectRoot, [id], roomAgentIdsOrdered);
-        const recruited = await recruitWithLeaseTakeover(request);
+        const recruited = await recruitWithLeaseTakeover(request, options.localStartup);
         if (!recruited) return false;
         await refreshAgentPtySummaries();
         refreshFileTree();
@@ -3642,7 +3783,7 @@ export function App() {
       },
       (err) => {
         console.warn('[kota-agent] existing project-agent launch failed', err);
-        notifyExistingAgentLaunchFailure(id, err);
+        if (!options.inlineLocalFailure || !isLocalAgent(id)) notifyExistingAgentLaunchFailure(id, err);
       },
     );
     if (result.status === 'launched') {
@@ -3656,8 +3797,7 @@ export function App() {
     return result;
   }, [
     placeRecruitedAgent,
-    confirmInApp,
-    performStartFreshSession,
+    recoverUnavailableSession,
     projectAgentRoot,
     recruitWithLeaseTakeover,
     refreshAgentPtySummaries,
@@ -3665,6 +3805,7 @@ export function App() {
     roomAgentIdsOrdered,
     unsupportedAgentProviders,
     violetProjectRoot,
+    isLocalAgent,
   ]);
 
   const spawnExistingProjectAgent = useCallback(
@@ -3681,10 +3822,27 @@ export function App() {
     [agentLayout.tableSlots, launchExistingProjectAgent],
   );
 
+  const wakeAgentForLocalWorkbench = useCallback(
+    (id: AgentId, localStartup?: LocalStartupOptions) => launchExistingProjectAgent(id, agentLayout.tableSlots.indexOf(id), {
+      selectComposer: false, inlineLocalFailure: true, localStartup,
+    }),
+    [agentLayout.tableSlots, launchExistingProjectAgent],
+  );
+
   const openAgentTerminalFromMenu = useCallback((id: AgentId) => {
+    if (isLocalAgent(id)) {
+      if (agentsHydrating) return;
+      openLocalWorkbench(id, undefined, !agentRuntime.liveAgents.has(id));
+      return;
+    }
     if (agentsHydrating) return;
     if (agentRuntime.liveAgents.has(id)) {
-      focusAgent(id);
+      void checkProjectAgentSession({ agentId: id, projectRoot: projectAgentRoot }).then(async available => {
+        if (available || await recoverUnavailableSession(id)) focusAgent(id);
+      }).catch(error => {
+        notifyExistingAgentLaunchFailure(id, error);
+        focusAgent(id); // Preserve the original running-terminal open path.
+      });
       return;
     }
     const seatIndex = agentLayout.tableSlots.indexOf(id);
@@ -3696,7 +3854,11 @@ export function App() {
     agentRuntime.liveAgents,
     agentsHydrating,
     focusAgent,
+    projectAgentRoot,
+    recoverUnavailableSession,
     spawnExistingProjectAgent,
+    isLocalAgent,
+    openLocalWorkbench,
   ]);
 
   const handleStartFreshSession = useCallback(async (id: AgentId) => {
@@ -3733,9 +3895,12 @@ export function App() {
     openAgentTerminalFromMenu(id);
   }, [agentsHydrating, openAgentTerminalFromMenu]);
 
-  const handleProjectAgentSaved = useCallback((detail: ProjectAgentDetail) => {
+  const handleProjectAgentSaved = useCallback((detail: ProjectAgentDetail, previousProvider: string) => {
     applyProjectAgentDetail(detail);
-  }, [applyProjectAgentDetail]);
+    if (detail.provider !== previousProvider) {
+      void handleStartFreshSession(detail.agentId);
+    }
+  }, [applyProjectAgentDetail, handleStartFreshSession]);
 
   const handleRemoveProjectAgent = useCallback(async (detail: ProjectAgentDetail) => {
     try {
@@ -3829,6 +3994,10 @@ export function App() {
   ]);
 
   const handleDismissArchivedAgent = useCallback(async (detail: ProjectAgentDetail) => {
+    if (dismissAgentBusyRef.current) return;
+    dismissAgentBusyRef.current = true;
+    // Keep retries tied to the project that opened the deletion flow.
+    let request = { agentId: detail.agentId, projectRoot: violetProjectRoot, forceDirty: false, force: false };
     try {
       const dismissConfirmed = await confirmInApp(
         'Delete archived agent?',
@@ -3836,27 +4005,25 @@ export function App() {
         { confirmLabel: 'Delete', tone: 'danger' },
       );
       if (!dismissConfirmed) return;
-      let result = await dismissProjectAgent({
-        agentId: detail.agentId,
-        projectRoot: projectAgentRoot,
-        forceDirty: false,
-      });
-      if (!result.ok && result.dirty) {
-        const confirmed = await confirmInApp(
-          'Unsaved work in workspace',
-          `${detail.displayName} has uncommitted project file changes:\n\n${result.dirtySummary}\n\nDelete this workspace anyway?`,
-          { confirmLabel: 'Delete anyway', tone: 'danger' },
-        );
-        if (!confirmed) return;
-        result = await dismissProjectAgent({
-          agentId: detail.agentId,
-          projectRoot: projectAgentRoot,
-          forceDirty: true,
-        });
-      }
-      if (!result.ok) {
-        window.alert('Dismiss did not complete.');
-        return;
+      let result = await dismissProjectAgent(request);
+      while (!result.ok) {
+        if (result.soulError) {
+          const choice = await confirmSoulDismiss(detail.displayName);
+          if (choice === 'cancel') return;
+          if (choice === 'force') request = { ...request, force: true };
+        } else if (result.dirty && !request.forceDirty) {
+          const confirmed = await confirmInApp(
+            'Unsaved work in workspace',
+            `${detail.displayName} has uncommitted project file changes:\n\n${result.dirtySummary}\n\nDelete this workspace anyway?`,
+            { confirmLabel: 'Delete anyway', tone: 'danger' },
+          );
+          if (!confirmed) return;
+          request = { ...request, forceDirty: true };
+        } else {
+          window.alert('Dismiss did not complete.');
+          return;
+        }
+        result = await dismissProjectAgent(request);
       }
       setProjectAgentIdentities((prev) => (
         upsertProjectAgentIdentity(prev, projectAgentIdentityFromDetail(detail, 'left'))
@@ -3867,10 +4034,13 @@ export function App() {
       refreshFileTree();
     } catch (err) {
       window.alert(`Dismiss failed: ${String(err)}`);
+    } finally {
+      dismissAgentBusyRef.current = false;
     }
   }, [
     confirmInApp,
-    projectAgentRoot,
+    confirmSoulDismiss,
+    violetProjectRoot,
     refreshArchivedAgents,
     refreshFileTree,
     removeAgentFromRoom,
@@ -3899,7 +4069,7 @@ export function App() {
       refreshFileTree();
       focusAgent(result.detail.agentId);
     } catch (err) {
-      window.alert(`Kage Bunshin failed: ${String(err)}`);
+      window.alert(`Kage Bunshin failed: ${isSessionUnavailableError(err) ? SESSION_UNAVAILABLE_MESSAGE : String(err)}`);
     }
   }, [
     applyProjectAgentDetail,
@@ -3940,7 +4110,7 @@ export function App() {
       return active instanceof HTMLElement && !!active.closest('[data-testid="input-field"]');
     };
     const cycleComposerTarget = (direction: 1 | -1) => {
-      if (composerBroadcast || shortcutTargetAgents.length === 0) return;
+      if ((composerBroadcast && !danceEnabled) || shortcutTargetAgents.length === 0) return;
       const currentIndex = composerTarget ? shortcutTargetAgents.indexOf(composerTarget) : -1;
       const fallbackIndex = direction === 1 ? 0 : shortcutTargetAgents.length - 1;
       const nextIndex = currentIndex < 0
@@ -3965,10 +4135,15 @@ export function App() {
         return;
       }
       if (unsupportedAgentProviders.has(id)) return;
+      if (isLocalAgent(id)) {
+        if (localWorkbench?.agentId === id && localWorkbench.projectRoot === violetProjectRoot && !existingAgentLaunchesRef.current.has(id)) closeLocalWorkbench();
+        else openAgentTerminalFromMenu(id);
+        return;
+      }
       if (agentRuntime.liveAgents.has(id)) {
         const alreadyFocused = terminalFocusedAgent === id && !minimized.has(id);
         if (alreadyFocused) minimizeAgentFromWindow(id);
-        else focusAgent(id);
+        else openAgentTerminalFromMenu(id);
         return;
       }
       const seatIndexForAgent = agentLayout.tableSlots.indexOf(id);
@@ -4056,9 +4231,13 @@ export function App() {
     broadcastPopupOpen,
     cancelBroadcastMode,
     composerBroadcast,
+    danceEnabled,
     composerTarget,
     confirmBroadcastRecipients,
     focusAgent,
+    localWorkbench,
+    closeLocalWorkbench,
+    openAgentTerminalFromMenu,
     minimizeAgentFromWindow,
     minimized,
     minimizeAllAgents,
@@ -4072,25 +4251,37 @@ export function App() {
     terminalFocusedAgent,
     toggleBroadcastRecipient,
     toggleGroupChat,
+    isLocalAgent,
+    violetProjectRoot,
   ]);
 
-  const submitPromptToAgent = useCallback((agentId: AgentId, rawPayload: string) => {
+  const submitPromptToAgent = useCallback((agentId: AgentId, rawPayload: string, localInput?: Omit<LocalComposerInput, 'agentId' | 'text' | 'soulInput'>,
+    soulInput?: SoulInput) => {
+    if (localInput) {
+      const input = { ...localInput, agentId, text: rawPayload, soulInput };
+      return submitLocal(input).catch(async (error) => {
+        if (!isAgentSessionLeaseConflictError(error)) throw error;
+        const launch = await resolveProjectAgentLaunch({ agentId, projectRoot: localInput.projectRoot });
+        if (launch.status !== 'ready' || !await recruitWithLeaseTakeover(launch.request)) throw error;
+        await submitLocal(input);
+      });
+    }
     const input = formatAgentPromptInput(rawPayload);
     if (!input) return Promise.resolve();
     const previous = agentPromptQueuesRef.current.get(agentId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
       .then(async () => {
-        await agentRuntime.submitPrompt(agentId, input);
+        await agentRuntime.submitPrompt(agentId, input, soulInput);
       });
     agentPromptQueuesRef.current.set(agentId, next);
     void next.finally(() => {
       if (agentPromptQueuesRef.current.get(agentId) === next) {
         agentPromptQueuesRef.current.delete(agentId);
       }
-    });
+    }).catch(() => {});
     return next;
-  }, [agentRuntime]);
+  }, [agentRuntime, recruitWithLeaseTakeover]);
 
   const handlePasteComposerImage = useCallback(
     (file: File) => saveComposerClipboardImage(file, { projectRoot: projectAgentRoot }),
@@ -4123,8 +4314,45 @@ export function App() {
         privacy: boolean;
         mentions?: { agentId: AgentId; aka: string }[];
         recipientIds?: AgentId[];
+        dance?: DanceComposerDraft;
+        danceRetry?: DanceDelivery;
+        eligibilityText?: string;
+        onAccepted?: () => void;
       },
     ) => {
+      if (!payload.trim()) return false;
+      const sendRoot = violetProjectRoot;
+      const danceSelectionScope = danceSelectionScopeRef.current;
+      let draftRevision = composerDraftRevisionRef.current;
+      const pendingDance = pendingDanceDeliveryRef.current;
+      // Routing has already durably recorded the original before preflight.
+      // Retain it while this draft awaits session recovery; never classify twice.
+      let danceDelivery = options?.danceRetry ?? (
+        options?.dance && pendingDance?.root === sendRoot && pendingDance.revision === draftRevision
+          ? pendingDance.delivery : undefined
+      );
+      if (danceDelivery) setDanceSendError(null);
+      if (options?.dance && !danceDelivery && sendRoot) {
+        try {
+          setDanceSendError(null);
+          const seats = shortcutTargetAgents.map(id => ({ id, name: agentMeta[id]?.name ?? id }));
+          let cached = peekVioletRoomMessages(sendRoot);
+          if (!cached.length) {
+            try { cached = (await readVioletRoomCache({ projectRoot: sendRoot, limit: 200 })).messages.slice(-200); }
+            catch { throw { code: 'dance_roster_unavailable' }; }
+          }
+          const drafts = violetComposerSentHistory(sendRoot).map(message => ({ id: message.id, sessionId: 'composer', agentId: 'user', shell: 'composer', role: 'user' as const, kind: 'message' as const,
+            timestamp: message.timestamp, text: message.text, targetAgentIds: message.targetAgentIds, messageOrigin: message.messageOrigin, private: message.privacy }));
+          const loaded = new Map(cached.map(message => [message.id, message]));
+          // Keep Violet sequence/precision from durable rows, plus private draft flags.
+          const messages = sortVioletMessages([...new Map([...cached, ...drafts.map(message => ({ ...message, ...loaded.get(message.id), private: message.private }))].map(message => [message.id, message])).values()]);
+          danceDelivery = await prepareDanceDelivery(sendRoot, normalizeAgentPromptPayload(payload), options.dance, seats, messages);
+          const pending = { root: sendRoot, revision: draftRevision, delivery: danceDelivery, text: normalizeAgentPromptPayload(payload), mentions: options.mentions };
+          if (composerDraftRevisionRef.current !== draftRevision) { failPendingDance(pending); return false; }
+          pendingDanceDeliveryRef.current = pending;
+        } catch (failure) { setDanceSendError({ root: sendRoot, text: danceErrorText(failure) }); return false; }
+      }
+      if (options?.dance && !danceDelivery) return false;
       const requestedRecipients = options?.recipientIds?.length
         ? options.recipientIds
         : options?.broadcast
@@ -4132,12 +4360,44 @@ export function App() {
         : target && roomAgentIds.has(target)
           ? [target]
           : [];
-      const recipients = Array.from(new Set(requestedRecipients)).filter((id) => roomAgentIds.has(id));
+      const recipients = danceDelivery ? [danceDelivery.prepared.targetAgentId] : Array.from(new Set(requestedRecipients)).filter((id) => roomAgentIds.has(id));
       const normalizedPayload = normalizeAgentPromptPayload(payload);
       if (!normalizedPayload.trim()) return false;
       if (recipients.length === 0) return false;
+      let localRecipients: Set<string>;
+      try { localRecipients = new Set(violetProjectRoot && (KOTA_LOCAL_ENABLED || recipients.some(isLocalAgent))
+        ? await localInputTargets(violetProjectRoot, recipients) : []); }
+      catch (failure) {
+        if (!danceDelivery) throw failure;
+        setDanceSendError({ root: sendRoot ?? '', text: danceErrorText(failure) }); return false;
+      }
+      const blocked: AgentId[] = [];
+      for (const id of recipients.filter(id => !localRecipients.has(id))) {
+        try {
+          if (!await checkProjectAgentSession({ agentId: id, projectRoot: projectAgentRoot })) blocked.push(id);
+        } catch (error) {
+          notifyExistingAgentLaunchFailure(id, error);
+          return false;
+        }
+      }
+      if (blocked.length) {
+        for (const id of blocked) await recoverUnavailableSession(id);
+        return false; // Even after Fresh, the user decides when to send this draft.
+      }
+      if (options?.dance && composerDraftRevisionRef.current !== draftRevision) return false;
+      const danceMessageId = danceDelivery?.messageId;
+      // Host-only metadata for optional marks/Dreams; only a draft knows its prose.
+      const soulInputFor = (messageId: string, createdAt: string): SoulInput | undefined => options?.eligibilityText === undefined ? undefined
+        : { messageId, createdAt, origin: danceDelivery ? 'puppeteer' : 'user', originalText: normalizedPayload,
+          eligibilityText: options.eligibilityText, targetAgentIds: recipients };
+      const danceSent = danceDelivery && !options?.danceRetry && !violetComposerSentHistory(sendRoot).some(message => message.id === danceMessageId) ? emitVioletComposerSent({ id: danceDelivery.messageId, timestamp: danceDelivery.timestamp,
+        projectRoot: sendRoot, text: normalizedPayload, targetAgentIds: recipients, privacy: false, mentions: options?.mentions, messageOrigin: 'puppeteer', temporalGap: danceDelivery.prepared.temporalGap,
+        soulInput: soulInputFor(danceDelivery.messageId, danceDelivery.timestamp) }) : null;
+      const failedDance = () => {
+        if (danceDelivery) emitVioletComposerDelivery({ id: danceDelivery.messageId, status: 'failed', reason: 'Prompt was not delivered.', retryTargetAgentIds: recipients });
+      };
       const liveBeforeWake = new Set(agentRuntime.liveAgents);
-      const sleepingRecipients = recipients.filter((id) => !liveBeforeWake.has(id));
+      const sleepingRecipients = recipients.filter((id) => !liveBeforeWake.has(id)).filter((id) => !localRecipients.has(id));
       if (sleepingRecipients.length > 0) {
         const names = sleepingRecipients.map((id) => shortProjectAgentName(agentMeta[id]?.name ?? id));
         const label = names.length === 1 ? names[0] : names.join(', ');
@@ -4152,7 +4412,7 @@ export function App() {
             confirmOnEnter: true,
           },
         );
-        if (!confirmed) return false;
+        if (!confirmed) { if (danceDelivery) failedDance(); return false; }
         const wakeResults = await Promise.all(
           sleepingRecipients.map(async (id) => ({
             id,
@@ -4179,18 +4439,30 @@ export function App() {
         if (failedWakeRecipients.length > 0) {
           console.warn('[composer] agent wake failed', failedWakeRecipients);
         }
+        // Spawn returning does not mean the CLI is ready for a prompt. Match
+        // the ordinary two-Send wake path, retaining the first prepared route.
+        if (danceDelivery) failedDance();
         return false;
       }
-      const sent = emitVioletComposerSent({
+      const sent = danceSent ?? (danceDelivery ? { id: danceDelivery.messageId, timestamp: danceDelivery.timestamp, privacy: false } : emitVioletComposerSent({
         projectRoot: violetProjectRoot,
         text: normalizedPayload,
         targetAgentIds: recipients,
         privacy: PRIVATE_CHAT_UI_ENABLED && !!options?.privacy,
         mentions: options?.mentions,
-      });
-      let preparedPayloads = new Map<AgentId, string>();
+      }));
+      if (pendingDanceDeliveryRef.current?.delivery.messageId === danceDelivery?.messageId) pendingDanceDeliveryRef.current = null;
+      if (sent && composerDraftRevisionRef.current === draftRevision) {
+        options?.onAccepted?.();
+        draftRevision = composerDraftRevisionRef.current;
+      }
+      // A same-ID Dance Retry reuses the first choice; the room Retry has no draft.
+      const soulInput = options?.danceRetry
+        ? violetComposerSentHistory(sendRoot).find(message => message.id === danceMessageId)?.soulInput
+        : sent ? soulInputFor(sent.id, sent.timestamp) : undefined;
+      let preparedPayloads = new Map<AgentId, string>(danceDelivery ? [[danceDelivery.prepared.targetAgentId, danceDelivery.prepared.payload]] : []);
       try {
-        if (sent && !sent.privacy) {
+        if (sent && !sent.privacy && !danceDelivery) {
           const prepared = await prepareComposerTemporalContext({
             projectRoot: violetProjectRoot,
             messageId: sent.id,
@@ -4207,7 +4479,9 @@ export function App() {
       }
       const results = await Promise.allSettled(
         recipients.map(async (id) => {
-          await submitPromptToAgent(id, preparedPayloads.get(id) ?? payload);
+          await submitPromptToAgent(id, preparedPayloads.get(id) ?? payload, sent && localRecipients.has(id) ? {
+            projectRoot: violetProjectRoot ?? '', messageId: sent.id, createdAt: sent.timestamp, private: !!sent.privacy,
+          } : undefined, soulInput);
           return id;
         }),
       );
@@ -4219,9 +4493,26 @@ export function App() {
       ));
       if (failedRecipients.length > 0) {
         console.warn('[composer] prompt delivery failed', failedRecipients);
+        if (danceDelivery) failedDance();
       }
+      const blockedAfterPreflight = results.flatMap((result, index) => (
+        result.status === 'rejected' && isSessionUnavailableError(result.reason) ? [recipients[index]!] : []
+      ));
+      if (blockedAfterPreflight.length) {
+        if (sent) emitVioletComposerDelivery({ id: sent.id, status: 'failed', retryTargetAgentIds: failedRecipients });
+        for (const id of blockedAfterPreflight) await recoverUnavailableSession(id);
+        return false;
+      }
+      if (danceDelivery && deliveredRecipients.includes(danceDelivery.prepared.targetAgentId)) emitVioletComposerDelivery({ id: danceDelivery.messageId, status: 'clear' });
       if (deliveredRecipients.length === 0) {
-        return true;
+        return options?.danceRetry ? false : true;
+      }
+      if (danceDelivery && danceSelectionScope.enabled && danceSelectionScope.root === sendRoot
+        && danceSelectionScopeRef.current === danceSelectionScope && composerDraftRevisionRef.current === draftRevision) {
+        // Follow the delivered route without the manual selection handler, which exits Dance.
+        setComposerTarget(danceDelivery.prepared.targetAgentId);
+        setComposerBroadcast(false);
+        setBroadcastPopupOpen(false);
       }
       requestVioletProjectPromptSync(
         violetProjectRoot,
@@ -4236,27 +4527,33 @@ export function App() {
       agentMeta,
       broadcastRecipients,
       confirmInApp,
+      projectAgentRoot,
+      recoverUnavailableSession,
       roomAgentIds,
       roomAgentIdsOrdered,
       submitPromptToAgent,
       violetProjectRoot,
       wakeAgentForComposerSend,
+      isLocalAgent,
+      shortcutTargetAgents,
+      failPendingDance,
     ],
   );
 
   const handleRetryComposerMessage = useCallback(
     async (request: {
+      messageId?: string;
       text: string;
       targetAgentIds: AgentId[];
       privacy: boolean;
       mentions?: { agentId: AgentId; aka: string }[];
-    }) => handleSend(null, request.text, {
-      broadcast: false,
-      privacy: request.privacy,
-      mentions: request.mentions,
-      recipientIds: request.targetAgentIds,
-    }),
-    [handleSend],
+      danceDelivery?: DanceDelivery;
+    }) => {
+      const targets = request.messageId && violetProjectRoot ? request.targetAgentIds.filter(id => !localQueueGuardsRef.current.has(localQueueGuardKey(violetProjectRoot, request.messageId!, id))) : request.targetAgentIds;
+      if (!targets.length) return false;
+      return handleSend(null, request.text, { broadcast: false, privacy: request.privacy, mentions: request.mentions, recipientIds: targets, danceRetry: request.danceDelivery });
+    },
+    [handleSend, violetProjectRoot],
   );
 
   return (
@@ -4279,7 +4576,7 @@ export function App() {
         onGhAuthClick={() => {
           if (ghAuth?.authenticated) return;
           if (ghAuth?.cliMissing) {
-            window.open(GITHUB_CLI_INSTALL_URL, '_blank', 'noopener,noreferrer');
+            void openExternalUrl(GITHUB_CLI_INSTALL_URL).catch(() => {});
             return;
           }
           window.dispatchEvent(new CustomEvent('kota:smart-run', {
@@ -4350,6 +4647,7 @@ export function App() {
                     projectName={activeProjectName}
                     projectId={activeWorkspace?.projectId}
                     targetAgent={targetAgent}
+                    danceActive={danceEnabled}
                     chatFilterTargetAgents={chatFilterTargetAgents}
                     chatFilterActive={chatFilterActive}
                     onChatFilterActiveChange={setChatFilterActive}
@@ -4361,6 +4659,8 @@ export function App() {
                     onOpenAgent={handleSeatClick}
                     onOpenRibbonAgent={handleRibbonAgentClick}
                     onDblClickAgent={handleSeatDblClick}
+                    onOpenLocalWorkbench={openLocalWorkbench}
+                    localQueueGuards={localQueueGuards}
                     onOpenAgentTerminal={openAgentTerminalFromMenu}
                     onRefreshAgentSession={handleStartFreshSession}
                     onRetryComposerMessage={handleRetryComposerMessage}
@@ -4409,13 +4709,14 @@ export function App() {
                         />
                       ) : null
                     }
-                    composer={
+                    composer={<>
                       <RoomComposer
                         ref={inputBarRef}
                         targetAgent={targetAgent}
+                        danceMode={danceEnabled}
+                        broadcastMode={danceEnabled ? false : composerBroadcast}
                         agentMeta={agentMeta}
                         mentionAgentIds={roomAgentIdsOrdered}
-                        broadcastMode={composerBroadcast}
                         broadcastRecipientCount={broadcastRecipients.size}
                         broadcastPrivacyInfo={PRIVATE_CHAT_UI_ENABLED ? broadcastPrivacyInfo : undefined}
                         privacyMode={currentTargetPrivate}
@@ -4424,12 +4725,14 @@ export function App() {
                         onBroadcastToggle={openTargetPicker}
                         onPrivacyToggle={PRIVATE_CHAT_UI_ENABLED ? togglePrivacyMode : undefined}
                         onSend={handleSend}
+                        onDraftChange={clearPartialSessionSend}
                         onPasteImage={handlePasteComposerImage}
                         onMaterializeAttachments={handleMaterializeComposerAttachments}
                         onWhiteboardOpen={toggleWhiteboard}
                         onFocus={() => setTerminalFocusedAgent(null)}
                       />
-                    }
+                      {danceEnabled && danceSendError?.root === violetProjectRoot && <p className="dance-send-error" role="alert">{danceSendError.text}</p>}
+                    </>}
                   />
                 </>
               )}
@@ -4448,6 +4751,8 @@ export function App() {
               resolveDreamProjects={resolveDreamProjects}
               agentMeta={agentMeta}
               projectRoot={projectAgentRoot}
+              danceController={KOTA_LOCAL_ENABLED && violetProjectRoot ? dance : undefined}
+              danceSeedTarget={targetAgent}
               onBartenderSynced={refreshFileTree}
               onOpenAgentFilteredChat={openAgentFilteredRoom}
               onInsertComposerAttachment={insertComposerAttachment}
@@ -4475,6 +4780,11 @@ export function App() {
                 </button>
               )}
             />
+            <LocalWorkbenchHost projectRoot={violetProjectRoot}
+              open={localWorkbench && localWorkbench.projectRoot === violetProjectRoot && isLocalAgent(localWorkbench.agentId) && !showProjectLoadingState && !showProjectEmptyState ? localWorkbench : null}
+              agents={agentMeta} records={agentRecords} targets={shortcutTargetAgents} privateAgents={effectivePrivateAgents}
+              onClose={closeLocalWorkbench} onDetails={setProjectAgentDetailId} onFresh={handleStartFreshSession}
+              onResume={wakeAgentForLocalWorkbench} onSend={handleSend} onGuardsChange={updateLocalQueueGuards} />
             {/* W3 — floating agent windows. Mounted as workspace overlay
                 so it covers Stage but not TopBar / Smart Terminal. W4 lifts
                 minimized state up so AgentRibbon and AgentWindowsLayer
@@ -4482,7 +4792,7 @@ export function App() {
             {!showProjectLoadingState && !showProjectEmptyState && (
             <AgentWindowsLayer
               ref={windowsRef}
-              liveAgents={activeLiveAgentsOrdered}
+              liveAgents={activeLiveAgentsOrdered.filter((id) => !isLocalAgent(id))}
               gridStore={agentRuntime.gridStore}
               status={agentRuntime.status}
               agentMeta={agentMeta}
@@ -4528,6 +4838,7 @@ export function App() {
                   onLoadCanvas={loadWhiteboardCanvas}
                   onSaveCanvas={saveWhiteboardCanvas}
                   onRenamePage={renameWhiteboardCanvasPage}
+                  onDeletePage={deleteWhiteboardCanvasPage}
                   onSaveSnapshot={saveWhiteboardCanvasSnapshot}
                 />
               </Suspense>
@@ -4538,7 +4849,7 @@ export function App() {
                 agentName={agentName(agentContextMenu.agentId)}
                 isPrivate={effectivePrivateAgents.has(agentContextMenu.agentId)}
                 cmdSlot={shortcutAgentsOrdered.indexOf(agentContextMenu.agentId) + 1 || null}
-                showTerminal={agentContextMenu.source !== 'terminal-header'}
+                showTerminal={!isLocalAgent(agentContextMenu.agentId) && agentContextMenu.source !== 'terminal-header'}
                 showPrivateChat={PRIVATE_CHAT_UI_ENABLED}
                 showKageBunshin={KAGE_BUNSHIN_UI_ENABLED}
                 onClose={() => setAgentContextMenu(null)}
@@ -4574,20 +4885,30 @@ export function App() {
             )}
             {shortcutRecruitSeatIndex !== null && (
               <ShortcutRecruitModal
+                key={`${activeWorkspace?.localRoot ?? projectAgentRoot}:${shortcutRecruitSeatIndex}`}
                 seatNumber={shortcutRecruitSeatIndex + 1}
                 heroes={workingHeroes}
                 unavailableHeroIds={unavailableHeroIds}
-                onSelect={(hero) => {
+                projectRoot={activeWorkspace?.localRoot ?? projectAgentRoot}
+                onSelect={(hero, preview) => {
                   if (shortcutRecruitSeatIndex !== null) {
-                    return handleIncarnateHero(hero, shortcutRecruitSeatIndex);
+                    return handleIncarnateHero(hero, shortcutRecruitSeatIndex, undefined, preview);
                   }
                   return undefined;
+                }}
+                onSelectIncarnation={(source) => {
+                  if (shortcutRecruitSeatIndex !== null) {
+                    return handleIncarnateHero(projectAgentDetailToWorkingHero(source.agent), shortcutRecruitSeatIndex, source);
+                  }
                 }}
                 onDismiss={() => setShortcutRecruitSeatIndex(null)}
               />
             )}
             {confirmDialog && (
               <ConfirmDialog dialog={confirmDialog} onClose={closeConfirmDialog} />
+            )}
+            {soulDismissDialog && (
+              <SoulDismissErrorDialog key={soulDismissDialog.id} name={soulDismissDialog.name} onChoose={chooseSoulDismiss} />
             )}
             {projectAgentDetailId && (
               <ProjectAgentProfileOverlay
@@ -4609,6 +4930,7 @@ export function App() {
           open={tavernOpen}
           onClose={closeTavern}
           initialTab={tavernInitialTab}
+          localLinkIntent={tavernLocalLinkIntent}
           initialGhAuth={ghAuth}
           ghosttyTerminalEnhancement={ghosttyTerminalEnhancement}
           onGhosttyTerminalEnhancementChange={setGhosttyTerminalEnhancement}

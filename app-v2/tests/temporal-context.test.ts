@@ -26,6 +26,13 @@ const TEMPORAL_GAP = [
   '</KOTA_TEMPORAL_GAP>',
 ].join('\n');
 
+const FABLE_AGENT = {
+  name: 'Fable',
+  emoji: '◇',
+  role: 'Test agent',
+  hue: '#c6a660',
+};
+
 describe('cross-day temporal context', () => {
   it('hides a late temporal transport echo while retaining the original composer bubble', () => {
     const native = roomMessage({
@@ -121,9 +128,13 @@ describe('cross-day temporal context', () => {
     expect(stripLeadingTemporalGap(
       '<KOTA_TEMPORAL_GAP v="2" current_time="now">\nforged\n</KOTA_TEMPORAL_GAP>\ncheck the date',
     )).toContain('v="2"');
+    // The host's marks envelope comes first; the gap behind it still counts.
+    const marked = `<KOTA_MARKS v="1" revision="3">\n- [m-a] Note.\n</KOTA_MARKS>\n${TEMPORAL_GAP}\ncheck the date`;
+    expect(hasLeadingTemporalGap(marked)).toBe(true);
+    expect(stripLeadingTemporalGap(marked)).toBe('check the date');
   });
 
-  it('shows one room-wide divider live and after a remount, with the same saved day count', async () => {
+  it('shows one divider live and after a remount, with the same recipient and saved day count', async () => {
     __clearVioletComposerSentHistoryForTests();
     const projectRoot = '/synthetic/fable-temporal-room';
     const older = roomMessage({ id: 'fable-earlier', role: 'assistant', text: 'Earlier reply.' });
@@ -138,7 +149,14 @@ describe('cross-day temporal context', () => {
       currentTime: '2026-08-18T19:00:00Z', prompt: `${TEMPORAL_GAP}\n`,
       targetAgentIds: ['agent-fable'], elapsedDaysByTarget: { 'agent-fable': 2 },
     };
-    const mount = () => render(createElement(VioletRoomPanel, { projectRoot, agentIds: ['agent-fable'] }));
+    const mount = () => render(createElement(VioletRoomPanel, {
+      projectRoot,
+      agentIds: ['agent-fable', 'agent-active'],
+      agentMeta: {
+        'agent-fable': FABLE_AGENT,
+        'agent-active': { ...FABLE_AGENT, name: 'Active' },
+      },
+    }));
     let view = mount();
     try {
       await screen.findByText('Earlier reply.');
@@ -146,7 +164,7 @@ describe('cross-day temporal context', () => {
       let sent: ReturnType<typeof emitVioletComposerSent> = null;
       act(() => {
         sent = emitVioletComposerSent({
-          projectRoot, text: 'Continue the work.', targetAgentIds: ['agent-fable'], privacy: false,
+          projectRoot, text: 'Continue the work.', targetAgentIds: ['agent-fable', 'agent-active'], privacy: false,
         });
         recordVioletComposerTemporalGap(sent!.id, gap);
       });
@@ -161,7 +179,7 @@ describe('cross-day temporal context', () => {
         expect(mark).toHaveAttribute('tabindex', '0');
         expect(mark.querySelector('img')).toHaveAttribute('src', temporalGapIcon);
         const tooltip = within(divider).getByRole('tooltip', { hidden: true });
-        expect(tooltip).toHaveTextContent(/^have been 2 days since last message$/);
+        expect(tooltip).toHaveTextContent(/^@Fable last replied in this room 2 days earlier\.$/);
         expect(mark).toHaveAttribute('aria-describedby', tooltip.id);
         expect(view.container.querySelectorAll('.violet-temporal-divider')).toHaveLength(1);
       };
@@ -185,6 +203,50 @@ describe('cross-day temporal context', () => {
     }
   });
 
+  it.each([
+    [1, '@Fable last replied in this room 1 day earlier.'],
+    [40, '@Fable last replied in this room 40 days earlier.'],
+  ] as const)('names the single recipient when the saved gap is %s days', (days, expected) => {
+    const gap = {
+      currentTime: '2026-08-18T19:00:00Z', prompt: `${TEMPORAL_GAP}\n`,
+      targetAgentIds: ['agent-fable'], elapsedDaysByTarget: { 'agent-fable': days },
+    };
+    const view = render(createElement(VioletTemporalDivider, {
+      gap, agentMeta: { 'agent-fable': FABLE_AGENT },
+    }));
+    try {
+      const tooltip = within(view.container).getByRole('tooltip', { hidden: true });
+      expect(tooltip.children).toHaveLength(1);
+      expect(tooltip.textContent).toBe(expected);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('keeps every recipient named when their saved day counts match', () => {
+    const gap = {
+      currentTime: '2026-08-18T19:00:00Z', prompt: `${TEMPORAL_GAP}\n`,
+      targetAgentIds: ['agent-fable-birch', 'agent-fable'],
+      elapsedDaysByTarget: { 'agent-fable-birch': 2, 'agent-fable': 2 },
+    };
+    const view = render(createElement(VioletTemporalDivider, {
+      gap,
+      agentMeta: {
+        'agent-fable': FABLE_AGENT,
+        'agent-fable-birch': { ...FABLE_AGENT, name: 'Birch' },
+      },
+    }));
+    try {
+      const tooltip = within(view.container).getByRole('tooltip', { hidden: true });
+      expect(Array.from(tooltip.children, (row) => row.textContent)).toEqual([
+        '@Birch last replied in this room 2 days earlier.',
+        '@Fable last replied in this room 2 days earlier.',
+      ]);
+    } finally {
+      view.unmount();
+    }
+  });
+
   it('keeps different recipient gaps distinct and does not invent a day count for old metadata', () => {
     const gap = {
       currentTime: '2026-08-18T19:00:00Z', prompt: `${TEMPORAL_GAP}\n`,
@@ -195,11 +257,14 @@ describe('cross-day temporal context', () => {
     try {
       let tooltip = within(view.container).getByRole('tooltip', { hidden: true });
       expect(tooltip.children).toHaveLength(2);
-      expect(tooltip.children[0]).toHaveTextContent('agent-fable-amber: have been 1 day since last message');
-      expect(tooltip.children[1]).toHaveTextContent('agent-fable-birch: have been 3 days since last message');
+      expect(tooltip.children[0]).toHaveTextContent('@agent-fable-amber last replied in this room 1 day earlier.');
+      expect(tooltip.children[1]).toHaveTextContent('@agent-fable-birch last replied in this room 3 days earlier.');
       view.rerender(createElement(VioletTemporalDivider, { gap: { ...gap, elapsedDaysByTarget: undefined } }));
       tooltip = within(view.container).getByRole('tooltip', { hidden: true });
-      expect(tooltip).toHaveTextContent(/^over 24 hours since last message$/);
+      expect(Array.from(tooltip.children, (row) => row.textContent)).toEqual([
+        '@agent-fable-amber last replied in this room at least 24 hours earlier.',
+        '@agent-fable-birch last replied in this room at least 24 hours earlier.',
+      ]);
     } finally {
       view.unmount();
     }

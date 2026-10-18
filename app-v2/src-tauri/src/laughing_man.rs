@@ -1374,7 +1374,7 @@ pub struct LmProjectInfo {
 /// Provided by lib.rs (workspace + agent registry access stays out of this
 /// module so the loop itself remains portable).
 pub type ProjectListFn = dyn Fn() -> Vec<LmProjectInfo> + Send + Sync;
-pub type InboundDeliverFn = dyn Fn(&str, &str, &str, &str) -> Result<(), String> + Send + Sync; // (project_root, agent_id, text, event_id)
+pub type InboundDeliverFn = dyn Fn(&str, &str, &str, &str, &str) -> Result<(), String> + Send + Sync; // (project_root, agent_id, text, event_id, text/caption before media paths)
 
 // ─────────────────────────── manager ───────────────────────────
 
@@ -1821,7 +1821,7 @@ fn deliver_standby_online_message(
         if *delay > 0 {
             thread::sleep(Duration::from_secs(*delay));
         }
-        match deliver(&selected.project_root, &selected.agent_id, &body, &event_id) {
+        match deliver(&selected.project_root, &selected.agent_id, &body, &event_id, message_text_or_caption(message).trim()) {
             Ok(()) => {
                 delivered = true;
                 break;
@@ -2434,7 +2434,7 @@ fn handle_message(
         if *delay > 0 {
             thread::sleep(Duration::from_secs(*delay));
         }
-        match deliver(&selected.project_root, &selected.agent_id, &body, &event_id) {
+        match deliver(&selected.project_root, &selected.agent_id, &body, &event_id, text.trim()) {
             Ok(()) => {
                 delivered = true;
                 break;
@@ -3003,7 +3003,11 @@ const IMAGE_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 
 /// Conservative path detection, mirroring the BBS rule: only paths that the
 /// agent explicitly wrote into its reply are ever uploaded.
-fn detect_media_paths(text: &str, allowed_roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn detect_media_paths(
+    text: &str,
+    project_root: &Path,
+    allowed_roots: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut images = Vec::new();
     let mut docs = Vec::new();
     let allowed_roots: Vec<PathBuf> = allowed_roots
@@ -3011,16 +3015,32 @@ fn detect_media_paths(text: &str, allowed_roots: &[PathBuf]) -> (Vec<PathBuf>, V
         .filter_map(|root| root.canonicalize().ok())
         .collect();
 
-    for raw in text.split_whitespace() {
-        let cleaned = clean_path_token(raw);
-        let lower = cleaned.to_ascii_lowercase();
-        let Some(ext) = lower.rsplit('.').next() else {
-            continue;
-        };
-        if !IMAGE_EXTS.contains(&ext) {
+    for reference in image_references(text) {
+        if reference.contains("://") && !reference.starts_with("file://") {
             continue;
         }
-        let Some(path) = allowed_media_path(cleaned, &allowed_roots) else {
+        let Some(normalized) = crate::normalize_violet_file_ref(reference) else {
+            continue;
+        };
+        let ext = Path::new(&normalized)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !IMAGE_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        // Resolve exactly as the room does (including ambiguity rejection),
+        // then retain LM's stricter upload boundary. A local preview alone is
+        // not permission to upload a file outside the allowed roots.
+        let request = crate::VioletFileRefRequest {
+            project_root: Some(project_root.to_string_lossy().into_owned()),
+            path: reference.to_string(),
+        };
+        let Some(resolved) = crate::resolve_violet_file_ref(&request).ok().flatten() else {
+            continue;
+        };
+        let Some(path) = allowed_media_path(&resolved.path, &allowed_roots) else {
             continue;
         };
         if images.len() < 10 && !images.contains(&path) {
@@ -3043,6 +3063,92 @@ fn detect_media_paths(text: &str, allowed_roots: &[PathBuf]) -> (Vec<PathBuf>, V
         }
     }
     (images, docs)
+}
+
+fn image_references(text: &str) -> Vec<&str> {
+    // Match the room's Markdown destinations, including angle-wrapped paths
+    // with spaces. Consume inline code and complete links before scanning bare
+    // paths, so example Markdown and remote-link labels cannot become uploads.
+    static TOKENS: OnceLock<regex::Regex> = OnceLock::new();
+    let tokens = TOKENS.get_or_init(|| {
+        regex::Regex::new(r#"`[^`]+`|(!?)\[([^\]]*)\]\((<[^>\r\n]+>|[^)\r\n]+)\)"#)
+            .expect("valid LM image-reference pattern")
+    });
+    let mut references = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next().unwrap_or_default();
+        let marker_len = trimmed.chars().take_while(|ch| *ch == marker).count();
+        if let Some((open_marker, open_len)) = fence {
+            if marker == open_marker
+                && marker_len >= open_len
+                && trimmed[marker_len..].trim().is_empty()
+            {
+                fence = None;
+            }
+            continue;
+        }
+        if matches!(marker, '`' | '~') && marker_len >= 3 {
+            fence = Some((marker, marker_len));
+            continue;
+        }
+        let mut offset = 0;
+        for captures in tokens.captures_iter(line) {
+            let token = captures.get(0).expect("matched token");
+            collect_bare_image_references(&line[offset..token.start()], &mut references);
+            let escaped = line[..token.start()]
+                .chars()
+                .rev()
+                .take_while(|ch| *ch == '\\')
+                .count()
+                % 2
+                == 1;
+            if !escaped {
+                if let Some(destination) = captures.get(3) {
+                    let destination = destination.as_str().trim();
+                    references.push(
+                        destination
+                            .strip_prefix('<')
+                            .and_then(|value| value.strip_suffix('>'))
+                            .unwrap_or(destination),
+                    );
+                } else {
+                    let code = &token.as_str()[1..token.as_str().len() - 1];
+                    // The room previews a single path in inline code, but not
+                    // Markdown syntax quoted as code.
+                    if !code.chars().any(char::is_whitespace) {
+                        collect_bare_image_references(code, &mut references);
+                    }
+                }
+            }
+            offset = token.end();
+        }
+        collect_bare_image_references(&line[offset..], &mut references);
+    }
+    references
+}
+
+fn collect_bare_image_references<'a>(text: &'a str, references: &mut Vec<&'a str>) {
+    for raw in text.split_whitespace() {
+        let path = clean_path_token(raw);
+        // Bare filenames are prose in the room. Relative paths need a path
+        // component; a filename alone is supported through a Markdown link.
+        if path.starts_with('/')
+            || path.starts_with("~/")
+            || path.starts_with("file://")
+            || (path.contains('/')
+                && !path.contains("://")
+                && path.split('/').next().is_some_and(|part| {
+                    !part.is_empty()
+                        && part
+                            .chars()
+                            .all(|ch| ch.is_alphanumeric() || "_@.-".contains(ch))
+                }))
+        {
+            references.push(path);
+        }
+    }
 }
 
 fn clean_path_token(raw: &str) -> &str {
@@ -3469,7 +3575,7 @@ fn push_reply(token: &str, chat_id: i64, selected: &LmSelected, speaker_name: &s
         PathBuf::from(&selected.project_root),
         home_dir().join("Kota"),
     ];
-    let (images, docs) = detect_media_paths(text, &allowed_roots);
+    let (images, docs) = detect_media_paths(text, Path::new(&selected.project_root), &allowed_roots);
     for image in images {
         if let Err(err) = send_file(token, chat_id, "sendPhoto", "photo", &image, None) {
             // Oversized/unsupported photos fall back to document delivery.
@@ -3729,7 +3835,7 @@ pub fn send_standby_queued(
     });
     let (body, media_count) = body_from_queued_message(&token, &selected, message)?;
     let event_id = standby_delivery_event_id(&item);
-    deliver(&selected.project_root, &selected.agent_id, &body, &event_id)
+    deliver(&selected.project_root, &selected.agent_id, &body, &event_id, message_text_or_caption(message).trim())
         .map_err(|err| anyhow!(err))?;
 
     let sent_at = now_iso();
@@ -3990,6 +4096,10 @@ pub fn revoke() -> Result<()> {
 }
 
 use std::io::Read as _;
+
+#[cfg(test)]
+#[path = "laughing_man_media_tests.rs"]
+mod media_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4305,12 +4415,12 @@ mod tests {
             img.display(),
             doc.display()
         );
-        let (images, docs) = detect_media_paths(&text, &[dir.clone()]);
-        assert_eq!(images, vec![img.clone()]);
+        let (images, docs) = detect_media_paths(&text, &dir, &[dir.clone()]);
+        assert_eq!(images, vec![img.canonicalize().unwrap()]);
         assert!(docs.is_empty());
 
         let standalone = format!("附件如下:\n{}\n{}\n", doc.display(), big.display());
-        let (images, docs) = detect_media_paths(&standalone, &[dir.clone()]);
+        let (images, docs) = detect_media_paths(&standalone, &dir, &[dir.clone()]);
         assert!(images.is_empty());
         assert_eq!(docs, vec![doc.clone()]);
 
@@ -4326,13 +4436,13 @@ mod tests {
             fs::write(&outside_doc, b"secret").unwrap();
             let link = dir.join("secret-link.md");
             std::os::unix::fs::symlink(&outside_doc, &link).unwrap();
-            let (_, docs) = detect_media_paths(&format!("{}\n", link.display()), &[dir.clone()]);
+            let (_, docs) = detect_media_paths(&format!("{}\n", link.display()), &dir, &[dir.clone()]);
             assert!(docs.is_empty());
             let _ = fs::remove_dir_all(&outside_dir);
         }
 
         // Outside the allowed roots → never uploaded, even if it exists.
-        let (outside, _) = detect_media_paths(&text, &[PathBuf::from("/srv/elsewhere")]);
+        let (outside, _) = detect_media_paths(&text, &dir, &[PathBuf::from("/srv/elsewhere")]);
         assert!(outside.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }

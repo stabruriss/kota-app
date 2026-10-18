@@ -1,3 +1,4 @@
+import type { LocalStartupOptions } from '../lib/local-startup';
 /** useAgentRuntime — M6.A frontend bookkeeping for live agent PTYs.
  *
  *  Maintains:
@@ -22,6 +23,7 @@ import {
   spawnAgentPty,
   submitAgentPromptPty,
   writeAgentPty,
+  type SoulInput,
 } from '../pty-client';
 import {
   linesToGridSnapshot,
@@ -32,6 +34,8 @@ import {
   type GridSnapshot,
 } from '../types/agent-pty';
 import type { AgentId } from '../types/scene';
+import { useLocalAgentRuntime } from './useLocalAgentRuntime';
+import type { AgentSummary } from '../types/agent-pty';
 import {
   createAgentGridStore,
   type AgentGridStore,
@@ -47,6 +51,7 @@ function normalizedWorkTurnId(event: AgentWorkStateEvent | undefined): string | 
 
 // These projections provide an explicit lifecycle and a stable ID for the whole turn.
 function hasAuthoritativeActiveTurn(event: AgentWorkStateEvent | undefined): boolean {
+  if (event?.cli === 'kota-local') return event.state === 'working' || event.state === 'maybeIdle';
   return (
     (event?.cli === 'codex' || event?.cli === 'kimi')
     && normalizedWorkTurnId(event) != null
@@ -121,13 +126,15 @@ interface AgentRuntimeState {
 }
 
 export interface AgentRuntime {
+  isLocal: (id: string) => boolean;
+  observeLocal: (summaries: readonly AgentSummary[]) => void;
   liveAgents: Set<AgentId>;
   gridStore: AgentGridStore;
   status: Map<AgentId, AgentStatusEvent>;
   workState: Map<AgentId, AgentWorkStateEvent>;
-  recruit: (req: AgentSpawnRequest) => Promise<void>;
+  recruit: (req: AgentSpawnRequest, startup?: LocalStartupOptions) => Promise<void>;
   send: (agentId: AgentId, input: string) => Promise<void>;
-  submitPrompt: (agentId: AgentId, input: string) => Promise<void>;
+  submitPrompt: (agentId: AgentId, input: string, soulInput?: SoulInput) => Promise<void>;
   dismiss: (agentId: AgentId) => Promise<void>;
 }
 
@@ -189,6 +196,8 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
     }, remainingMs ?? AGENT_WORK_INACTIVITY_TIMEOUT_MS);
     workTimeoutRefs.current.set(agentId, timer);
   }, [clearWorkTimer]);
+
+  const local = useLocalAgentRuntime({ setState, generations: generationRefs, subscriptions: unlistenRefs, clearWorkTimer, gridStore });
 
   const pruneExpiredWorkStates = useCallback(() => {
     setState((s) => {
@@ -327,7 +336,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
     };
   }, [gridStore]);
 
-  const recruit = useCallback(async (req: AgentSpawnRequest) => {
+  const recruit = useCallback(async (req: AgentSpawnRequest, startup?: LocalStartupOptions) => {
     const agentId = req.agentId as AgentId;
     const generation = (generationRefs.current.get(agentId) ?? 0) + 1;
     generationRefs.current.set(agentId, generation);
@@ -342,6 +351,9 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
       );
     }
     if (!isCurrentGeneration()) return;
+
+    if (req.cli === 'kota-local') return local.recruit(req, generation, startup);
+    local.forget(agentId);
 
     // Reset accumulated state + show "spawning {cli}…" placeholder so
     // the seat doesn't look stuck during the 1-3 s CC/Codex cold start.
@@ -470,8 +482,8 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
     await writeAgentPty(agentId, input);
   }, []);
 
-  const submitPrompt = useCallback(async (agentId: AgentId, input: string) => {
-    await submitAgentPromptPty(agentId, input);
+  const submitPrompt = useCallback(async (agentId: AgentId, input: string, soulInput?: SoulInput) => {
+    await submitAgentPromptPty(agentId, input, soulInput);
   }, []);
 
   const dismiss = useCallback(async (agentId: AgentId) => {
@@ -497,6 +509,8 @@ export function useAgentRuntime(options: AgentRuntimeOptions = {}): AgentRuntime
   }, [clearWorkTimer, gridStore]);
 
   return {
+    isLocal: local.isLocal,
+    observeLocal: local.observe,
     liveAgents: state.liveAgents,
     gridStore,
     status: state.status,

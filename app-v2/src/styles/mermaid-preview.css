@@ -1,0 +1,25 @@
+.violet-mermaid {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--brass-deep);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+.violet-mermaid + * { margin-top: 14px; }
+.violet-mermaid-viewport {
+  max-height: min(480px, 58vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 14px;
+}
+.violet-mermaid-viewport img { display: block; max-width: none; }
+.violet-mermaid-viewport::-webkit-scrollbar-corner { background: var(--bg-panel); }
+.violet-mermaid details { border-top: 1px solid var(--brass-deep); }
+.violet-mermaid summary {
+  padding: 7px 10px;
+  color: var(--text-3);
+  font: 10px var(--font-mono, monospace);
+  cursor: pointer;
+}
+.violet-mermaid .violet-md-code { border: 0; border-radius: 0; margin: 0; }
+.violet-mermaid-status { padding: 10px; color: var(--text-3); font-size: 11px; }

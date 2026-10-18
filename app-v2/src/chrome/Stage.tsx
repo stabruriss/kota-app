@@ -10,7 +10,7 @@
  *  the scene's transform stack. Seats still show a "pill" affordance
  *  for any agent that has a live PTY (= a window somewhere). */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { Agent, AgentId, SeatState } from '../types/scene';
@@ -24,7 +24,7 @@ import { WorkingHeroPicker } from './WorkingHeroPicker';
 import { AgentCommendButton } from './AgentCommendButton';
 import { ProjectAgentName } from './ProjectAgentName';
 import { ProviderBadge } from './ProviderBadge';
-import { VioletRoomPanel, type VioletComposerRetryRequest } from './VioletRoomPanel';
+import { VioletRoomPanel, trimVioletRoomHistoryCache, type VioletComposerRetryRequest } from './VioletRoomPanel';
 import { VioletRoomSearch } from './VioletRoomSearch';
 import { ProjectRulesMedal } from './ProjectRulesMedal';
 import { ProjectSettings } from './ProjectSettings';
@@ -66,6 +66,7 @@ function SeatCard({
   liveAgents,
   unavailableHeroIds,
   onOpenRecruitPicker,
+  onOpenRecruitDialog,
   onCloseRecruitPicker,
   onIncarnateHero,
   onContextMenu,
@@ -92,6 +93,7 @@ function SeatCard({
   liveAgents?: ReadonlySet<AgentId>;
   unavailableHeroIds?: ReadonlySet<AgentId>;
   onOpenRecruitPicker?: () => void;
+  onOpenRecruitDialog?: () => void;
   onCloseRecruitPicker?: () => void;
   onIncarnateHero?: (hero: WorkingHero) => void;
   onContextMenu?: (id: AgentId, point: { x: number; y: number }) => void;
@@ -111,17 +113,17 @@ function SeatCard({
         className={`seat empty ${recruitPickerOpen ? 'picker-open' : ''} ${dragging === 'target-move' ? 'drop-target drop-move' : ''}`}
         style={{ left: pos.left, top: pos.top }}
         data-seat-index={seatIndex}
-        onMouseEnter={onOpenRecruitPicker}
+        onMouseEnter={onOpenRecruitDialog ? undefined : onOpenRecruitPicker}
         onMouseLeave={onCloseRecruitPicker}
         onClick={(event) => {
           event.stopPropagation();
-          onOpenRecruitPicker?.();
+          (onOpenRecruitDialog ?? onOpenRecruitPicker)?.();
           onClick();
         }}
         onKeyDown={(event) => {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
-            onOpenRecruitPicker?.();
+            (onOpenRecruitDialog ?? onOpenRecruitPicker)?.();
           }
           if (event.key === 'Escape') onCloseRecruitPicker?.();
         }}
@@ -133,7 +135,7 @@ function SeatCard({
       >
         <div className="se-plus">+</div>
         <div className="se-lbl">Open seat</div>
-        {recruitPickerOpen && workingHeroes && onIncarnateHero && (
+        {!onOpenRecruitDialog && recruitPickerOpen && workingHeroes && onIncarnateHero && (
           <WorkingHeroPicker
             heroes={workingHeroes}
             unavailableHeroIds={unavailableHeroIds ?? liveAgents}
@@ -326,11 +328,14 @@ export interface StageProps {
   /** Double-click seat / ribbon → focus terminal. */
   onDblClickAgent?: (id: AgentId) => void;
   onOpenAgentTerminal?: (id: AgentId) => void;
+  onOpenLocalWorkbench?: (id: AgentId, section?: 'queue') => void;
+  localQueueGuards?: ReadonlySet<string>;
   onRefreshAgentSession?: (id: AgentId) => void;
   onRetryComposerMessage?: (request: VioletComposerRetryRequest) => boolean | void | Promise<boolean | void>;
   onQuoteMessage?: (quote: RoomQuoteReference) => RoomQuoteInsertResult;
   /** Group chat overlay. */
   groupChatOpen?: boolean;
+  danceActive?: boolean;
   chatFilterActive?: boolean;
   showAgentToAgentMessages?: boolean;
   groupChatUnreadCount?: number;
@@ -395,10 +400,13 @@ export function Stage({
   onRecruitSeatIndexChange,
   onDblClickAgent,
   onOpenAgentTerminal,
+  onOpenLocalWorkbench,
+  localQueueGuards,
   onRefreshAgentSession,
   onRetryComposerMessage,
   onQuoteMessage,
   groupChatOpen = false,
+  danceActive = false,
   chatFilterActive: chatFilterActiveProp,
   showAgentToAgentMessages: showAgentToAgentMessagesProp,
   groupChatUnreadCount = 0,
@@ -412,7 +420,28 @@ export function Stage({
   composer,
   broadcastPopover,
 }: StageProps) {
+  // Stage stays mounted when the room is minimized. Only a project change
+  // releases its expanded history, not Cmd+9, filters, scrolling or Latest.
+  const previousRoomProject = useRef(projectRoot);
+  useLayoutEffect(() => {
+    if (previousRoomProject.current !== projectRoot) {
+      trimVioletRoomHistoryCache(previousRoomProject.current);
+      previousRoomProject.current = projectRoot;
+    }
+  }, [projectRoot]);
   const [privacyOpen, setPrivacyOpen] = useState(false);
+  const danceSeatClick = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelDanceSeatClick = useCallback(() => {
+    if (danceSeatClick.current) clearTimeout(danceSeatClick.current);
+    danceSeatClick.current = null;
+  }, []);
+  useEffect(() => cancelDanceSeatClick, [danceActive, projectRoot, cancelDanceSeatClick]);
+  const openSeatAgent = (id: AgentId) => {
+    if (agentsHydrating) return;
+    if (!danceActive) { onOpenAgent(id); return; }
+    cancelDanceSeatClick();
+    danceSeatClick.current = setTimeout(() => { danceSeatClick.current = null; onOpenAgent(id); }, 220);
+  };
   const [projectRulesOpen, setProjectRulesOpen] = useState(false);
   // The room unmounts on Cmd+9; its search session belongs to the project, not that view.
   const [searchScope, setSearchScope] = useState<string | null>(null);
@@ -820,12 +849,12 @@ export function Stage({
                       pos={p}
                       state={agentId ? stateForAgent(agentId) : 'empty'}
                       onClick={() => {
-                        if (!agentsHydrating && agentId) onOpenAgent(agentId);
+                        if (agentId) openSeatAgent(agentId);
                       }}
-                      onDoubleClick={agentId && onDblClickAgent && !agentsHydrating ? () => onDblClickAgent(agentId) : undefined}
+                      onDoubleClick={agentId && !agentsHydrating ? () => { cancelDanceSeatClick(); onDblClickAgent?.(agentId); } : undefined}
                       onContextMenu={
                         agentId && onAgentContextMenu && !agentsHydrating
-                          ? (id, point) => onAgentContextMenu(id, point, 'table-card')
+                          ? (id, point) => { cancelDanceSeatClick(); onAgentContextMenu(id, point, 'table-card'); }
                           : undefined
                       }
                       onCommend={agentId && !agentsHydrating ? onCommendAgent : undefined}
@@ -843,6 +872,9 @@ export function Stage({
                       agentMeta={agentMeta}
                       liveAgents={liveAgents}
                       unavailableHeroIds={unavailableHeroIds}
+                      onOpenRecruitDialog={!agentId && onOpenAgentSlotAdd ? () => {
+                        if (!agentsHydrating && !seatDragRunRef.current) onOpenAgentSlotAdd(index);
+                      } : undefined}
                       onOpenRecruitPicker={() => {
                         if (agentsHydrating) return;
                         // A drag pointer passes through the ghost onto empty
@@ -925,6 +957,8 @@ export function Stage({
               onAgentContextMenu={onAgentContextMenu}
               onCommendAgent={onCommendAgent}
               onOpenAgentTerminal={onOpenAgentTerminal}
+              onOpenLocalWorkbench={onOpenLocalWorkbench}
+              localQueueGuards={localQueueGuards}
               onRefreshAgentSession={onRefreshAgentSession}
               onRetryComposerMessage={onRetryComposerMessage}
               onQuoteMessage={onQuoteMessage}
@@ -984,6 +1018,7 @@ export function Stage({
 
       <div className="stage-bottom-dock">
         <AgentRibbon
+          danceActive={danceActive}
           onTable={onTable}
           offTable={offTable}
           targetAgent={targetAgent}

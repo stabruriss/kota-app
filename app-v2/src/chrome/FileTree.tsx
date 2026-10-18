@@ -2,9 +2,10 @@
  *
  *  MVP scope is intentionally narrow: browse Project Files and Project
  *  Workspace, select paths, open/reveal/copy through system actions,
- *  and drag paths into the composer. No search, preview, editor, or diff. */
+ *  drag paths into the composer, and filter this project's tree by name. */
 
 import {
+  startTransition,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -17,14 +18,18 @@ import { createPortal } from 'react-dom';
 import featherPenIcon from '../assets/tavern/icons/feather-pen.svg';
 import {
   workspaceListTreePath,
+  workspaceSearchNames,
   workspaceOpenTreePath,
   workspaceRevealTreePath,
 } from '../pty-client';
 import { DiffMedal } from './DiffMedal';
+import { RoomSearchIcon } from './room-search-elements';
 import { emitFileTreeAgentHover } from '../lib/file-tree-agent-hover';
 import { useKotaUpdateCheck } from '../hooks/useKotaUpdateCheck';
 import type {
   WorkspaceDiffScope,
+  WorkspaceNameSearchRequest,
+  WorkspaceNameSearchResult,
   WorkspaceTreeChangeOverview,
   WorkspaceTreeChangeParticipant,
   WorkspaceTreeFileChange,
@@ -42,6 +47,32 @@ interface SelectedTreePath {
   kind: 'file' | 'folder' | 'symlink';
   isGhost?: boolean;
 }
+
+interface TreeNameSearch {
+  owner: symbol;
+  rootKind: WorkspaceTreeRootKind;
+  includeIgnored: boolean;
+  query: string;
+  listings: Map<string, WorkspaceTreeListing>;
+  pending: boolean;
+  truncated: boolean;
+  indexTruncated: boolean;
+  readFailed: boolean;
+  gitFailed: boolean;
+  error: string | null;
+}
+
+interface TreeSearchSession { owner: symbol; request: WorkspaceNameSearchRequest }
+let lastSearchGeneration = 0;
+function nextSearchGeneration() {
+  lastSearchGeneration = Math.max(Date.now(), lastSearchGeneration + 1);
+  return lastSearchGeneration;
+}
+function endNameSearch(session: TreeSearchSession | null) {
+  if (session) void workspaceSearchNames({ ...session.request, query: '', cancel: true }).catch(() => {});
+}
+
+const emptyTreeListings = new Map<string, WorkspaceTreeListing>();
 
 interface ContextMenuState {
   x: number;
@@ -102,6 +133,16 @@ export function FileTree({
   workspaceDir,
   refreshToken,
 }: FileTreeProps) {
+  const owner = useMemo(() => Symbol('file-tree-owner'), [projectId, sourceDir, workspaceDir]);
+  const ownerRef = useRef(owner);
+  useLayoutEffect(() => { ownerRef.current = owner; }, [owner]);
+  const listingsOwnerRef = useRef(owner);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const savedSelections = useMemo(() => new Map<WorkspaceTreeRootKind, SelectedTreePath | null>(), [owner]);
+  const [queries, setQueries] = useState({ owner, projectFiles: '', projectWorkspace: '' });
+  const [ignoredOptions, setIgnoredOptions] = useState({ owner, projectFiles: false, projectWorkspace: false });
+  const searchSessionRef = useRef<TreeSearchSession | null>(null);
+  const [search, setSearch] = useState<TreeNameSearch | null>(null);
   const [activeRoot, setActiveRoot] = useState<WorkspaceTreeRootKind>('projectFiles');
   const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set(['projectFiles:', 'projectWorkspace:']));
   const [listings, setListings] = useState<Map<string, WorkspaceTreeListing>>(() => new Map());
@@ -125,8 +166,9 @@ export function FileTree({
     openUpdateHome,
   } = useKotaUpdateCheck();
 
-  useEffect(() => () => {
-    mountedRef.current = false;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
   }, []);
 
   useEffect(() => {
@@ -140,6 +182,7 @@ export function FileTree({
   useEffect(() => {
     const nextListings = new Map<string, WorkspaceTreeListing>();
     const nextLoadingKeys = new Set<string>();
+    listingsOwnerRef.current = owner;
     listingsRef.current = nextListings;
     loadingKeysRef.current = nextLoadingKeys;
     refreshTokenRef.current = refreshToken;
@@ -147,7 +190,15 @@ export function FileTree({
     setLoadingKeys(nextLoadingKeys);
     setOpenPaths(new Set(['projectFiles:', 'projectWorkspace:']));
     setSelected(null);
-  }, [projectId, sourceDir, workspaceDir]);
+    setContextMenu(null);
+    setQueries({ owner, projectFiles: '', projectWorkspace: '' });
+    setIgnoredOptions({ owner, projectFiles: false, projectWorkspace: false });
+  }, [owner]);
+
+  useEffect(() => () => {
+    endNameSearch(searchSessionRef.current);
+    searchSessionRef.current = null;
+  }, []);
 
   const listingKey = useCallback((rootKind: WorkspaceTreeRootKind, relativePath = '') => (
     `${rootKind}:${relativePath}`
@@ -157,6 +208,7 @@ export function FileTree({
     rootKind: WorkspaceTreeRootKind,
     relativePath = '',
   ) => {
+    if (ownerRef.current !== owner) return;
     const key = listingKey(rootKind, relativePath);
     if (listingsRef.current.has(key) || loadingKeysRef.current.has(key)) return;
     setLoadingKeys((prev) => {
@@ -166,14 +218,14 @@ export function FileTree({
     });
     try {
       const listing = await workspaceListTreePath({ projectId, rootKind, relativePath });
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || ownerRef.current !== owner) return;
       setListings((prev) => {
         const next = new Map(prev);
         next.set(key, listing);
         return next;
       });
-      if (!selected && !relativePath) {
-        setSelected({
+      if (!relativePath) {
+        setSelected(previous => previous ?? {
           rootKind,
           relativePath: '',
           absolutePath: listing.root.absolutePath,
@@ -183,7 +235,7 @@ export function FileTree({
     } catch (err) {
       console.warn('[file-tree] list failed', err);
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && ownerRef.current === owner) {
         setLoadingKeys((prev) => {
           const next = new Set(prev);
           next.delete(key);
@@ -192,9 +244,10 @@ export function FileTree({
         });
       }
     }
-  }, [listingKey, projectId, selected]);
+  }, [listingKey, projectId, owner]);
 
   const refreshListings = useCallback(async () => {
+    if (ownerRef.current !== owner) return;
     const rootKey = listingKey(activeRoot, '');
     const keys = Array.from(new Set([rootKey, ...listingsRef.current.keys()]));
     if (keys.length === 0) return;
@@ -219,7 +272,7 @@ export function FileTree({
       }),
     );
 
-    if (!mountedRef.current) return;
+    if (!mountedRef.current || ownerRef.current !== owner) return;
 
     setListings((prev) => {
       const next = new Map(prev);
@@ -242,7 +295,7 @@ export function FileTree({
       loadingKeysRef.current = next;
       return next;
     });
-  }, [activeRoot, listingKey, projectId]);
+  }, [activeRoot, listingKey, projectId, owner]);
 
   useEffect(() => {
     if (refreshToken === undefined) return;
@@ -270,7 +323,78 @@ export function FileTree({
     void loadListing(activeRoot, '');
   }, [activeRoot, loadListing]);
 
-  const activeListing = listings.get(listingKey(activeRoot, ''));
+  const rawQuery = queries.owner === owner ? queries[activeRoot] : '';
+  const query = rawQuery.trim().toLowerCase();
+  const filtering = !!query;
+  const includeIgnored = ignoredOptions.owner === owner ? ignoredOptions[activeRoot] : false;
+
+  useEffect(() => {
+    const previous = searchSessionRef.current;
+    if (!filtering) {
+      endNameSearch(previous); searchSessionRef.current = null; setSearch(null); return;
+    }
+    if (!previous || previous.owner !== owner || previous.request.rootKind !== activeRoot
+        || previous.request.includeIgnored !== includeIgnored) {
+      endNameSearch(previous);
+      searchSessionRef.current = { owner, request: { projectId, rootKind: activeRoot,
+        includeIgnored, generation: nextSearchGeneration(), queryRevision: 0, query: '' } };
+    }
+    const session = searchSessionRef.current!;
+    session.request.query = query;
+    const request = { ...session.request, queryRevision: ++session.request.queryRevision };
+    let obsolete = false;
+    const current = () => !obsolete && mountedRef.current && ownerRef.current === owner
+      && searchSessionRef.current === session;
+    const empty: TreeNameSearch = { owner, rootKind: activeRoot, includeIgnored, query,
+      listings: emptyTreeListings, pending: true, truncated: false, indexTruncated: false,
+      readFailed: false, gitFailed: false, error: null };
+    setSearch(previous => ({ ...empty, listings: previous?.owner === owner
+      && previous.rootKind === activeRoot && previous.includeIgnored === includeIgnored
+      ? previous.listings : emptyTreeListings }));
+    // A keyword request only filters the native index. No per-directory listing,
+    // no full JS catalogue, and no refresh/focus dependency starts another scan.
+    void workspaceSearchNames(request).then(result => {
+      if (!current() || result.generation !== request.generation || result.queryRevision !== request.queryRevision) return;
+      if (result.cancelled) {
+        setSearch({ ...empty, pending: false, error: 'Search unavailable. Clear search and try again.' });
+        return;
+      }
+      // A large capped result must not take priority over the next keystroke.
+      startTransition(() => setSearch({ ...empty, pending: false, listings: searchResultListings(result, activeRoot),
+        truncated: result.truncated, indexTruncated: result.indexTruncated,
+        readFailed: result.readFailed, gitFailed: result.gitFailed }));
+    }).catch(error => {
+      if (current()) setSearch({ ...empty, pending: false,
+        error: error === 'Search snapshot expired. Clear search and try again.'
+          ? error : 'Search unavailable. Clear search and try again.' });
+    });
+    return () => { obsolete = true; };
+  }, [activeRoot, filtering, includeIgnored, owner, projectId, query]);
+
+  const currentSearch = search?.owner === owner && search.rootKind === activeRoot
+    && search.includeIgnored === includeIgnored ? search : null;
+  const searching = filtering && (!currentSearch || currentSearch.pending || currentSearch.query !== query);
+  const filteredTree = useMemo(() => (
+    filterTreeListings(currentSearch?.listings ?? emptyTreeListings, activeRoot, query)
+  ), [currentSearch, activeRoot, query]);
+  const visibleListings = filtering ? filteredTree.listings : listingsOwnerRef.current === owner ? listings : emptyTreeListings;
+  const visibleOpenPaths = filtering ? filteredTree.openPaths : openPaths;
+  const activeListing = visibleListings.get(listingKey(activeRoot, ''));
+  let searchStatus: string | null = null;
+  if (filtering) {
+    if (searching) searchStatus = 'Searching names…';
+    else if (currentSearch?.error) searchStatus = currentSearch.error;
+    else {
+      const reasons = [
+        currentSearch?.truncated && 'showing first 2,000 matches',
+        currentSearch?.indexTruncated && '200,000-entry index limit reached',
+        currentSearch?.readFailed && 'some folders could not be read',
+        currentSearch?.gitFailed && 'Git metadata could not be loaded',
+      ].filter(Boolean);
+      if (reasons.length) searchStatus = `Search incomplete: ${reasons.join('; ')}${reasons.length === 1 && currentSearch?.truncated ? '' : '.'}`;
+      else if (!activeListing?.entries.length) searchStatus = 'No matching files or folders.';
+    }
+  }
   const activeRootPath = activeListing?.root.absolutePath
     ?? (activeRoot === 'projectFiles' ? sourceDir : workspaceDir)
     ?? 'Loading...';
@@ -281,8 +405,8 @@ export function FileTree({
     if (activeRoot !== 'projectWorkspace' || !activeListing) return [];
     const markers = collectVisibleSymlinkMarkers(activeListing.entries, {
       rootKind: activeRoot,
-      openPaths,
-      listings,
+      openPaths: visibleOpenPaths,
+      listings: visibleListings,
       listingKey,
     });
     const seen = new Set<string>();
@@ -294,7 +418,7 @@ export function FileTree({
         seen.add(normalized);
         return true;
       });
-  }, [activeListing, activeRoot, activeRootPath, listingKey, listings, openPaths]);
+  }, [activeListing, activeRoot, activeRootPath, listingKey, visibleListings, visibleOpenPaths]);
 
   useLayoutEffect(() => {
     if (activeRoot !== 'projectWorkspace') {
@@ -321,7 +445,7 @@ export function FileTree({
       window.clearTimeout(timer);
       window.removeEventListener('resize', measure);
     };
-  }, [activeRoot, activeRootPath, activeListing, externalSymlinkMarkers, listings, openPaths]);
+  }, [activeRoot, activeRootPath, activeListing, externalSymlinkMarkers, visibleListings, visibleOpenPaths]);
 
   useEffect(() => {
     if (!activeListing) return;
@@ -334,13 +458,30 @@ export function FileTree({
     });
   }, [activeListing, activeRoot, selected?.rootKind]);
 
+  const changeQuery = (value: string) => {
+    if (!query && value.trim()) savedSelections.set(activeRoot, selected?.rootKind === activeRoot ? selected : null);
+    if (query && !value.trim()) {
+      setSelected(savedSelections.get(activeRoot) ?? null);
+      savedSelections.delete(activeRoot);
+    }
+    setQueries(previous => ({
+      ...(previous.owner === owner ? previous : { owner, projectFiles: '', projectWorkspace: '' }),
+      [activeRoot]: value,
+    }));
+    setContextMenu(null);
+  };
+  const clearQuery = () => {
+    changeQuery('');
+    searchInputRef.current?.focus();
+  };
+
   const selectPath = (item: SelectedTreePath) => {
     setSelected(item);
     setContextMenu(null);
   };
 
   const toggleFolder = async (entry: WorkspaceTreeEntry) => {
-    if (entry.kind !== 'folder') return;
+    if (filtering || entry.kind !== 'folder') return;
     const key = listingKey(activeRoot, entry.path);
     setOpenPaths((prev) => {
       const next = new Set(prev);
@@ -438,6 +579,31 @@ export function FileTree({
         ))}
       </div>
 
+      <div className="tree-search">
+        <span className="tree-search-icon" aria-hidden><RoomSearchIcon /></span>
+        <input ref={searchInputRef} type="search" placeholder="Search files and folders"
+          aria-label={`Search file and folder names in ${activeRoot === 'projectFiles' ? 'Project Files' : 'Project Workspace'}`}
+          autoComplete="off" spellCheck={false} value={rawQuery}
+          onChange={event => changeQuery(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Escape' && !event.nativeEvent.isComposing && rawQuery) {
+              event.preventDefault(); event.stopPropagation(); clearQuery();
+            }
+          }} />
+        {rawQuery && <button type="button" className="tree-search-clear" aria-label="Clear search" title="Clear search" onClick={clearQuery}>×</button>}
+      </div>
+
+      {rawQuery && <label className="tree-search-options" title="Include paths excluded by .gitignore. Git, Mercurial and Subversion metadata folders are never traversed.">
+        <input type="checkbox" checked={includeIgnored}
+          onChange={event => {
+            const checked = event.target.checked;
+            setIgnoredOptions(previous => ({ ...(previous.owner === owner ? previous
+              : { owner, projectFiles: false, projectWorkspace: false }), [activeRoot]: checked }));
+            setContextMenu(null);
+          }} />
+        Include ignored files
+      </label>}
+
       <div className="tree-section-meta">
         <div
           className="tree-root-path"
@@ -455,7 +621,7 @@ export function FileTree({
         </div>
       </div>
 
-      <div className="tree-body" ref={treeBodyRef}>
+      <div className="tree-body" ref={treeBodyRef} data-filtering={filtering || undefined} aria-busy={searching}>
         {symlinkOverlay.segments.length > 0 && (
           <svg
             className="tree-symlink-overlay"
@@ -515,8 +681,9 @@ export function FileTree({
                 level={1}
                 rootKind={activeRoot}
                 selectedPath={selected?.rootKind === activeRoot ? selected.relativePath : null}
-                openPaths={openPaths}
-                listings={listings}
+                openPaths={visibleOpenPaths}
+                listings={visibleListings}
+                filtering={filtering}
                 listingKey={listingKey}
                 onSelect={selectPath}
                 onToggleFolder={(folder) => { void toggleFolder(folder); }}
@@ -525,12 +692,13 @@ export function FileTree({
                 onContextMenu={setContextMenu}
               />
             ))
-        ) : (
+        ) : !filtering && (
           <div className="tree-loading tree-connecting" data-testid="tree-loading">
             <span className="tree-connecting-spinner" aria-hidden />
             <span>Connecting...</span>
           </div>
         )}
+        {searchStatus && <p className="tree-filter-empty" role="status">{searchStatus}</p>}
       </div>
 
       {contextMenu && (
@@ -648,6 +816,7 @@ function TreeRow({
   selectedPath,
   openPaths,
   listings,
+  filtering,
   listingKey,
   onSelect,
   onToggleFolder,
@@ -661,6 +830,7 @@ function TreeRow({
   selectedPath: string | null;
   openPaths: Set<string>;
   listings: Map<string, WorkspaceTreeListing>;
+  filtering: boolean;
   listingKey: (rootKind: WorkspaceTreeRootKind, relativePath?: string) => string;
   onSelect: (item: SelectedTreePath) => void;
   onToggleFolder: (entry: WorkspaceTreeEntry) => void;
@@ -671,7 +841,7 @@ function TreeRow({
   const folder = entry.kind === 'folder';
   const open = folder && openPaths.has(listingKey(rootKind, entry.path));
   const selected = selectedPath === entry.path;
-  const children = folder ? listings.get(listingKey(rootKind, entry.path))?.entries ?? null : null;
+  const children = folder ? listings.get(listingKey(rootKind, entry.path))?.entries ?? (filtering ? [] : null) : null;
   const fileChange = entry.fileChange ?? null;
   const showFolderChange = folder && !!entry.treeHasChanges;
   const item: SelectedTreePath = {
@@ -740,7 +910,7 @@ function TreeRow({
           type="button"
           className="t-chev"
           aria-label={folder ? (open ? 'Collapse folder' : 'Expand folder') : undefined}
-          disabled={!folder}
+          disabled={!folder || filtering}
           onClick={(event) => {
             event.stopPropagation();
             onToggleFolder(entry);
@@ -810,6 +980,7 @@ function TreeRow({
                   selectedPath={selectedPath}
                   openPaths={openPaths}
                   listings={listings}
+                  filtering={filtering}
                   listingKey={listingKey}
                   onSelect={onSelect}
                   onToggleFolder={onToggleFolder}
@@ -1030,6 +1201,44 @@ function collectVisibleSymlinkMarkers(
     }
   }
   return markers;
+}
+
+function searchResultListings(result: WorkspaceNameSearchResult, rootKind: WorkspaceTreeRootKind) {
+  const listings = new Map<string, WorkspaceTreeListing>();
+  if (!result.root) return listings;
+  listings.set(`${rootKind}:`, { root: result.root, entries: [] });
+  for (const entry of result.entries) {
+    const slash = entry.path.lastIndexOf('/');
+    const parent = slash < 0 ? '' : entry.path.slice(0, slash);
+    const key = `${rootKind}:${parent}`;
+    if (!listings.has(key)) listings.set(key, { root: result.root, entries: [] });
+    listings.get(key)!.entries.push(entry);
+  }
+  return listings;
+}
+
+function filterTreeListings(listings: Map<string, WorkspaceTreeListing>, rootKind: WorkspaceTreeRootKind, query: string) {
+  if (!query) return { listings, openPaths: new Set<string>() };
+  const retained = new Set<string>();
+  const openPaths = new Set<string>([`${rootKind}:`]);
+  for (const listing of listings.values()) {
+    for (const entry of listing.entries) {
+      if (!entry.name.toLowerCase().includes(query)) continue;
+      let path = entry.path;
+      while (path && !retained.has(path)) {
+        retained.add(path);
+        openPaths.add(`${rootKind}:${path}`);
+        const slash = path.lastIndexOf('/');
+        path = slash < 0 ? '' : path.slice(0, slash);
+      }
+    }
+  }
+  return {
+    openPaths,
+    listings: new Map(Array.from(listings, ([key, listing]) => [key, {
+      ...listing, entries: listing.entries.filter(entry => retained.has(entry.path)),
+    }])),
+  };
 }
 
 function parseListingKey(key: string): {

@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "defaultIntents": [
+    "Complex work where quality matters, decisions, or work where a mistake is costly.",
+    "Light work or simple lookups."
+  ],
+  "stringFirst": {
+    "questions": {
+      "model": {
+        "type": "choice",
+        "instructions": "An AI agent receives `new_message`. Decide which model it should use. `previous_reply`, when present, shows its latest reply.",
+        "criteria": { "<model_id>": "<intent>" }
+      }
+    }
+  },
+  "stringLater": {
+    "questions": {
+      "model": {
+        "type": "choice",
+        "instructions": "An AI agent receives `new_message`. Decide which model it should use. The agent is currently on `current_model`, and `previous_reply` shows its latest reply. Switching models throws away cached work, so choose another model only when `new_message` clearly needs it. Follow-ups, confirmations, corrections and continuations of the latest reply belong to the current model.",
+        "criteria": { "<model_id>": "<intent>" }
+      }
+    }
+  },
+  "danceContext": {
+    "questions": {
+      "target": {
+        "type": "choice",
+        "instructions": "Choose exactly one agent to receive state.new_message verbatim. Use state.roster and its recent task context. Do not rewrite the message, answer it, or select multiple agents. route to that latest_reply agent unless new_message clearly addresses another agent's work.",
+        "criteria": { "<agent_id>": "Route to <agent_id> in state.roster." }
+      }
+    }
+  },
+  "danceRule": {
+    "questions": {
+      "target": {
+        "type": "choice",
+        "instructions": "Choose exactly one agent to receive state.new_message verbatim. Match the new message to the routing condition for each agent in state.roster. Use the supplied conditions, not assumptions about names or other conversation history.",
+        "criteria": { "<agent_id>": "<condition>" }
+      }
+    }
+  }
+}

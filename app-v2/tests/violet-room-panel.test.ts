@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import * as ptyClient from '../src/pty-client';
@@ -12,9 +12,67 @@ import {
   mergeSyncedNativeMessages,
   normalizeAttachmentInsensitive,
   normalizeForDedupe,
+  reconcileAgentBusDeliveries,
+  nextAgentBusDeliveryDeadline,
 } from '../src/chrome/VioletRoomPanel';
 import type { VioletChatMessage } from '../src/pty-client';
+import * as dedupeText from '../src/lib/violet-message-dedupe';
 import { splitLeadingEnvelopePrefix, stripLeadingTemporalGapForDisplay } from '../src/lib/violet-message-dedupe';
+
+it('uses the agent header for Puppeteer without changing ordinary user or agent headers', () => {
+  const agentMeta = {
+    'agent-a': { name: 'Ada', emoji: 'A', role: 'Engineer', hue: '#fff', avatarClass: 'provider-codex' },
+    'agent-b': { name: '座山雕', emoji: 'B', role: 'Reviewer', hue: '#fff', avatarClass: 'provider-claude' },
+  };
+  const message = {
+    ...roomMessage({
+      agentId: 'user', shell: 'composer', messageOrigin: 'puppeteer', targetAgentIds: ['agent-b'],
+    }),
+    deliveryStatus: 'failed' as const,
+  };
+  const onRetryComposerMessage = vi.fn();
+  const props = { message, agentMeta, humanTargetName: 'Human Tester', onRetryComposerMessage };
+  const view = render(createElement(VioletMessageBubble, props));
+  const expectAgentHeader = (name: string) => {
+    const header = view.container.querySelector<HTMLDivElement>('.violet-msg-meta')!;
+    expect(header).toBeInTheDocument();
+    const names = header.querySelector('.violet-agent-name-group');
+    const target = within(header).getByText('@座山雕');
+    expect(names).toHaveTextContent(name);
+    expect(target.previousElementSibling).toBe(names);
+    expect(target.nextElementSibling).toBe(header.querySelector('time'));
+    expect(header.querySelector('time')).not.toBeEmptyDOMElement();
+    expect(view.container.querySelectorAll('time')).toHaveLength(1);
+    expect(view.container.querySelector('.violet-msg-targets')).toBeNull();
+  };
+  expectAgentHeader('Puppeteer');
+  expect(view.container.querySelector('article')).toHaveClass('agent', 'puppeteer-origin');
+  expect(view.container.querySelector('.violet-msg-avatar')).toHaveClass('system-puppeteer');
+  fireEvent.click(screen.getByRole('button', { name: 'Queued message — try sending now' }));
+  expect(onRetryComposerMessage).toHaveBeenCalledExactlyOnceWith(message);
+
+  view.rerender(createElement(VioletMessageBubble, {
+    ...props, agent: agentMeta['agent-a'], message: roomMessage({ role: 'assistant', targetAgentIds: ['agent-b'] }),
+  }));
+  expectAgentHeader('Ada');
+  expect(view.container.querySelector('article')).not.toHaveClass('puppeteer-origin');
+
+  view.rerender(createElement(VioletMessageBubble, {
+    ...props, message: { ...message, messageOrigin: undefined, privacy: true },
+  }));
+  const targets = view.container.querySelector<HTMLDivElement>('.violet-msg-targets')!;
+  expect(view.container.querySelector('article')).toHaveClass('user');
+  expect(view.container.querySelector('.violet-msg-meta')).toBeNull();
+  expect(targets.querySelector('.project-agent-name')).toBeNull();
+  expect(within(targets).getByText('@座山雕').nextElementSibling).toHaveTextContent('private');
+  expect(targets.lastElementChild).toBe(targets.querySelector('time'));
+  expect(view.container.querySelectorAll('time')).toHaveLength(1);
+
+  view.rerender(createElement(VioletMessageBubble, {
+    ...props, message: roomMessage({ agentId: 'user', targetAgentIds: [] }),
+  }));
+  expect(view.container.querySelector('.violet-msg-meta, .violet-msg-targets')).toBeNull();
+});
 
 describe('Codex sandbox notice', () => {
   const notice = roomMessage({
@@ -116,6 +174,13 @@ describe('temporal context display', () => {
     expect(stripLeadingTemporalGapForDisplay(`${prefix}${gap}\nhi`)).toBe(`${prefix}hi`);
   });
 
+  it('peels the host marks envelope ahead of the gap, never a quoted one', () => {
+    const marks = '<KOTA_MARKS v="1" revision="3">\n- [m-a] Note.\n</KOTA_MARKS>\n';
+    expect(stripLeadingTemporalGapForDisplay(`${marks}${gap}\nhello`)).toBe('hello');
+    expect(stripLeadingTemporalGapForDisplay(`${marks}[Image #1] hi`)).toBe('[Image #1] hi');
+    expect(stripLeadingTemporalGapForDisplay(`quoted:\n${marks}hello`)).toBe(`quoted:\n${marks}hello`);
+  });
+
   it('handles CRLF without normalizing the preserved prefix or body', () => {
     const prefix = '\r\n[Image #1] \r\n';
     const body = '\r\nhello\r\nworld\r\n';
@@ -163,6 +228,28 @@ it('shows the actual turn provider badge only on known-provider end-turn bubbles
     view.unmount();
     readCache.mockRestore();
   }
+});
+
+it.each([false, true])('keeps each turn’s actual model and thinking after the Auto String prefix (search=%s)', search => {
+  const snapshots = [
+    { model: 'gpt-6.1-sol', effort: 'high', route: 'auto' as const },
+    { model: 'gpt-6-luna', effort: 'low', route: 'auto' as const },
+    { model: 'claude-sonnet-4-6', effort: 'high', route: 'auto' as const },
+    { model: 'gpt-6.1-sol', effort: 'medium' },
+  ];
+  const view = render(createElement('div', null, snapshots.map((snapshot, index) => createElement(VioletMessageBubble, {
+    key: index,
+    message: roomMessage({ id: `route-${index}`, role: 'assistant', shell: 'kota-local', text: `Reply ${index}`, ...snapshot }),
+    humanTargetName: 'Human Tester',
+    ...(search ? { searchResult: { human: { name: 'Human Tester' }, now: new Date('2026-05-18'), terms: [], selected: false, onOpen: vi.fn() } } : {}),
+  }))));
+  const captions = [...view.container.querySelectorAll('.violet-msg-model')];
+  expect(captions).toHaveLength(4);
+  captions.forEach((caption, index) => {
+    expect(caption.firstElementChild).toHaveClass('provider-badge');
+    expect(within(caption as HTMLElement).getByLabelText('Kota Local')).toBeInTheDocument();
+    expect(caption.querySelector('.violet-msg-model-text')?.textContent).toBe(`${index < 3 ? 'Auto String · ' : ''}${snapshots[index].model} • ${snapshots[index].effort}`);
+  });
 });
 
 it('shows an inline provider icon with optional model and effort only on known-provider end turns', async () => {
@@ -289,6 +376,13 @@ describe('Violet room message dedupe', () => {
     expect(merged).toHaveLength(1);
     expect(merged[0]?.id).toBe('local-exact-prompt');
     expect((merged[0] as { ghostSasayaki?: boolean } | undefined)?.ghostSasayaki).toBeUndefined();
+  });
+
+  it('matches a native echo led by the host marks envelope to its composer prompt', () => {
+    const marks = '<KOTA_MARKS v="1" revision="3">\nYour own marks that may apply to this message.\n- [m-a] Note.\n</KOTA_MARKS>\n';
+    const local = localComposerMessage({ id: 'local-marked', text: 'same prompt', targetAgentIds: ['agent-a'], timestamp: '2026-06-07T20:00:00.000Z' });
+    const echo = roomMessage({ id: 'native-marked', text: `${marks}same prompt`, timestamp: '2026-06-07T20:00:02.000Z' });
+    expect(mergeRoomMessages([echo], [local]).map(message => message.id)).toEqual(['local-marked']);
   });
 
   it('keeps a matched local composer prompt before a coarse same-second reply', () => {
@@ -468,6 +562,139 @@ describe('Violet room pagination merge', () => {
     expect(merged).toHaveLength(201);
     expect(merged[0]?.id).toBe('m-0');
     expect(merged.at(-1)?.id).toBe('m-200');
+  });
+});
+
+describe('Agent Bus delivery reconciliation', () => {
+  const now = Date.parse('2026-06-06T12:00:00.000Z');
+  const busMessage = (id: string, ageMs: number) => roomMessage({
+    id, nativeEventId: `agentbus-${id}`, shell: 'system', role: 'assistant',
+    targetAgentIds: ['agent-b'], timestamp: new Date(now - ageMs).toISOString(), text: `Message ${id}`,
+  });
+  type Deliveries = ReturnType<typeof reconcileAgentBusDeliveries>;
+
+  it('checks evidence only for the three eligible candidates among 745 messages', () => {
+    const old = Array.from({ length: 742 }, (_, i) => busMessage(`old-${i}`, 196_000));
+    const eligible = [busMessage('one', 180_000), busMessage('two', 185_000), busMessage('three', 195_000)];
+    const readEvidence = vi.fn(() => '<KOTA_MESSAGE id="unrelated">body</KOTA_MESSAGE>');
+    const evidence = roomMessage({ agentId: 'agent-b' });
+    Object.defineProperty(evidence, 'text', { get: readEvidence });
+
+    const next = reconcileAgentBusDeliveries({}, [...old, ...eligible, evidence], [], now);
+
+    expect(Object.keys(next)).toEqual(['one', 'two', 'three']);
+    // Each confirmation check visits this native user once. No old candidate
+    // may enter that scan, even though all of them remain loaded in the room.
+    expect(readEvidence).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not check evidence before the deadline or for invalid and expired untracked messages', () => {
+    const messages = [busMessage('young', 179_999), busMessage('expired', 195_001),
+      { ...busMessage('invalid', 0), timestamp: 'invalid' }];
+    const readEvidence = vi.fn(() => 'not an envelope');
+    const evidence = roomMessage({ agentId: 'agent-b' });
+    Object.defineProperty(evidence, 'text', { get: readEvidence });
+    const previous = {};
+    expect(reconcileAgentBusDeliveries(previous, [...messages, evidence], [], now)).toBe(previous);
+    expect(readEvidence).not.toHaveBeenCalled();
+    expect(nextAgentBusDeliveryDeadline(messages, {}, now)).toBe(now + 1);
+  });
+
+  it('combines native and receipt confirmations including retry ids for an old tracked message', () => {
+    const message = { ...busMessage('old', 600_000), targetAgentIds: ['agent-b', 'agent-c', 'agent-d'] };
+    const previous: Deliveries = { old: {
+      status: 'unconfirmed', retryTargetAgentIds: message.targetAgentIds,
+      attemptEventIds: ['agentbus-old:retry:1'], lastAttemptAt: now - 200_000,
+    } };
+    const native = roomMessage({ agentId: 'agent-c', text:
+      '[Image #1]<KOTA_MESSAGE id="agentbus-old:retry:1">body</KOTA_MESSAGE>\u0015' });
+    const receipts = [{ agentId: 'agent-b', eventId: 'agentbus-old', timestamp: message.timestamp }];
+    const next = reconcileAgentBusDeliveries(previous, [message, native], receipts, now);
+    expect(next.old.retryTargetAgentIds).toEqual(['agent-d']);
+    const finalReceipts = [...receipts, { agentId: 'agent-d', eventId: 'agentbus-old:retry:1', timestamp: message.timestamp }];
+    expect(reconcileAgentBusDeliveries(next, [message, native], finalReceipts, now)).toEqual({});
+  });
+
+  it('preserves Local pending guards and removes tracked messages that leave the room input', () => {
+    const message = busMessage('held', 185_000);
+    const keys = new Set(['agentbus-held\u001fagent-b']);
+    expect(reconcileAgentBusDeliveries({}, [message], [], now, new Set(), keys)).toEqual({});
+    const tracked = reconcileAgentBusDeliveries({}, [message], [], now);
+    expect(tracked.held.status).toBe('unconfirmed');
+    expect(reconcileAgentBusDeliveries(tracked, [message], [], now, keys)).toEqual({});
+    expect(reconcileAgentBusDeliveries(tracked, [], [], now)).toEqual({});
+  });
+
+  it('schedules only unresolved or retrying deadlines and preserves failure reasons', () => {
+    const messages = ['retry', 'failed', 'unconfirmed'].map(id => busMessage(id, 600_000));
+    const previous: Deliveries = Object.fromEntries(messages.map(message => [message.id, {
+      status: message.id === 'retry' ? 'retrying' : message.id as 'failed' | 'unconfirmed',
+      reason: 'Existing reason', retryTargetAgentIds: ['agent-b'], attemptEventIds: [message.nativeEventId!],
+      lastAttemptAt: now - 179_000,
+    }]));
+    expect(nextAgentBusDeliveryDeadline(messages, previous, now)).toBe(now + 1_000);
+    expect(reconcileAgentBusDeliveries(previous, messages, [], now).retry.status).toBe('retrying');
+    const next = reconcileAgentBusDeliveries(previous, messages, [], now + 1_000);
+    expect(next.retry.status).toBe('unconfirmed');
+    expect(next.failed.reason).toBe('Existing reason');
+    expect(nextAgentBusDeliveryDeadline(messages, next, now + 1_000)).toBe(Infinity);
+  });
+});
+
+describe('Violet room text memoization', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('normalizes only incoming message objects on repeated history merges', () => {
+    const normalize = vi.spyOn(dedupeText, 'normalizeForDedupe');
+    const messages = numberedMessages(0, 200);
+    mergeSyncedNativeMessages([], messages);
+    expect(normalize).toHaveBeenCalledTimes(200);
+    normalize.mockClear();
+    const incoming = numberedMessages(200, 201);
+    const merged = mergeSyncedNativeMessages(messages, incoming, { preserveLoadedHistory: true });
+    expect(merged).toHaveLength(201);
+    expect(normalize).toHaveBeenCalledTimes(1);
+    normalize.mockClear();
+    expect(mergeSyncedNativeMessages(merged, incoming, { preserveLoadedHistory: true })).toBe(merged);
+    expect(normalize).not.toHaveBeenCalled();
+  });
+
+  it('invalidates changed text and never caches recipients or the time bucket', () => {
+    const first = roomMessage({ id: 'first', targetAgentIds: ['agent-b'] });
+    const second = roomMessage({ id: 'second', targetAgentIds: ['agent-b'] });
+    expect(mergeSyncedNativeMessages([], [first, second])).toHaveLength(1);
+    second.targetAgentIds = ['agent-c'];
+    expect(mergeSyncedNativeMessages([], [first, second])).toHaveLength(2);
+    second.targetAgentIds = ['agent-b'];
+    second.timestamp = '2026-05-18T08:54:00.000Z';
+    expect(mergeSyncedNativeMessages([], [first, second])).toHaveLength(2);
+    second.timestamp = first.timestamp;
+    second.text = 'different text';
+    expect(mergeSyncedNativeMessages([], [first, second])).toHaveLength(2);
+    second.text = first.text;
+    expect(mergeSyncedNativeMessages([], [first, second])).toHaveLength(1);
+    // Reusing an id in a different source/project must not reuse cached text.
+    expect(mergeSyncedNativeMessages([], [first, { ...second, text: 'another source' }])).toHaveLength(2);
+  });
+
+  it('reuses prepared composer text and keeps attachment and changed-text comparisons exact', () => {
+    const prepare = vi.spyOn(dedupeText, 'prepareDedupeText');
+    // A native echo uses the composer delivery preparation, which peels host envelopes.
+    const echo = vi.spyOn(dedupeText, 'prepareComposerDeliveryDedupeText');
+    const native = roomMessage({ id: 'native', text: '[Image #1]same prompt' });
+    const local = localComposerMessage({
+      id: 'local', targetAgentIds: ['agent-a'], text: 'project-memory/attachments/composer/att_1/original.png same prompt',
+    });
+    expect(mergeRoomMessages([native], [local])).toHaveLength(1);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(echo).toHaveBeenCalledTimes(1);
+    prepare.mockClear(); echo.mockClear();
+    expect(mergeRoomMessages([native], [local])).toHaveLength(1);
+    expect(prepare).not.toHaveBeenCalled();
+    expect(echo).not.toHaveBeenCalled();
+    local.text = 'a different prompt';
+    expect(mergeRoomMessages([native], [local])).toHaveLength(2);
+    expect(prepare).toHaveBeenCalledTimes(1);
   });
 });
 

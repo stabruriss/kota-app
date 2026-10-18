@@ -271,6 +271,7 @@ impl WorkspaceAgentCli {
             Self::Supported(crate::pty::agent::AgentCli::Opencode) => "opencode",
             Self::Supported(crate::pty::agent::AgentCli::Pi) => "pi",
             Self::Supported(crate::pty::agent::AgentCli::Kimi) => "kimi",
+            Self::Supported(crate::pty::agent::AgentCli::KotaLocal) => "kota-local",
             Self::Unsupported(name) => name,
         }
     }
@@ -1680,6 +1681,7 @@ fn ensure_agent_files(
                     crate::pty::agent::AgentCli::Opencode => "opencode",
                     crate::pty::agent::AgentCli::Pi => "pi",
                     crate::pty::agent::AgentCli::Kimi => "kimi",
+                    crate::pty::agent::AgentCli::KotaLocal => "kota-local",
                 },
                 yaml_quote(&path_str(cwd)),
                 yaml_quote(&path_str(worktree_root)),
@@ -1691,6 +1693,7 @@ fn ensure_agent_files(
 
 fn adapter_file_for_cli(cli: crate::pty::agent::AgentCli) -> &'static str {
     match cli {
+        crate::pty::agent::AgentCli::KotaLocal => "AGENTS.md",
         crate::pty::agent::AgentCli::Claude => "CLAUDE.md",
         crate::pty::agent::AgentCli::Antigravity
         | crate::pty::agent::AgentCli::Codex
@@ -2855,6 +2858,7 @@ fn agent_cli_from_name(name: &str) -> Option<crate::pty::agent::AgentCli> {
         "opencode" | "open-code" => Some(crate::pty::agent::AgentCli::Opencode),
         "pi" => Some(crate::pty::agent::AgentCli::Pi),
         "kimi" | "kimi-code" => Some(crate::pty::agent::AgentCli::Kimi),
+        "kota-local" => Some(crate::pty::agent::AgentCli::KotaLocal),
         _ => None,
     }
 }

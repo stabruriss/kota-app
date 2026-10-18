@@ -5,6 +5,7 @@ Dreams are a compact, long-term portrait of the user as a working partner. They 
 Input items: {{items_json}}
 
 Each item has an opaque id, a kind (`active` or `candidate`), and text. Project identity, capacity, ordering, and slot allocation are deliberately hidden from you and handled by deterministic code.
+Active items may carry `usage`: how many times Kota surfaced the item to agents (`pushed`), across how many agents, and when it was last surfaced. Treat usage as one signal about whether the item still helps; it is not a rule.
 
 Decide exactly once for every item:
 - `keep`: retain its text unchanged.

@@ -26,6 +26,8 @@ fn detail(root: &Path) -> ProjectAgentDetail {
     )
     .unwrap();
     ProjectAgentDetail {
+        shell_revision: None,
+        applied_to_session: None,
         agent_id: "agent-piner".into(),
         display_name: "Dr. 颦儿-绛珠 v. Kota".into(),
         name_fields: Some(ProjectAgentNameFieldsWire {
@@ -41,7 +43,7 @@ fn detail(root: &Path) -> ProjectAgentDetail {
         cli: crate::pty::agent::AgentCli::Codex,
         provider: "codex".into(),
         model: "custom-model".into(),
-        effort: Some("high".into()),
+        effort: Some("high".into()), auto_route: None,
         avatar_id: Some("user:portrait".into()),
         skills: vec!["skill-one".into()],
         args: vec![],
@@ -108,7 +110,7 @@ fn invitation_keeps_current_name_fields_and_profile_not_source_hero_defaults() {
         fs::read_to_string(temp.0.join(&saved.hero_id).join("SHELL.yaml")).unwrap(),
         restored.shell
     );
-    assert!(restored.record.is_none());
+    assert!(restored.source.is_some());
 }
 
 #[test]
@@ -245,7 +247,7 @@ fn reincarnation_writes_its_own_name_fields_without_changing_template_fields() {
     };
     let shell = crate::parse_shell_yaml(&request.profile.shell).unwrap();
     let yaml =
-        crate::compile_agent_yaml(&request, &shell, crate::pty::agent::AgentCli::Codex, None);
+        crate::compile_agent_yaml(&request, &shell, crate::pty::agent::AgentCli::Codex, None, None);
     let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(
         parsed["display-name"].as_str(),

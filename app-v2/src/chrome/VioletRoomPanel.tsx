@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, ReactNode, UIEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { EMPTY_LOCAL_QUEUE_GUARDS, localQueueGuardKey } from '../lib/local-queue';
 import {
   agentBusRetryDelivery,
   claudeNativeImagesForEvent,
@@ -8,6 +9,7 @@ import {
   loadAccountUserIdentity,
   readVioletRoomCache,
   onVioletRoomSynced,
+  violetCopyFilePath,
   violetOpenFileRef,
   violetRevealFileRef,
   violetResolveFileRef,
@@ -33,6 +35,8 @@ import {
 import { ProjectAgentName } from './ProjectAgentName';
 import { ProviderBadge } from './ProviderBadge';
 import { VioletTemporalDivider } from './VioletTemporalDivider';
+import { withoutDanceNativeEchoes } from '../lib/puppeteer-dance';
+import { restoreDanceDelivery, type DanceDelivery } from '../lib/dance-composer';
 import { providerIconForId } from '../lib/provider-icons';
 import { avatarClassForId, avatarImageStyleForId } from '../lib/hero-avatars';
 import { AgentCommendButton } from './AgentCommendButton';
@@ -60,7 +64,9 @@ import { RoomQuoteMark } from '../lib/room-quote-mark';
 import subagentUpdateIconUrl from '../assets/tavern/icons/subagent-update.png';
 import { filterAgentBusMessages } from '../lib/violet-message-filter';
 import { HeroAvatarArt } from './HeroAvatarPicker';
+import { MermaidBlock } from './MermaidBlock';
 import { SearchMatchText, RoomSearchIcon, roomSearchDateLabel, VIOLET_DATE_MONTHS } from './room-search-elements';
+import '../styles/violet-local-queue.css';
 
 export {
   normalizeAttachmentInsensitive,
@@ -83,6 +89,9 @@ interface VioletRoomPanelProps {
   onCommendAgent?: (id: AgentId, source: ProjectAgentCommendSource) => void;
   onOpenAgentTerminal?: (id: AgentId) => void;
   onRefreshAgentSession?: (id: AgentId) => void;
+  /** Kota Local: open the agent's workbench at its queue. App owns the workbench. */
+  onOpenLocalWorkbench?: (agentId: AgentId, section?: 'queue') => void;
+  localQueueGuards?: ReadonlySet<string>;
   onRetryComposerMessage?: (request: VioletComposerRetryRequest) => boolean | void | Promise<boolean | void>;
   onQuoteMessage?: (quote: RoomQuoteReference) => RoomQuoteInsertResult;
   onClose?: () => void;
@@ -90,10 +99,12 @@ interface VioletRoomPanelProps {
 }
 
 export interface VioletComposerRetryRequest {
+  messageId?: string;
   text: string;
   targetAgentIds: AgentId[];
   privacy: boolean;
   mentions?: { agentId: AgentId; aka: string }[];
+  danceDelivery?: DanceDelivery;
 }
 
 type VioletDeliveryStatus = 'failed' | 'unconfirmed' | 'retrying';
@@ -195,6 +206,43 @@ const VIOLET_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
   minute: '2-digit',
 });
 
+function violetRoomCacheKey(projectRoot?: string | null): string {
+  return `${projectRoot ?? ''}::all`;
+}
+
+// Called only when Stage leaves a project, including with its room minimized.
+// Retain delivery/source metadata and the newest message objects; disk history
+// remains available through the existing older-page reader.
+export function trimVioletRoomHistoryCache(projectRoot?: string | null): void {
+  const key = violetRoomCacheKey(projectRoot);
+  VIOLET_ROOM_HISTORY_EXPANDED_CACHE_KEYS.delete(key);
+  const cached = VIOLET_ROOM_STATE_CACHE.get(key);
+  if (cached && cached.messages.length > VIOLET_ROOM_LIVE_LIMIT) {
+    VIOLET_ROOM_STATE_CACHE.set(key, {
+      ...cached,
+      messages: cached.messages.slice(-VIOLET_ROOM_LIVE_LIMIT),
+    });
+  }
+}
+
+// Room messages retain their identity across syncs. Cache only text-derived
+// work: recipients, timestamps and other dedupe fields must stay current.
+function memoizeMessageText<T>(prepare: (text: string) => T): (message: VioletChatMessage) => T {
+  const cache = new WeakMap<VioletChatMessage, { text: string; value: T }>();
+  return (message) => {
+    const text = message.text;
+    const cached = cache.get(message);
+    if (cached?.text === text) return cached.value;
+    const value = prepare(text);
+    cache.set(message, { text, value });
+    return value;
+  };
+}
+
+const normalizedRoomMessageText = memoizeMessageText((text) => normalizeForDedupe(text).toLowerCase());
+const preparedRoomMessageText = memoizeMessageText((text) => prepareDedupeText(text));
+const preparedComposerDeliveryText = memoizeMessageText((text) => prepareComposerDeliveryDedupeText(text));
+
 function useStableRoomMessages<T extends VioletChatMessage>(
   next: readonly T[],
   resetKey: string,
@@ -225,13 +273,22 @@ export function VioletRoomPanel({
   onCommendAgent,
   onOpenAgentTerminal,
   onRefreshAgentSession,
+  onOpenLocalWorkbench,
+  localQueueGuards = EMPTY_LOCAL_QUEUE_GUARDS,
   onRetryComposerMessage,
   onQuoteMessage,
   onClose,
   onSearch,
 }: VioletRoomPanelProps) {
   const agentIdsKey = agentIds.join('|');
-  const roomCacheKey = `${projectRoot ?? ''}::all`;
+  const roomCacheKey = violetRoomCacheKey(projectRoot);
+  // A new opening of A after A -> B -> A must not accept the first A's reads.
+  // This lifetime only invalidates requests; minimizing never trims history.
+  const roomRequest = useMemo(() => ({ active: false }), [roomCacheKey]);
+  useLayoutEffect(() => {
+    roomRequest.active = true;
+    return () => { roomRequest.active = false; };
+  }, [roomRequest]);
   const [state, setState] = useState<VioletRoomState | null>(() => (
     VIOLET_ROOM_STATE_CACHE.get(roomCacheKey) ?? null
   ));
@@ -307,6 +364,7 @@ export function VioletRoomPanel({
 
   const commitRoomState = useCallback((next: VioletRoomState) => {
     setState((prev) => {
+      if (!roomRequest.active) return prev;
       const merged = prev
         ? {
             ...next,
@@ -319,12 +377,13 @@ export function VioletRoomPanel({
       if (
         prev &&
         sameRoomMessages(prev.messages, merged.messages) &&
-        sameAgentBusReceipts(prev.agentBusReceipts, merged.agentBusReceipts)
+        sameAgentBusReceipts(prev.agentBusReceipts, merged.agentBusReceipts) &&
+        sameLocalPendingDeliveries(prev.localPendingDeliveries, merged.localPendingDeliveries)
       ) return prev;
       VIOLET_ROOM_STATE_CACHE.set(roomCacheKey, merged);
       return merged;
     });
-  }, [roomCacheKey]);
+  }, [roomCacheKey, roomRequest]);
 
   const commitRoomStatePreservingView = useCallback((next: VioletRoomState) => {
     const anchor = (!stickToBottomRef.current && !forceScrollBottomRef.current)
@@ -336,6 +395,7 @@ export function VioletRoomPanel({
 
   const commitOlderRoomState = useCallback((older: VioletRoomState) => {
     setState((prev) => {
+      if (!roomRequest.active) return prev;
       const merged = prev
         ? {
             ...prev,
@@ -352,10 +412,11 @@ export function VioletRoomPanel({
       VIOLET_ROOM_STATE_CACHE.set(roomCacheKey, merged);
       return merged;
     });
-  }, [roomCacheKey]);
+  }, [roomCacheKey, roomRequest]);
 
   const mergeExternalRoomState = useCallback((incoming: VioletRoomState) => {
     setState((prev) => {
+      if (!roomRequest.active) return prev;
       const next: VioletRoomState = prev
         ? {
             ...prev,
@@ -363,18 +424,20 @@ export function VioletRoomPanel({
               preserveLoadedHistory: historyExpandedRef.current,
             }),
             agentBusReceipts: mergeAgentBusReceipts(prev.agentBusReceipts, incoming.agentBusReceipts),
+            localPendingDeliveries: incoming.localPendingDeliveries,
             syncedAt: incoming.syncedAt,
           }
         : incoming;
       if (
         prev &&
         sameRoomMessages(prev.messages, next.messages) &&
-        sameAgentBusReceipts(prev.agentBusReceipts, next.agentBusReceipts)
+        sameAgentBusReceipts(prev.agentBusReceipts, next.agentBusReceipts) &&
+        sameLocalPendingDeliveries(prev.localPendingDeliveries, next.localPendingDeliveries)
       ) return prev;
       VIOLET_ROOM_STATE_CACHE.set(roomCacheKey, next);
       return next;
     });
-  }, [roomCacheKey]);
+  }, [roomCacheKey, roomRequest]);
 
   const mergeExternalRoomStatePreservingView = useCallback((incoming: VioletRoomState) => {
     const anchor = (!stickToBottomRef.current && !forceScrollBottomRef.current)
@@ -392,6 +455,7 @@ export function VioletRoomPanel({
         limit: VIOLET_ROOM_PAGE_SIZE,
         agentIds: filteredAgentIds,
       });
+      if (!roomRequest.active) return;
       if (!hasLoadedLatestRef.current) forceScrollBottomRef.current = true;
       commitRoomStatePreservingView(next);
       hasLoadedLatestRef.current = true;
@@ -401,7 +465,7 @@ export function VioletRoomPanel({
     } catch {
       // Cache reads are best-effort; background ingestion will publish fresh state.
     }
-  }, [chatFilterPageAgentIds, commitRoomStatePreservingView, projectRoot]);
+  }, [chatFilterPageAgentIds, commitRoomStatePreservingView, projectRoot, roomRequest]);
 
   useEffect(() => {
     let cancelled = false;
@@ -490,6 +554,7 @@ export function VioletRoomPanel({
       privacy: detail.privacy,
       composerMentions: detail.mentions,
       temporalGap: detail.temporalGap,
+      messageOrigin: detail.messageOrigin,
       quoteRefId: detail.temporalGap ? detail.id : undefined,
     };
     if (!detail.delivery) return message;
@@ -591,6 +656,25 @@ export function VioletRoomPanel({
     [hasComposerDeliveryEvidenceCandidates, state?.messages],
   );
 
+  const localPendingDeliveryKeys = useMemo(
+    () => localPendingDeliveryKeySet(state?.localPendingDeliveries),
+    [state?.localPendingDeliveries],
+  );
+  const queueGuardsRef = useRef(localQueueGuards); queueGuardsRef.current = localQueueGuards;
+  const confirmationLocalKeys = useMemo(() => {
+    if (!localQueueGuards.size || !projectRoot) return localPendingDeliveryKeys;
+    const keys = new Set(localPendingDeliveryKeys);
+    for (const key of localQueueGuards) {
+      const [root, messageId, target] = JSON.parse(key) as string[];
+      if (root === projectRoot) keys.add(localPendingDeliveryKey(messageId!, target!));
+    }
+    return keys;
+  }, [localQueueGuards, localPendingDeliveryKeys, projectRoot]);
+  const visibleLocalPendingDeliveryKeys = useVisibleLocalPendingDeliveryKeys(
+    projectRoot ?? null,
+    localPendingDeliveryKeys,
+  );
+
   const refreshComposerDelivery = useCallback(() => {
     const now = Date.now();
     setLocalMessages((prev) => {
@@ -610,7 +694,8 @@ export function VioletRoomPanel({
           return updated;
         }
         if (message.deliveryStatus === 'retrying') return message;
-        const unconfirmedAgentIds = unconfirmedTargetAgentIds(message, composerDeliveryEvidence);
+        const confirmationKeys = message.deliveryStatus ? localPendingDeliveryKeys : confirmationLocalKeys;
+        const unconfirmedAgentIds = unconfirmedTargetAgentIds(message, composerDeliveryEvidence, confirmationKeys);
         // Assistant activity is only a grace signal while a prompt is still
         // pending. Once exit reconciliation queues it, only a matching native
         // user event may retire that retry affordance.
@@ -622,6 +707,8 @@ export function VioletRoomPanel({
           : activeComposerTargetAgentIds(message, composerDeliveryEvidence);
         const retryTargetAgentIds = unconfirmedAgentIds.filter((agentId) => !activeAgentIds.includes(agentId));
         if (retryTargetAgentIds.length === 0) {
+          // Kota Local still owns delivery to a target; keep tracking until it settles.
+          if (hasLocalPendingDeliveryTarget(message, confirmationKeys)) return message;
           const updated = completeMessageDelivery(message);
           if (updated !== message) changed = true;
           return updated;
@@ -638,7 +725,7 @@ export function VioletRoomPanel({
       });
       return changed ? next : prev;
     });
-  }, [composerDeliveryEvidence]);
+  }, [composerDeliveryEvidence, confirmationLocalKeys, localPendingDeliveryKeys]);
 
   useEffect(() => {
     refreshComposerDelivery();
@@ -664,7 +751,7 @@ export function VioletRoomPanel({
       message.deliveryRetryTargetAgentIds?.length
         ? message.deliveryRetryTargetAgentIds
         : message.targetAgentIds ?? [],
-    );
+    ).filter(id => !projectRoot || !queueGuardsRef.current.has(localQueueGuardKey(projectRoot, message.id, id)));
     if (retryTargetAgentIds.length === 0) return;
     recordVioletComposerDelivery({
       id: message.id,
@@ -683,6 +770,8 @@ export function VioletRoomPanel({
     )));
     try {
       const result = await onRetryComposerMessage({
+        ...(queueGuardsRef.current.size || message.messageOrigin === 'puppeteer' ? { messageId: message.id } : {}),
+        ...(message.messageOrigin === 'puppeteer' ? { danceDelivery: restoreDanceDelivery(message.id, message.timestamp, message.targetAgentIds?.[0] ?? retryTargetAgentIds[0]!, message.text, message.temporalGap) } : {}),
         text: message.text,
         targetAgentIds: retryTargetAgentIds,
         privacy: !!message.privacy,
@@ -724,87 +813,30 @@ export function VioletRoomPanel({
           : item
       )));
     }
-  }, [onRetryComposerMessage]);
+  }, [onRetryComposerMessage, projectRoot]);
 
-  const refreshAgentBusDelivery = useCallback(() => {
+  const refreshAgentBusDelivery = useCallback((now: number) => {
     const nativeMessages = state?.messages ?? [];
     const receipts = state?.agentBusReceipts ?? [];
-    const candidates = nativeMessages.filter(shouldTrackAgentBusDelivery);
-    const candidateIds = new Set(candidates.map((message) => message.id));
-    const now = Date.now();
-    setAgentBusDeliveries((prev) => {
-      let changed = false;
-      const next: Record<string, AgentBusDeliveryState> = { ...prev };
-      for (const messageId of Object.keys(next)) {
-        if (candidateIds.has(messageId)) continue;
-        delete next[messageId];
-        changed = true;
-      }
-      for (const message of candidates) {
-        const current = next[message.id];
-        const attemptEventIds = uniqueStrings([
-          message.nativeEventId ?? '',
-          ...(current?.attemptEventIds ?? []),
-        ]);
-        const retryTargetAgentIds = unconfirmedAgentBusTargetAgentIds(
-          message,
-          nativeMessages,
-          receipts,
-          attemptEventIds,
-        );
-        if (retryTargetAgentIds.length === 0) {
-          if (current) {
-            delete next[message.id];
-            changed = true;
-          }
-          continue;
-        }
-        const sentAt = Date.parse(message.timestamp);
-        const lastAttemptAt = current?.lastAttemptAt ?? (Number.isFinite(sentAt) ? sentAt : 0);
-        if (
-          !current &&
-          (!Number.isFinite(sentAt) || now - sentAt > DELIVERY_CONFIRM_TIMEOUT_MS + DELIVERY_CONFIRM_OBSERVE_GRACE_MS)
-        ) {
-          continue;
-        }
-        if (!current && now - lastAttemptAt < DELIVERY_CONFIRM_TIMEOUT_MS) continue;
-        if (current?.status === 'retrying' && now - lastAttemptAt < DELIVERY_CONFIRM_TIMEOUT_MS) {
-          const updated = {
-            ...current,
-            retryTargetAgentIds,
-            attemptEventIds,
-          };
-          if (!sameAgentBusDeliveryState(current, updated)) {
-            next[message.id] = updated;
-            changed = true;
-          }
-          continue;
-        }
-        const updated: AgentBusDeliveryState = {
-          status: current?.status === 'failed' ? 'failed' : 'unconfirmed',
-          reason: current?.status === 'failed'
-            ? current.reason
-            : 'A2A message was not confirmed in the provider log.',
-          retryTargetAgentIds,
-          attemptEventIds,
-          lastAttemptAt,
-        };
-        if (!current || !sameAgentBusDeliveryState(current, updated)) {
-          next[message.id] = updated;
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [state?.agentBusReceipts, state?.messages]);
+    setAgentBusDeliveries((prev) => reconcileAgentBusDeliveries(
+      prev, nativeMessages, receipts, now, localPendingDeliveryKeys, confirmationLocalKeys,
+    ));
+  }, [confirmationLocalKeys, localPendingDeliveryKeys, state?.agentBusReceipts, state?.messages]);
 
   useEffect(() => {
-    refreshAgentBusDelivery();
-    const hasTrackedAgentBusMessages = state?.messages.some(shouldTrackAgentBusDelivery) ?? false;
-    if (!hasTrackedAgentBusMessages) return undefined;
-    const timer = window.setInterval(refreshAgentBusDelivery, 1000);
-    return () => window.clearInterval(timer);
-  }, [refreshAgentBusDelivery, state?.messages]);
+    let timer: number | undefined;
+    const refreshAndSchedule = () => {
+      const now = Date.now();
+      refreshAgentBusDelivery(now);
+      const deadline = nextAgentBusDeliveryDeadline(state?.messages ?? [], agentBusDeliveries, now);
+      if (!Number.isFinite(deadline)) return;
+      // Keep scheduling even when confirmation leaves React state unchanged:
+      // a later message can still have an unresolved deadline.
+      timer = window.setTimeout(refreshAndSchedule, Math.max(0, deadline - now));
+    };
+    refreshAndSchedule();
+    return () => window.clearTimeout(timer);
+  }, [agentBusDeliveries, refreshAgentBusDelivery, roomCacheKey, state?.messages]);
 
   const retryAgentBusMessage = useCallback(async (message: VioletRoomMessage) => {
     if (!projectRoot || !shouldTrackAgentBusDelivery(message) || !message.nativeEventId) return;
@@ -812,7 +844,7 @@ export function VioletRoomPanel({
       message.deliveryRetryTargetAgentIds?.length
         ? message.deliveryRetryTargetAgentIds
         : message.targetAgentIds ?? [],
-    );
+    ).filter(id => !projectRoot || !queueGuardsRef.current.has(localQueueGuardKey(projectRoot, message.nativeEventId ?? message.id, id)));
     if (retryTargetAgentIds.length === 0) return;
     const now = Date.now();
     const attempts = retryTargetAgentIds.map((targetAgentId, index) => ({
@@ -874,7 +906,9 @@ export function VioletRoomPanel({
     () => applyAgentBusDeliveryStates(mergedMessages, agentBusDeliveries),
     [agentBusDeliveries, mergedMessages],
   );
-  const messages = useStableRoomMessages(messagesWithAgentBusDelivery, roomCacheKey);
+  const guardedMessages = useMemo(() => applyLocalQueueRetryGuards(messagesWithAgentBusDelivery, projectRoot ?? null, localQueueGuards),
+    [messagesWithAgentBusDelivery, projectRoot, localQueueGuards]);
+  const messages = useStableRoomMessages(guardedMessages, roomCacheKey);
   const nextScopedMessages = useMemo(
     () => chatFilterActive
       ? messages.filter((message) => violetMessageMatchesAgentFilter(message, chatFilterAgentSet))
@@ -897,6 +931,10 @@ export function VioletRoomPanel({
   const visibleMessages = useStableRoomMessages(
     nextVisibleMessages,
     `${roomCacheKey}::visible::${chatFilterActive ? chatFilterAgentIdsKey : 'all'}::bus:${showAgentToAgentMessages}`,
+  );
+  const localPendingTargetsByMessageId = useMemo(
+    () => localPendingTargetsByMessage(visibleMessages, visibleLocalPendingDeliveryKeys),
+    [visibleMessages, visibleLocalPendingDeliveryKeys],
   );
   const latestVisibleMessage = visibleMessages[visibleMessages.length - 1];
   const latestVisibleMessageKey = latestVisibleMessage
@@ -929,6 +967,7 @@ export function VioletRoomPanel({
     if (!snapshot) return;
     let attempts = 0;
     const restore = () => {
+      if (!roomRequest.active) return;
       const el = scrollRef.current;
       if (!el) return;
       const addedHeight = Math.max(0, el.scrollHeight - snapshot.scrollHeight);
@@ -940,10 +979,10 @@ export function VioletRoomPanel({
       if (attempts < 3) window.requestAnimationFrame(restore);
     };
     window.requestAnimationFrame(restore);
-  }, [setJumpToLatestVisible, visibleMessages.length]);
+  }, [roomRequest, setJumpToLatestVisible, visibleMessages.length]);
 
   const loadOlder = useCallback(async () => {
-    if (loadingOlder || !hasOlder) return;
+    if (!roomRequest.active || loadingOlder || !hasOlder) return;
     const filteredAgentIds = chatFilterPageAgentIds.length > 0 ? chatFilterPageAgentIds : null;
     const before = filteredAgentIds
       ? scopedMessages[0]?.timestamp ?? state?.messages[0]?.timestamp
@@ -970,6 +1009,7 @@ export function VioletRoomPanel({
         before,
         agentIds: filteredAgentIds,
       });
+      if (!roomRequest.active) return;
       setHasOlder(next.messages.length >= VIOLET_ROOM_PAGE_SIZE);
       if (next.messages.length > 0) {
         historyExpandedRef.current = true;
@@ -979,9 +1019,9 @@ export function VioletRoomPanel({
       }
       setError(null);
     } catch {
-      setError('Could not load older Violet messages.');
+      if (roomRequest.active) setError('Could not load older Violet messages.');
     } finally {
-      setLoadingOlder(false);
+      if (roomRequest.active) setLoadingOlder(false);
     }
   }, [
     cancelBottomSettle,
@@ -992,6 +1032,7 @@ export function VioletRoomPanel({
     projectRoot,
     restorePrependScrollPosition,
     roomCacheKey,
+    roomRequest,
     scopedMessages,
     state?.messages,
   ]);
@@ -1227,6 +1268,8 @@ export function VioletRoomPanel({
               onRetryComposerMessage={retryComposerMessage}
               onRetryAgentBusMessage={retryAgentBusMessage}
               onQuoteMessage={onQuoteMessage ? insertRoomQuote : undefined}
+              localPendingAgentIds={localPendingTargetsByMessageId.get(message.id)}
+              onOpenLocalWorkbench={localPendingTargetsByMessageId.has(message.id) ? onOpenLocalWorkbench : undefined}
             />
           ))}
         </div>
@@ -1268,6 +1311,8 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
   onRetryComposerMessage,
   onRetryAgentBusMessage,
   onQuoteMessage,
+  localPendingAgentIds,
+  onOpenLocalWorkbench,
   searchResult,
 }: {
   message: VioletRoomMessage;
@@ -1287,6 +1332,9 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
   onRetryComposerMessage?: (message: VioletRoomMessage) => void;
   onRetryAgentBusMessage?: (message: VioletRoomMessage) => void;
   onQuoteMessage?: (quote: RoomQuoteReference) => void;
+  /** Kota Local targets of this message whose delivery the runtime still owns. */
+  localPendingAgentIds?: readonly AgentId[];
+  onOpenLocalWorkbench?: (agentId: AgentId, section?: 'queue') => void;
   searchResult?: {
     human: AccountUserIdentity;
     now: Date;
@@ -1332,7 +1380,8 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
       </article>
     );
   }
-  if (message.ghostSasayaki) {
+  // The host's row for marks/Dreams delivered with a message uses the same bubble.
+  if (message.ghostSasayaki || (message.role === 'system' && message.kind === 'context')) {
     return <GhostSasayakiBubble message={message} projectRoot={projectRoot} />;
   }
   if (isBbsThreadPromptMessage(message)) {
@@ -1341,9 +1390,10 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
   const isCommentary = message.kind === 'commentary';
   const isProcess = message.kind === 'tool' || message.kind === 'thinking' || isCommentary;
   const isUser = message.role === 'user' && !isProcess;
+  const isPuppeteer = isUser && message.messageOrigin === 'puppeteer';
   const isBartenderConflict = isBartenderConflictMessage(message);
   const isEmberDream = isEmberDreamMessage(message);
-  const showAvatar = !isUser && (!isProcess || isCommentary);
+  const showAvatar = isPuppeteer || (!isUser && (!isProcess || isCommentary));
   // End-turn only: keep the multi-agent Progress avatar stack and layout unchanged.
   const showProviderBadge = !isUser && message.kind === 'message' && !!providerIconForId(message.shell);
   const progressEntries = isCommentary ? progressEntriesForMessage(message) : [];
@@ -1363,7 +1413,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
   const messageAgent = isMultiAgentProgress ? undefined : (agent ?? agentSnapshotFromMessage(message));
   const actorName = systemActorName(message.agentId);
   const actorDescription = systemActorDescription(message.agentId);
-  const label = isUser
+  const label = isPuppeteer ? 'Puppeteer' : isUser
     ? searchResult?.human.name || 'You'
     : isMultiAgentProgress
       ? `${progressAgentIds.length} agents`
@@ -1379,7 +1429,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
     : isUser
       ? [message.agentId].filter((id) => id !== 'user')
       : [];
-  const avatarTitle = isMultiAgentProgress
+  const avatarTitle = isPuppeteer ? 'Puppeteer' : isMultiAgentProgress
     ? progressAgentIds
       .map((agentId) => progressAgentLabel(
         agentId,
@@ -1400,6 +1450,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
     (message.deliveryStatus === 'failed' || message.deliveryStatus === 'unconfirmed')
   );
   const showRetry = showComposerRetry || (AGENT_BUS_RETRY_UI_ENABLED && showAgentBusRetry);
+  const hasLocalPending = (localPendingAgentIds?.length ?? 0) > 0;
   const displayText = message.role === 'user'
     ? stripLeadingTemporalGapForDisplay(message.text)
     : message.text;
@@ -1453,7 +1504,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
           {showProviderBadge && (
             <span className="violet-msg-model">
               <ProviderBadge provider={message.shell} size={10} />
-              {message.model && <span className="violet-msg-model-text">{message.model}{message.effort && ` • ${message.effort}`}</span>}
+              {message.model && <span className="violet-msg-model-text">{message.route === 'auto' && 'Auto String · '}{message.model}{message.effort && ` • ${message.effort}`}</span>}
             </span>
           )}
         </span>
@@ -1461,13 +1512,31 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
       </button>
     );
   }
+  const retryButton = showRetry && (
+    <button
+      type="button"
+      className="violet-msg-retry-send"
+      onClick={() => {
+        if (showComposerRetry) {
+          onRetryComposerMessage?.(message);
+        } else {
+          onRetryAgentBusMessage?.(message);
+        }
+      }}
+      aria-label="Queued message — try sending now"
+      title="Queued — try sending now"
+    >
+      <QueuedMessageIcon />
+    </button>
+  );
   const bubble = (
     <article
       className={[
         'violet-msg',
-        isUser ? 'user' : isProcess ? 'process' : 'agent',
+        isPuppeteer ? 'agent puppeteer-origin' : isUser ? 'user' : isProcess ? 'process' : 'agent',
         message.kind,
         showRetry ? 'delivery-issue' : '',
+        hasLocalPending ? 'local-pending' : '',
         isEmberDream ? 'ember-dream' : '',
         isBartenderConflict ? 'bartender-conflict' : '',
         canQuote ? 'quoteable' : '',
@@ -1492,12 +1561,12 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
             />
           ) : (
             <span
-              className={`violet-msg-avatar tavern-avatar-art ${messageAgent?.avatarClass ?? providerAvatarClass(message.agentId)}`}
-              style={avatarImageStyleForId(messageAgent?.avatarId)}
+              className={`violet-msg-avatar tavern-avatar-art ${isPuppeteer ? 'system-puppeteer' : messageAgent?.avatarClass ?? providerAvatarClass(message.agentId)}`}
+              style={isPuppeteer ? undefined : avatarImageStyleForId(messageAgent?.avatarId)}
               title={avatarTitle}
               aria-hidden
               onContextMenu={(event) => {
-                if (!onAgentContextMenu) return;
+                if (isPuppeteer || !onAgentContextMenu) return;
                 event.preventDefault();
                 event.stopPropagation();
                 onAgentContextMenu(message.agentId, { x: event.clientX, y: event.clientY }, 'violet-room');
@@ -1508,7 +1577,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
               <b />
             </span>
           )}
-          {!isCommentary && (
+          {!isCommentary && !isPuppeteer && (
             <AgentCommendButton
               agentId={message.agentId}
               agentName={messageAgent?.name ?? message.agentId}
@@ -1519,23 +1588,21 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
           )}
         </span>
       )}
-      {showRetry && (
-        <button
-          type="button"
-          className="violet-msg-retry-send"
-          onClick={() => {
-            if (showComposerRetry) {
-              onRetryComposerMessage?.(message);
-            } else {
-              onRetryAgentBusMessage?.(message);
-            }
-          }}
-          aria-label="Queued message — try sending now"
-          title="Queued — try sending now"
-        >
-          <QueuedMessageIcon />
-        </button>
-      )}
+      {hasLocalPending ? (
+        // Kota Local (D3): queue icons share the delivery-clock gutter; a
+        // terminal target's retry stays visible above them.
+        <span className="violet-msg-local-gutter">
+          {retryButton}
+          {localPendingAgentIds?.map((agentId) => (
+            <LocalQueueButton
+              key={agentId}
+              agentId={agentId}
+              name={agentMeta?.[agentId]?.name ?? agentId}
+              onOpen={onOpenLocalWorkbench}
+            />
+          ))}
+        </span>
+      ) : retryButton}
       {canQuote && (
         <button
           type="button"
@@ -1557,7 +1624,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
         </button>
       )}
       <div className="violet-msg-content">
-        {!isUser && (
+        {(!isUser || isPuppeteer) && (
           <div className="violet-msg-meta">
             <span className="violet-agent-name-group">
               <ProjectAgentName name={label} compact className={lifecycle ? 'inactive' : ''} />
@@ -1572,7 +1639,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
             <time>{formatTime(message.timestamp)}</time>
           </div>
         )}
-        {isUser && targetBadges.length > 0 && (
+        {isUser && !isPuppeteer && targetBadges.length > 0 && (
           <div className="violet-msg-targets">
             {targetBadges.map((agentId) => (
               <em key={agentId} className={`violet-target-badge ${isHumanTelegramTarget(agentId) ? 'human' : ''}`.trim()}>
@@ -1646,6 +1713,18 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
               )}
             </>
           )}
+          {message.role === 'assistant' && message.kind === 'message' && message.overflowPath && (
+            <div className="violet-overflow-file">
+              <LocalFileRef
+                value={message.overflowPath}
+                label="too long, see full response here."
+                kind="file"
+                projectRoot={projectRoot}
+                enableLocalFileRefs
+                showFileIcon
+              />
+            </div>
+          )}
           {canOpenTerminal && (
             <button
               type="button"
@@ -1661,6 +1740,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
             <ProviderBadge provider={message.shell} size={10} />
             {message.model && (
               <span className="violet-msg-model-text">
+                {message.route === 'auto' && 'Auto String · '}
                 {message.model}
                 {message.effort && <span className="violet-msg-effort"> • {message.effort}</span>}
               </span>
@@ -1815,6 +1895,46 @@ function isQuoteableRoomMessage(message: VioletRoomMessage): boolean {
     );
   }
   return false;
+}
+
+function LocalQueueIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M3 5h15M3 10h11M3 15h7m4 2h7m-3-3 3 3-3 3" />
+    </svg>
+  );
+}
+
+function LocalQueueButton({
+  agentId,
+  name,
+  onOpen,
+}: {
+  agentId: AgentId;
+  name: string;
+  onOpen?: (agentId: AgentId, section?: 'queue') => void;
+}) {
+  const label = `Queued for ${name}`;
+  const tip = <span className="violet-msg-local-queue-tip" aria-hidden>{label}</span>;
+  if (!onOpen) {
+    return (
+      <span className="violet-msg-local-queue" role="img" aria-label={label}>
+        <LocalQueueIcon />
+        {tip}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="violet-msg-local-queue"
+      aria-label={`${label}. Open message queue`}
+      onClick={() => onOpen(agentId, 'queue')}
+    >
+      <LocalQueueIcon />
+      {tip}
+    </button>
+  );
 }
 
 function QueuedMessageIcon() {
@@ -2212,6 +2332,9 @@ export const MarkdownText = memo(function MarkdownText({
         if (block.kind === 'code') {
           if (block.lang === 'html') {
             return <HtmlDrawingBlock key={index} html={block.text} />;
+          }
+          if (block.lang === 'mermaid' && block.closed) {
+            return <MermaidBlock key={index} source={block.text} />;
           }
           return (
             <pre key={index} className="violet-md-code">
@@ -2669,7 +2792,7 @@ type MarkdownBlock =
   | { kind: 'ul'; items: string[] }
   | { kind: 'ol'; items: string[]; start?: number }
   | { kind: 'table'; headers: string[]; rows: string[][] }
-  | { kind: 'code'; text: string; lang?: string }
+  | { kind: 'code'; text: string; lang?: string; closed: boolean }
   | { kind: 'canvas'; snapshot?: string; editable?: string; note?: string };
 
 function parseMarkdownBlocks(text: string): MarkdownBlock[] {
@@ -2715,7 +2838,7 @@ function parseMarkdownBlocks(text: string): MarkdownBlock[] {
         codeLines.push(lines[index] ?? '');
         index += 1;
       }
-      blocks.push({ kind: 'code', text: codeLines.join('\n'), lang });
+      blocks.push({ kind: 'code', text: codeLines.join('\n'), lang, closed: index < lines.length });
       continue;
     }
     if (!trimmed) {
@@ -3059,6 +3182,7 @@ const LocalFileRef = memo(function LocalFileRef({
   enableLocalFileRefs,
   previewImage,
   inlineCode = false,
+  showFileIcon = false,
 }: {
   value: string;
   label?: string;
@@ -3068,6 +3192,7 @@ const LocalFileRef = memo(function LocalFileRef({
   enableLocalFileRefs?: boolean;
   previewImage?: boolean;
   inlineCode?: boolean;
+  showFileIcon?: boolean;
 }) {
   const [resolved, setResolved] = useState<VioletFileRefResolveResult | null>(null);
   const [fileContextMenu, setFileContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
@@ -3183,8 +3308,8 @@ const LocalFileRef = memo(function LocalFileRef({
         await violetOpenFileRef({ projectRoot: null, path });
       } else if (action === 'reveal') {
         await violetRevealFileRef({ projectRoot: null, path });
-      } else if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(path);
+      } else {
+        await violetCopyFilePath(path);
       }
     } catch (err) {
       console.warn(`[violet-room] file ${action} failed`, err);
@@ -3258,7 +3383,26 @@ const LocalFileRef = memo(function LocalFileRef({
   );
 
   if (kind !== 'image' || !previewImage || !resolved || resolved.isDir || !isPreviewableImageRef(value)) {
-    return <>{chip}{fileContextMenuPortal}</>;
+    return <>
+      {showFileIcon ? (
+        <span className="violet-file-with-icon">
+          <span
+            className="violet-file-icon"
+            aria-hidden="true"
+            onMouseDown={handleMouseDown}
+            onClick={handleClick}
+            onContextMenu={enableLocalFileRefs && resolved ? handleFileContextMenu : undefined}
+          >
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 2 H10 L13 5 V13 Q13 14 12 14 H4 Q3 14 3 13 V3 Q3 2 4 2 Z" />
+              <path d="M10 2 V5 H13" />
+            </svg>
+          </span>
+          {chip}
+        </span>
+      ) : chip}
+      {fileContextMenuPortal}
+    </>;
   }
 
   return (
@@ -3266,6 +3410,7 @@ const LocalFileRef = memo(function LocalFileRef({
       <InlineLocalImagePreview
         key={resolved.path}
         path={resolved.path}
+        version={resolved.version ?? null}
         alt={label || basename(value)}
         onOpen={openRef}
         onContextMenu={handleFileContextMenu}
@@ -3277,19 +3422,26 @@ const LocalFileRef = memo(function LocalFileRef({
 
 const InlineLocalImagePreview = memo(function InlineLocalImagePreview({
   path,
+  version,
   alt,
   onOpen,
   onContextMenu,
 }: {
   path: string;
+  version: string | null;
   alt: string;
   onOpen: () => void;
   onContextMenu?: (event: MouseEvent<HTMLImageElement>) => void;
 }) {
   const loadDataUrl = useCallback(() => fileImageDataUrl(path), [path]);
+  // References are resolved for each new message. Reuse bytes only when both
+  // the canonical path and the sampled file revision match; unknown revisions
+  // stay uncached rather than falling back to the old path-only cache.
+  const cacheKey = version ? JSON.stringify(['local-file', path, version]) : null;
   return (
     <InlineImagePreview
-      cacheKey={path}
+      key={cacheKey ?? path}
+      cacheKey={cacheKey}
       alt={alt}
       loadDataUrl={loadDataUrl}
       onOpen={onOpen}
@@ -3307,14 +3459,14 @@ const InlineImagePreview = memo(function InlineImagePreview({
   onContextMenu,
   title,
 }: {
-  cacheKey: string;
+  cacheKey: string | null;
   alt: string;
   loadDataUrl: () => Promise<string>;
   onOpen?: () => void;
   onContextMenu?: (event: MouseEvent<HTMLImageElement>) => void;
   title?: string;
 }) {
-  const cachedSrc = violetInlineImageDataUrlCache.get(cacheKey) ?? null;
+  const cachedSrc = cacheKey ? violetInlineImageDataUrlCache.get(cacheKey) ?? null : null;
   const [src, setSrc] = useState<string | null>(() => cachedSrc);
   const [loadRequested, setLoadRequested] = useState(() => (
     cachedSrc !== null || typeof IntersectionObserver === 'undefined'
@@ -3344,7 +3496,7 @@ const InlineImagePreview = memo(function InlineImagePreview({
   }, [loadRequested]);
 
   useEffect(() => {
-    const cached = violetInlineImageDataUrlCache.get(cacheKey);
+    const cached = cacheKey ? violetInlineImageDataUrlCache.get(cacheKey) : undefined;
     if (cached) {
       setSrc(cached);
       setLoadFailed(false);
@@ -3355,8 +3507,10 @@ const InlineImagePreview = memo(function InlineImagePreview({
     setLoadFailed(false);
     void loadDataUrl()
       .then((dataUrl) => {
-        rememberInlineImageDataUrl(cacheKey, dataUrl);
-        if (!cancelled) setSrc(dataUrl);
+        // An older, unmounted preview must not repopulate the shared cache.
+        if (cancelled) return;
+        if (cacheKey) rememberInlineImageDataUrl(cacheKey, dataUrl);
+        setSrc(dataUrl);
       })
       .catch(() => {
         if (!cancelled) setLoadFailed(true);
@@ -3472,9 +3626,9 @@ export function mergeRoomMessages(
     collapseNativeBroadcastUserMessages(filteredNative),
     materializedLocalMessages,
   );
-  return sortRoomMessagesForDisplay(
+  return withoutDanceNativeEchoes(sortRoomMessagesForDisplay(
     dedupeRoomMessages([...markedNative, ...materializedLocalMessages]),
-  );
+  ));
 }
 
 function violetMessageMatchesAgentFilter(message: VioletRoomMessage, agentIds: ReadonlySet<AgentId>): boolean {
@@ -3505,7 +3659,7 @@ export function collapseNativeBroadcastUserMessages(messages: readonly VioletCha
       out.push(message);
       continue;
     }
-    const textKey = normalizeForDedupe(message.text).toLowerCase();
+    const textKey = normalizedRoomMessageText(message);
     const time = Date.parse(message.timestamp);
     if (!textKey || !Number.isFinite(time)) {
       out.push(message);
@@ -3684,7 +3838,7 @@ function sortRoomMessagesForDisplay(messages: readonly VioletRoomMessage[]): Vio
   )).map(({ message }) => message);
 }
 
-function sortVioletMessages<T extends VioletChatMessage>(messages: readonly T[]): T[] {
+export function sortVioletMessages<T extends VioletChatMessage>(messages: readonly T[]): T[] {
   const prepared = prepareVioletMessageSort(messages, (message) => Date.parse(message.timestamp));
   const coarseSeconds = coarseTimestampSeconds(prepared);
   return prepared.sort((left, right) => compareVioletMessageOrderWithTimes(
@@ -3872,6 +4026,90 @@ function shouldTrackAgentBusDelivery(message: VioletRoomMessage): boolean {
   );
 }
 
+export function reconcileAgentBusDeliveries(
+  previous: Record<string, AgentBusDeliveryState>,
+  nativeMessages: readonly VioletChatMessage[],
+  receipts: readonly AgentBusReceipt[],
+  now: number,
+  localPendingKeys: ReadonlySet<string> = EMPTY_LOCAL_PENDING_DELIVERY_KEYS,
+  confirmationLocalKeys: ReadonlySet<string> = localPendingKeys,
+): Record<string, AgentBusDeliveryState> {
+  const candidates = nativeMessages.filter(shouldTrackAgentBusDelivery);
+  const candidateIds = new Set(candidates.map((message) => message.id));
+  let changed = false;
+  const next = { ...previous };
+  for (const messageId of Object.keys(next)) {
+    if (candidateIds.has(messageId)) continue;
+    delete next[messageId];
+    changed = true;
+  }
+  for (const message of candidates) {
+    const current = next[message.id];
+    const sentAt = Date.parse(message.timestamp);
+    const lastAttemptAt = current?.lastAttemptAt ?? (Number.isFinite(sentAt) ? sentAt : 0);
+    // These cases cannot change delivery state. Skip them before looking
+    // through receipts and provider messages, regardless of room history size.
+    if (!current && (
+      !Number.isFinite(sentAt) ||
+      now - sentAt > DELIVERY_CONFIRM_TIMEOUT_MS + DELIVERY_CONFIRM_OBSERVE_GRACE_MS ||
+      now - lastAttemptAt < DELIVERY_CONFIRM_TIMEOUT_MS
+    )) continue;
+    const attemptEventIds = uniqueStrings([
+      message.nativeEventId ?? '',
+      ...(current?.attemptEventIds ?? []),
+    ]);
+    const retryTargetAgentIds = unconfirmedAgentBusTargetAgentIds(
+      message, nativeMessages, receipts, attemptEventIds,
+      current ? localPendingKeys : confirmationLocalKeys,
+    );
+    if (retryTargetAgentIds.length === 0) {
+      if (current) {
+        delete next[message.id];
+        changed = true;
+      }
+      continue;
+    }
+    if (current?.status === 'retrying' && now - lastAttemptAt < DELIVERY_CONFIRM_TIMEOUT_MS) {
+      const updated = { ...current, retryTargetAgentIds, attemptEventIds };
+      if (!sameAgentBusDeliveryState(current, updated)) {
+        next[message.id] = updated;
+        changed = true;
+      }
+      continue;
+    }
+    const updated: AgentBusDeliveryState = {
+      status: current?.status === 'failed' ? 'failed' : 'unconfirmed',
+      reason: current?.status === 'failed'
+        ? current.reason
+        : 'A2A message was not confirmed in the provider log.',
+      retryTargetAgentIds,
+      attemptEventIds,
+      lastAttemptAt,
+    };
+    if (!current || !sameAgentBusDeliveryState(current, updated)) {
+      next[message.id] = updated;
+      changed = true;
+    }
+  }
+  return changed ? next : previous;
+}
+
+export function nextAgentBusDeliveryDeadline(
+  messages: readonly VioletChatMessage[],
+  deliveries: Readonly<Record<string, AgentBusDeliveryState>>,
+  now: number,
+): number {
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const message of messages) {
+    if (!shouldTrackAgentBusDelivery(message)) continue;
+    const current = deliveries[message.id];
+    if (current && current.status !== 'retrying') continue;
+    const deadline = (current?.lastAttemptAt ?? Date.parse(message.timestamp)) + DELIVERY_CONFIRM_TIMEOUT_MS;
+    if (Number.isFinite(deadline) && deadline > now) earliest = Math.min(earliest, deadline);
+  }
+  return earliest;
+}
+
 function applyAgentBusDeliveryStates(
   messages: readonly VioletRoomMessage[],
   deliveries: Readonly<Record<string, AgentBusDeliveryState>>,
@@ -3903,7 +4141,7 @@ function buildComposerDeliveryEvidence(
       const items = nativeUsersByAgent.get(message.agentId) ?? [];
       items.push({
         timestampMs,
-        text: prepareComposerDeliveryDedupeText(message.text),
+        text: preparedComposerDeliveryText(message),
       });
       nativeUsersByAgent.set(message.agentId, items);
       continue;
@@ -3926,16 +4164,17 @@ function composerDeliveryTargetAgentIds(message: VioletRoomMessage): AgentId[] {
 function unconfirmedTargetAgentIds(
   message: VioletRoomMessage,
   evidence: ComposerDeliveryEvidence,
+  localPendingKeys: ReadonlySet<string> = EMPTY_LOCAL_PENDING_DELIVERY_KEYS,
 ): string[] {
   const targetAgentIds = composerDeliveryTargetAgentIds(message);
-  const localText = prepareDedupeText(message.text);
+  const localText = preparedRoomMessageText(message);
   const localTime = Date.parse(message.timestamp);
   return targetAgentIds.filter((agentId) => !(
     evidence.nativeUsersByAgent.get(agentId)?.some((nativeMessage) => (
       preparedDedupeTextsMatch(nativeMessage.text, localText) &&
       timestampsWithinComposerConfirmationWindow(nativeMessage.timestampMs, localTime)
     )) ?? false
-  ));
+  )).filter((agentId) => !localPendingKeys.has(localPendingDeliveryKey(message.id, agentId)));
 }
 
 function activeComposerTargetAgentIds(
@@ -3956,11 +4195,13 @@ function unconfirmedAgentBusTargetAgentIds(
   nativeMessages: readonly VioletChatMessage[],
   receipts: readonly AgentBusReceipt[],
   attemptEventIds: readonly string[],
+  localPendingKeys: ReadonlySet<string> = EMPTY_LOCAL_PENDING_DELIVERY_KEYS,
 ): string[] {
   const targetAgentIds = uniqueAgentIds(message.targetAgentIds ?? []);
   if (targetAgentIds.length === 0) return [];
   const confirmed = confirmedAgentBusTargetAgentIds(message, nativeMessages, receipts, attemptEventIds);
-  return targetAgentIds.filter((agentId) => !confirmed.has(agentId));
+  return targetAgentIds.filter((agentId) => !confirmed.has(agentId))
+    .filter((agentId) => !localPendingKeys.has(localPendingDeliveryKey(message.nativeEventId ?? '', agentId)));
 }
 
 function confirmedAgentBusTargetAgentIds(
@@ -4096,7 +4337,7 @@ function dedupeRoomMessages(messages: VioletRoomMessage[]): VioletRoomMessage[] 
       message.kind,
       targetAgentIdsKey(message.targetAgentIds),
       bucket,
-      normalizeForDedupe(message.text).toLowerCase(),
+      normalizedRoomMessageText(message),
     ].join('\u001f');
     if (!seen.has(key)) {
       seen.add(key);
@@ -4197,6 +4438,129 @@ function mergeAgentBusReceipts(
   return next.length > 0 ? next : undefined;
 }
 
+const EMPTY_LOCAL_PENDING_TARGETS: ReadonlyMap<string, readonly AgentId[]> = new Map();
+
+// D3: per rendered message, the Local targets whose delivery is still pending.
+// Same identities as the delivery filters below: composer = room message id,
+// actor messages (Agent Bus and the other actor sources) = original nativeEventId.
+function localPendingTargetsByMessage(
+  messages: readonly VioletRoomMessage[],
+  localPendingKeys: ReadonlySet<string>,
+): ReadonlyMap<string, readonly AgentId[]> {
+  if (localPendingKeys.size === 0) return EMPTY_LOCAL_PENDING_TARGETS;
+  const byMessage = new Map<string, AgentId[]>();
+  for (const message of messages) {
+    const identity = message.local ? message.id : message.nativeEventId;
+    if (!identity || !message.targetAgentIds?.length) continue;
+    const pending = uniqueAgentIds(message.targetAgentIds)
+      .filter((agentId) => localPendingKeys.has(localPendingDeliveryKey(identity, agentId)));
+    if (pending.length > 0) byMessage.set(message.id, pending);
+  }
+  return byMessage;
+}
+
+// Kota Local deliveries its runtime still owns hold back the legacy 180 s
+// "unconfirmed" verdict. Matching identity: composer = room message id,
+// Agent Bus = original nativeEventId. A missing list equals an empty one.
+const EMPTY_LOCAL_PENDING_DELIVERY_KEYS: ReadonlySet<string> = new Set();
+
+// Delay only the icon and its gutter. Delivery tracking uses the raw pending set.
+function useVisibleLocalPendingDeliveryKeys(projectRoot: string | null, pending: ReadonlySet<string>) {
+  const timers = useRef(new Map<string, number>());
+  const verification = useRef<Promise<ReadonlySet<string>> | null>(null);
+  const [visible, setVisible] = useState<{ projectRoot: string | null; keys: ReadonlySet<string> }>(
+    () => ({ projectRoot, keys: EMPTY_LOCAL_PENDING_DELIVERY_KEYS }),
+  );
+
+  useEffect(() => {
+    const activeTimers = timers.current;
+    verification.current = null;
+    setVisible((current) => current.projectRoot === projectRoot && current.keys.size === 0
+      ? current : { projectRoot, keys: EMPTY_LOCAL_PENDING_DELIVERY_KEYS });
+    return () => {
+      for (const timer of activeTimers.values()) window.clearTimeout(timer);
+      activeTimers.clear();
+      verification.current = null;
+    };
+  }, [projectRoot]);
+
+  useEffect(() => {
+    for (const [key, timer] of timers.current) {
+      if (!pending.has(key)) {
+        window.clearTimeout(timer);
+        timers.current.delete(key);
+      }
+    }
+    setVisible((current) => {
+      const keys = new Set([...current.keys].filter((key) => pending.has(key)));
+      return current.projectRoot === projectRoot && keys.size === current.keys.size
+        ? current : { projectRoot, keys };
+    });
+    for (const key of pending) {
+      // Keep completed timers until the delivery leaves pending, so refreshes
+      // neither restart the delay nor schedule another reveal.
+      if (timers.current.has(key)) continue;
+      const timer = window.setTimeout(() => {
+        // A fast consumption can precede the throttled room/synced event.
+        // Recheck only the icon at its deadline; never alter delivery tracking.
+        // Simultaneous deadlines share this lightweight cache read.
+        const check = verification.current ?? readVioletRoomCache({ projectRoot, limit: 1 })
+          .then((state) => localPendingDeliveryKeySet(state.localPendingDeliveries));
+        verification.current = check;
+        const done = () => { if (verification.current === check) verification.current = null; };
+        void check.then(done, done);
+        void check.then((fresh) => {
+          if (timers.current.get(key) !== timer || !fresh.has(key)) return;
+          setVisible((current) => current.projectRoot === projectRoot
+            ? { projectRoot, keys: new Set([...current.keys, key]) } : current);
+        }, () => { /* No fresh proof: don't reveal a possibly stale queue icon. */ });
+      }, 500);
+      timers.current.set(key, timer);
+    }
+  }, [pending, projectRoot]);
+
+  return useMemo(() => visible.projectRoot === projectRoot
+    ? new Set([...visible.keys].filter((key) => pending.has(key)))
+    : EMPTY_LOCAL_PENDING_DELIVERY_KEYS, [visible, pending, projectRoot]);
+}
+
+function localPendingDeliveryKey(messageId: string, agentId: string): string {
+  return `${messageId}\u001f${agentId}`;
+}
+
+function localPendingDeliveryKeySet(
+  pending?: VioletRoomState['localPendingDeliveries'],
+): ReadonlySet<string> {
+  if (!pending?.length) return EMPTY_LOCAL_PENDING_DELIVERY_KEYS;
+  return new Set(pending.map((item) => localPendingDeliveryKey(item.messageId, item.targetAgentId)));
+}
+
+function hasLocalPendingDeliveryTarget(
+  message: VioletRoomMessage,
+  localPendingKeys: ReadonlySet<string>,
+): boolean {
+  if (localPendingKeys.size === 0) return false;
+  return composerDeliveryTargetAgentIds(message)
+    .some((agentId) => localPendingKeys.has(localPendingDeliveryKey(message.id, agentId)));
+}
+
+function sameLocalPendingDeliveries(
+  left?: VioletRoomState['localPendingDeliveries'],
+  right?: VioletRoomState['localPendingDeliveries'],
+): boolean {
+  const leftItems = left ?? [];
+  const rightItems = right ?? [];
+  if (leftItems.length !== rightItems.length) return false;
+  return leftItems.every((item, index) => (
+    item.messageId === rightItems[index]!.messageId &&
+    item.targetAgentId === rightItems[index]!.targetAgentId
+  ));
+}
+
+// Pure delivery helpers, exported for unit tests: the Agent Bus retry UI is
+// disabled, so the bus-side filter has no DOM surface to test through.
+export { localPendingDeliveryKeySet, unconfirmedAgentBusTargetAgentIds };
+
 function sameAgentBusReceipts(
   left?: readonly AgentBusReceipt[],
   right?: readonly AgentBusReceipt[],
@@ -4253,6 +4617,7 @@ function reuseStableRoomMessages<T extends VioletChatMessage>(
 }
 
 function sameRoomMessage(left: VioletChatMessage, right: VioletChatMessage): boolean {
+  if (left === right) return true;
   const leftRoom = left as VioletRoomMessage;
   const rightRoom = right as VioletRoomMessage;
   return (
@@ -4264,6 +4629,7 @@ function sameRoomMessage(left: VioletChatMessage, right: VioletChatMessage): boo
     left.kind === right.kind &&
     left.timestamp === right.timestamp &&
     left.text === right.text &&
+    nullishString(left.overflowPath) === nullishString(right.overflowPath) &&
     left.violetSeq === right.violetSeq &&
     nullishString(left.sourcePath) === nullishString(right.sourcePath) &&
     nullishString(left.nativeEventId) === nullishString(right.nativeEventId) &&
@@ -4355,10 +4721,11 @@ function matchingLocalComposerMessage(
   localMessages: readonly PreparedLocalComposerMessage[],
 ): PreparedLocalComposerMessage | undefined {
   if (nativeMessage.role !== 'user') return undefined;
-  if (nativeMessage.agentId === 'user' && nativeMessage.temporalGap) {
+  if (nativeMessage.agentId === 'user' && (nativeMessage.temporalGap || nativeMessage.messageOrigin === 'puppeteer')) {
     return localMessages.find((local) => local.id === nativeMessage.id);
   }
-  const nativeText = prepareDedupeText(nativeMessage.text);
+  // Same preparation as delivery evidence: a leading host marks envelope is peeled.
+  const nativeText = preparedComposerDeliveryText(nativeMessage);
   if (!nativeText.normalized) return undefined;
   const nativeTime = Date.parse(nativeMessage.timestamp);
   return localMessages.find((local) => {
@@ -4376,7 +4743,7 @@ function prepareLocalComposerMessages(
       ? [{
           id: message.id,
           timestampMs: Date.parse(message.timestamp),
-          text: prepareDedupeText(message.text),
+          text: preparedRoomMessageText(message),
           targetAgentIds: new Set(message.targetAgentIds ?? []),
         }]
       : []
@@ -4512,4 +4879,20 @@ function formatLocalDateLabel(date: Date): string {
 
 function basename(value: string): string {
   return value.split('/').pop() || value;
+}
+
+/** Retry protection is a view of existing records, never a delivery fact. */
+export function applyLocalQueueRetryGuards(messages: readonly VioletRoomMessage[], projectRoot: string | null, guards: ReadonlySet<string>): readonly VioletRoomMessage[] {
+  if (!projectRoot || !guards.size) return messages;
+  let changed = false;
+  const next = messages.map(message => {
+    if (!message.deliveryStatus) return message;
+    const targets = message.deliveryRetryTargetAgentIds?.length ? message.deliveryRetryTargetAgentIds : message.targetAgentIds ?? [];
+    const messageId = shouldTrackAgentBusDelivery(message) ? message.nativeEventId ?? message.id : message.id;
+    const remaining = targets.filter(target => !guards.has(localQueueGuardKey(projectRoot, messageId, target)));
+    if (remaining.length === targets.length) return message;
+    changed = true;
+    return remaining.length ? { ...message, deliveryRetryTargetAgentIds: remaining } : completeMessageDelivery(message);
+  });
+  return changed ? next : messages;
 }

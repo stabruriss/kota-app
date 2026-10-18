@@ -1,0 +1,21 @@
+{
+  "source": "Real Pi RPC stdout/get_entries against the loopback fake provider; no real model or credentials.",
+  "transform": "Only known temporary filesystem paths and the ephemeral loopback port were replaced. IDs, timestamps, contents, messages and entries are otherwise unchanged. message_update deltas and command responses were omitted from events.jsonl.",
+  "coverage": {
+    "thinking": true,
+    "modelChange": true,
+    "thinkingChange": true,
+    "compaction": true,
+    "providerError": true,
+    "exhaustedRetry": true,
+    "extensionError": true
+  },
+  "cursor": "a868a9a8",
+  "fullEntries": 29,
+  "sinceEntries": 2,
+  "hashes": {
+    "full.json": "140cd00e4f1c268f616ff9ee350f9e6dedad5360cdb53d5d877445a108858ace",
+    "since.json": "4a16545eb838a849c1dcf845634c9a4115ad0f68671782f28bd1d1227a6fb0e6",
+    "events.jsonl": "96282d3ce5ef6714eddcc42a9cd3a8bb77a6ba4aa3c82de270432a6185ecb2dc"
+  }
+}

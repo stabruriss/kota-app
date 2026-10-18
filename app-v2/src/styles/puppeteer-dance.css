@@ -1,0 +1,92 @@
+.puppeteer-dance-card { cursor: default; }
+.puppeteer-dance-card .lm-avatar { flex-shrink: 0; }
+.dance-agent-avatar { width: 27px; height: 27px; flex-shrink: 0; }
+.dance-sentinel-row { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 12px; align-items: center; margin-top: 8px; color: var(--text-3); font: 11px var(--font-sans); }
+.dance-sentinel-readout { display: flex; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; min-width: 0; height: 33px; padding: 4px 8px; border-radius: 4px; background: rgba(0,0,0,.2); box-shadow: inset 0 1px 2px rgba(0,0,0,.35),inset 0 0 0 1px rgba(218,214,204,.06); color: var(--text-2); font: 11px var(--font-sans); }
+.dance-sentinel-name,.dance-sentinel-idle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dance-sentinel-name { color: var(--text); }
+.dance-sentinel-idle { color: var(--text-4); font-style: italic; }
+/* Settings sizes the readout to the name (card keeps the full-width row). */
+.dance-settings-body .dance-sentinel-readout { justify-self: start; width: fit-content; min-width: min(220px,100%); max-width: 100%; }
+.dance-sentinel-auto { margin-left: auto; flex-shrink: 0; padding: 2px 6px 2px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); font: 600 7.5px/1 var(--font-display); font-style: normal; letter-spacing: 1px; text-transform: uppercase; }
+.dance-play { --routing-control-amber: color-mix(in srgb,var(--terra-hi) 45%,#ffac4f); position: relative; display: inline-flex; align-items: center; justify-content: center; width: 21.7px; height: 21.7px; border-radius: 50%; border: 1px solid #111314; background: radial-gradient(ellipse at 50% 14%,#424545,#282b2c 58%,#1d2021); box-shadow: 0 2px 4px #000b,0 0 0 1px var(--brass-deep),inset 0 1px 1px #ffffff28,inset 0 -2px 3px #0009; flex-shrink: 0; }
+.dance-play::before { content: ''; position: absolute; inset: 2.1px; border: 1px solid #ffffff0c; border-radius: 50%; box-shadow: inset 0 1px 2px #0004; pointer-events: none; }
+.dance-play i { width: 0; height: 0; border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent; border-left: 5.6px solid var(--routing-control-amber); margin-left: 1.4px; filter: drop-shadow(0 0 2px #efa25068); }
+.dance-play.is-on,.dance-play:hover { box-shadow: 0 2px 4px #000b,0 0 0 1px var(--routing-control-amber),0 0 9px #f0a35c35,inset 0 1px 1px #ffffff28,inset 0 -2px 3px #0009; }
+.dance-play:disabled { opacity: .35; }
+.dance-settings-body { overflow: auto; overscroll-behavior: contain; padding: 20px; min-height: 0; }
+.dance-settings-body fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.dance-settings-body p { color: var(--text-3); font: 11px/1.6 var(--font-sans); }
+.dance-strategy { display: flex; padding: 3px; margin-top: 20px; border: 1px solid var(--border); background: var(--bg-base); border-radius: 5px; }
+.dance-strategy button { flex: 1; border: 0; border-radius: 3px; padding: 9px; color: var(--text-3); background: transparent; font: 600 11px var(--font-sans); }
+.dance-strategy button[aria-pressed=true] { color: var(--brass-bright); background: var(--glow-warm); box-shadow: inset 0 0 0 1px var(--brass-lo); }
+.dance-conditions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 18px; }
+.dance-conditions section { padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg-base); }
+.dance-conditions header { display: flex; align-items: center; gap: 9px; font: 11px var(--font-sans); }
+.dance-conditions small { color: var(--text-3); font: 10px var(--font-sans); }
+.dance-conditions header small { margin-left: auto; }
+.dance-conditions textarea { box-sizing: border-box; width: 100%; margin: 10px 0 5px; resize: none; overflow-y: hidden; padding: 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-panel); color: var(--text); font: 11px/1.6 var(--font-sans); }
+.puppeteer-tabs { display: flex; gap: 28px; margin: 22px 0 0; border-bottom: 1px solid var(--border); padding: 0 2px; }
+.puppeteer-tabs button { position: relative; padding: 10px 0 13px; border: 0; background: transparent; color: var(--text-3); font: 700 12px var(--font-display); letter-spacing: .7px; }
+.puppeteer-tabs button[aria-selected=true] { color: var(--brass-bright); }
+.puppeteer-tabs button[aria-selected=true]::after { content: ''; height: 2px; background: var(--terra-hi); position: absolute; bottom: -1px; left: 0; right: 0; }
+.puppeteer-tavern-config [role=tabpanel]>p { color: var(--text-3); font: 11px var(--font-sans); }
+.puppeteer-project { margin: 18px 0; }
+.puppeteer-project h3 { color: var(--text-2); font: 600 12px var(--font-sans); }
+.puppeteer-string-agents { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
+.puppeteer-string-agent { display: flex; align-items: center; gap: 11px; min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-base); color: var(--text); text-align: left; font: 12px var(--font-sans); }
+.puppeteer-string-agent:hover { border-color: var(--brass-lo); background: var(--glow-warm); }
+.puppeteer-string-agent>span { min-width: 0; }
+.puppeteer-string-agent small { display: block; margin-top: 3px; color: var(--text-3); font: 10px/1.6 var(--font-sans); }
+.puppeteer-string-agent i { margin-left: auto; color: var(--brass-hi); white-space: nowrap; font: 10px var(--font-sans); }
+.puppeteer-dance-projects { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 15px; align-items: start; }
+.puppeteer-tavern-config .puppeteer-jev-prompts code { font: 10px var(--font-mono); overflow-wrap: anywhere; }
+/* Dance ribbon "wick": the agents stay visible under a thin dimming veil; a terracotta line glows along the bottom and its warmth fades before the top.
+   The dimming is a plain 40% black layer rather than a backdrop brightness() so it holds even where backdrop-filter is not painted. */
+.ribbon-wrap.dance-active { container-type: inline-size; }
+.stage-bottom-dock:has(> .ribbon-wrap.dance-active) { border-top-color: transparent; }
+.stage-bottom-dock .ribbon-wrap.dance-active { background: rgba(14,15,16,.1); border: 0; box-shadow: none; }
+.ribbon-wrap.dance-active::before,.ribbon-wrap.dance-active::after { content: ''; position: absolute; z-index: 2; pointer-events: none; }
+.ribbon-wrap.dance-active::after { inset: 0; border-radius: 8px; -webkit-backdrop-filter: blur(1.9px) saturate(.5); backdrop-filter: blur(1.9px) saturate(.5); background: radial-gradient(ellipse 52% 115% at 50% 100%,color-mix(in srgb,var(--terra-hi) 17%,transparent),transparent 74%),linear-gradient(rgba(16,14,13,.08),rgba(16,14,13,.08)),rgba(0,0,0,.4); }
+.ribbon-wrap.dance-active::before { left: 22%; right: 22%; bottom: 1px; height: 1px; background: linear-gradient(90deg,transparent,color-mix(in srgb,var(--terra-hi) 80%,transparent),transparent); box-shadow: 0 0 7px 1px color-mix(in srgb,var(--terra-hi) 30%,transparent); }
+.ribbon-wrap.dance-active .ribbon-label,.ribbon-wrap.dance-active .chip-add-wrap,.ribbon-wrap.dance-active .chev-btn { position: relative; z-index: 3; }
+/* Lightly etched label, clear of Filter (left) and Add plus the chevron (right); centred once the bar is wide. */
+.ribbon-dance-label { position: absolute; z-index: 3; inset: 0 104px 0 48px; pointer-events: none; display: flex; align-items: center; justify-content: center; white-space: nowrap; color: rgba(214,190,172,.26); font: 600 clamp(10px,2.5cqw,14px)/1 var(--font-display); letter-spacing: clamp(2px,.62cqw,4.5px); text-indent: clamp(2px,.62cqw,4.5px); text-shadow: 0 -1px 0 rgba(0,0,0,.42),0 1px 0 rgba(232,220,203,.05); }
+@container (max-width: 599.98px) { .ribbon-wrap.dance-active:has(.chev-btn) .ribbon-dance-label { right: 140px; } }
+@container (min-width: 600px) { .ribbon-dance-label { inset: 0 48px; } }
+.violet-msg.puppeteer-origin .violet-msg-bubble { border-color: var(--brass-lo); }
+.dance-send-error { color: var(--terra-hi); margin: 5px 0 0; font: 11px/1.5 var(--font-sans); }
+.dance-settings-body .string-threshold { --routing-control-amber: color-mix(in srgb,var(--terra-hi) 45%,#ffac4f); }
+.dance-settings-body .string-threshold input::-webkit-slider-runnable-track { border: 1px solid #111313; background: linear-gradient(to right,var(--routing-control-amber) var(--string-threshold-fill),#282a2b var(--string-threshold-fill)); box-shadow: inset 0 1px 2px #0008,0 1px 0 #ffffff0a,0 0 7px #eea35c38; }
+.dance-settings-body .string-threshold input::-webkit-slider-thumb { width: 21px; margin-top: -10.5px; background: repeating-linear-gradient(0deg,#36393a 0 1px,#202324 1px 4px); box-shadow: 0 2px 5px #000c,inset 0 1px #ffffff20,inset 0 -2px 3px #0007; }
+.dance-settings-body .string-threshold input::-moz-range-progress { background: var(--routing-control-amber); }
+.dance-settings-body .string-threshold input::-moz-range-thumb { width: 21px; background: repeating-linear-gradient(0deg,#36393a 0 1px,#202324 1px 4px); }
+@media(max-width:680px) { .dance-conditions,.puppeteer-string-agents,.puppeteer-dance-projects { grid-template-columns: minmax(0,1fr); } .dance-settings-body { padding: 14px; } }
+
+/* Compact shared room/Tavern card; diagnostics live in settings or the start check. */
+.dance-sentinel-compact { grid-template-columns:minmax(0,1fr); justify-content:start; gap:0; }
+.dance-sentinel-compact .dance-sentinel-readout { height:28px; gap:5px; padding:3px 7px; font-size:10px; }
+.dance-sentinel-compact .dance-agent-avatar { width:20px; height:20px; flex:0 0 20px; box-sizing:border-box; }
+.dance-sentinel-readout .dance-sentinel-label { position:relative; flex-shrink:0; margin-right:3px; color:var(--text-3); text-shadow:none; font:500 8.5px var(--font-display); letter-spacing:.25px; }
+.dance-sentinel-label::after { content:''; position:absolute; width:1px; height:20px; right:-3px; top:50%; transform:translateY(-50%); background:var(--border-hi); }
+.puppeteer-dance-card[data-dance-enabled="true"] .dance-sentinel-label { color:var(--copper-hi); text-shadow:0 0 5px color-mix(in srgb,var(--copper-hi) 65%,transparent),0 0 10px color-mix(in srgb,var(--copper-hi) 30%,transparent); }
+.dance-start-validation { padding:26px 22px; font:13px/1.7 var(--font-sans); color:var(--text); }
+.local-model-dialog:has(.dance-start-validation) { width:min(460px,100%); }
+.local-model-dialog:has(.dance-start-validation) .local-model-dialog-foot { justify-content:flex-end; gap:18px; }
+.dance-settings-owner { color:var(--text-3); font:10px var(--font-mono); margin-bottom:12px; }
+.dance-route-log { margin-bottom:18px; }
+.dance-route-log .string-log-footer { gap:10px; }
+.dance-route-log .dance-settings-jev { flex:1; min-width:0; padding:0; margin:0; border:0; background:none; gap:4px 12px; }
+.dance-route-log .dance-settings-jev>div { gap:0; }
+.dance-route-log .dance-settings-jev b,.dance-route-log .dance-settings-jev span { font:inherit; color:inherit; }
+.dance-route-log .dance-settings-jev b::after { content:'·'; margin:0 6px; }
+.dance-route-log .dance-settings-jev>button { margin-left:0; font-size:10px; }
+.dance-route-log .dance-settings-jev p { font-size:10px; }
+.dance-route-log .string-log-arrows { gap:7px; }
+.dance-settings-jev { display:flex; align-items:center; flex-wrap:wrap; gap:7px 15px; padding:10px 12px; background:var(--bg-panel); border:1px solid var(--border); border-radius:5px; margin-bottom:14px; }
+.dance-settings-jev>div { display:flex; gap:12px; align-items:center; }
+.dance-settings-jev b { color:var(--text-2); font:600 11px var(--font-sans); }
+.dance-settings-jev span { font:10px var(--font-sans); color:var(--text-3); }
+.dance-settings-jev>button { margin-left:auto; }
+.dance-settings-jev p { flex-basis:100%; margin:0; color:var(--terra-hi); }
+@media(max-width:750px) { .dance-start-validation { padding:20px 16px; } }

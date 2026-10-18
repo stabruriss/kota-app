@@ -226,7 +226,7 @@ fn paused_old_lookup_cannot_overwrite_a_later_generation_of_the_same_provider() 
     let thread = std::thread::spawn(move || {
         ready.send(()).unwrap();
         wait.recv().unwrap();
-        finish_source_lookup(&old_agent, expected, Some(old_source)).unwrap()
+        finish_source_lookup(&old_agent, expected, Ok(Some(old_source))).unwrap()
     });
     started.recv().unwrap();
     let latest = "id: agent-fixture73\nprovider: claude\nshell: claude\nshell-generation: newer\nhandoff-pending: {id: preserve-me}\n";

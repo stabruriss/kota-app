@@ -1,0 +1,227 @@
+/* Kota Local sign-ins in Tavern Link (M2 D4/D5). Imported with the card module; the card only mounts with
+   VITE_KOTA_LOCAL_ENABLED, and every rule is scoped to its own classes, so other Link cards are untouched. */
+
+.tavern-local-auth {
+  gap: 12px;
+  background:
+    linear-gradient(135deg, rgba(197, 149, 106, 0.1), rgba(84, 118, 105, 0.06)),
+    rgba(255,255,255,0.035);
+  scroll-margin-top: 16px;
+}
+.tavern-local-auth:focus { outline: none; }
+.tavern-connection-logo.kota-local img { width: 20px; height: 23px; display: block; }
+.tavern-local-auth .tavern-dot.off { background: transparent; border: 1px solid rgba(218,214,204,0.36); box-shadow: none; }
+/* canvas.css paints .tavern-dot.ok with var(--sage), which no product stylesheet defines; this card uses the same green explicitly. */
+.tavern-local-auth .tavern-dot.ok { background: var(--copper-hi); }
+.local-auth-policy { margin-top: -6px; color: var(--text-4); font: 11.5px/1.4 var(--font-sans); }
+.local-auth-group-label {
+  margin: 2px 0 7px;
+  color: var(--text-3);
+  font: 9px var(--font-display);
+  font-weight: 800;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+}
+
+/* Jev sits at the top in an orange frame; Kota's copper tokens are green, so the orange is the terra family. */
+.local-auth-jev-frame { display: flex; flex-direction: column; gap: 10px; padding: 13px 15px; border: 1px solid var(--terra-hi); border-radius: 8px; background: var(--glow-fire); box-shadow: 0 0 18px var(--glow-fire); }
+.local-auth-jev-copy { margin: 0; color: var(--text-3); font: 12px/1.45 var(--font-sans); }
+.local-auth-jev-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+.tavern-local-auth .local-auth-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.tavern-local-auth .local-auth-field > span { color: var(--text-2); font: 11px var(--font-sans); font-weight: 700; }
+.tavern-local-auth .local-auth-field small { color: var(--text-4); font: 11px/1.4 var(--font-sans); }
+.tavern-section .local-auth-field select:disabled { opacity: 0.55; }
+.tavern-section .local-auth-field select.is-unavailable { color: var(--terra-hi); border-color: var(--terra-hi); }
+
+.local-auth-jev { scroll-margin: 24px; display: flex; flex-direction: column; gap: 8px; padding: 0; border: 0; background: none; }
+.local-auth-jev:focus { outline: none; }
+.local-auth-jev-head { display: flex; align-items: center; gap: 8px; }
+.local-auth-jev-head b { color: var(--text); font: 12.5px var(--font-sans); font-weight: 700; }
+.local-auth-coming { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--brass-hi); font: 9.5px var(--font-sans); }
+.local-auth-jev-key { display: flex; align-items: center; gap: 8px; min-height: 30px; color: var(--text-3); font: 12px var(--font-sans); }
+.local-auth-jev-key .local-auth-action { margin-left: auto; }
+
+/* 320px keeps "Not linked · OAuth · API key" whole; Tavern's 1240px pane then fits three columns, as approved. */
+.local-auth-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; align-items: start; }
+.local-auth-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  padding: 9px 10px;
+  border: 1px solid rgba(218,214,204,0.15);
+  border-radius: 7px;
+  background: rgba(0,0,0,0.16);
+  scroll-margin: 24px;
+}
+.local-auth-row[data-state="api_key"],
+.local-auth-row[data-state="oauth"] { border-color: rgba(132,160,145,0.3); background: rgba(53,76,58,0.12); }
+.local-auth-row[data-state="invalid"] { border-color: rgba(216,139,106,0.36); }
+.tavern-connection-logo.local-auth-logo { width: 30px; height: 30px; border-radius: 6px; }
+.local-auth-logo img { width: 17px; height: 17px; display: block; }
+.local-auth-logo.mono, .local-auth-dialog-logo.mono {
+  color: var(--brass-bright);
+  font: 10px var(--font-display);
+  font-weight: 900;
+  letter-spacing: 0.4px;
+}
+.local-auth-main { min-width: 0; }
+.local-auth-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.local-auth-name b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 12.5px var(--font-sans); font-weight: 700; }
+.local-auth-status { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: 3px; color: var(--text-3); font: 11px var(--font-sans); white-space: nowrap; }
+.local-auth-status .tavern-dot { width: 7px; height: 7px; margin-top: 0; }
+.local-auth-status-text { overflow: hidden; text-overflow: ellipsis; }
+.local-auth-row[data-state="api_key"] .local-auth-status-text,
+.local-auth-row[data-state="oauth"] .local-auth-status-text { color: var(--copper-hi); }
+.local-auth-row[data-state="invalid"] .local-auth-status-text { color: var(--terra-hi); }
+.local-auth-row[data-state="error"] .local-auth-status-text,
+.local-auth-row[data-state="unknown"] .local-auth-status-text { color: #d4a358; }
+.local-auth-methods { overflow: hidden; text-overflow: ellipsis; color: var(--text-4); }
+.local-auth-methods::before { content: '·'; margin-right: 6px; }
+.tavern-section .local-auth-action { height: 26px; padding: 0 10px; font-size: 9px; white-space: nowrap; }
+.tavern-section .local-auth-action.quiet { border-color: rgba(218,214,204,0.22); background: rgba(0,0,0,0.2); color: var(--text-2); }
+.tavern-section .local-auth-retry { margin-left: 10px; vertical-align: 1px; }
+
+.local-auth-more summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  list-style: none;
+  color: var(--brass-hi);
+  font: 9.5px var(--font-display);
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.local-auth-more summary::-webkit-details-marker { display: none; }
+.local-auth-more summary::before { content: ''; width: 6px; height: 6px; border-right: 1.4px solid currentColor; border-bottom: 1.4px solid currentColor; transform: rotate(-45deg); transition: transform var(--dur-fast) var(--ease-out); }
+.local-auth-more[open] summary::before { transform: rotate(45deg); }
+.local-auth-count { padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); font: 10px var(--font-mono); letter-spacing: 0; }
+.local-auth-filter { display: block; margin: 6px 0 10px; }
+.tavern-section .local-auth-filter input { width: min(280px, 100%); height: 28px; }
+
+.tavern-local-auth.is-landing,
+.local-auth-jev.is-landing { animation: localAuthLanding 2.4s var(--ease-out) 1; }
+@keyframes localAuthLanding {
+  0%, 60% { box-shadow: 0 0 0 1px rgba(242,198,126,0.75), 0 0 26px rgba(242,198,126,0.22); }
+  100% { box-shadow: 0 0 0 1px rgba(242,198,126,0), 0 0 26px rgba(242,198,126,0); }
+}
+
+/* Sign-in and sign-out dialogs: a viewport-fixed layer of their own (portaled to body, below the 48px bar);
+   the cards reuse kota-confirm-card, and kota-confirm-layer is not used or changed. */
+.local-auth-layer {
+  position: fixed;
+  inset: 48px 0 0;
+  z-index: 6500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background: rgba(0,0,0,0.28);
+  backdrop-filter: blur(3px);
+}
+.local-auth-dialog { width: min(500px, calc(100% - 44px)); max-height: calc(100% - 44px); overflow: auto; }
+.local-auth-dialog:focus { outline: none; }
+.local-auth-dialog-head { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; align-items: center; margin-bottom: 14px; }
+.local-auth-dialog-logo { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; border: 1px solid rgba(218,214,204,0.22); background: rgba(0,0,0,0.2); }
+.local-auth-dialog-logo img { width: 20px; height: 20px; }
+.kota-confirm-card .local-auth-dialog-head h2 { margin: 0; }
+.local-auth-dialog-sub { margin-top: 3px; color: var(--text-3); font: 11px var(--font-sans); }
+.local-auth-body { display: flex; flex-direction: column; gap: 10px; }
+.local-auth-progress { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-2); font: 12px/1.4 var(--font-sans); overflow-wrap: anywhere; }
+.local-auth-progress.done { color: var(--text-4); }
+.local-auth-spinner { width: 12px; height: 12px; flex: 0 0 auto; border-radius: 50%; border: 1.5px solid rgba(197,187,170,0.25); border-top-color: var(--brass-bright); animation: localAuthSpin 0.9s linear infinite; }
+.local-auth-progress.done .local-auth-spinner { animation: none; border-color: rgba(132,160,145,0.55); }
+@keyframes localAuthSpin { to { transform: rotate(360deg); } }
+.local-auth-closed { color: var(--text-4); font: 11px var(--font-sans); }
+.local-auth-info { padding: 9px 10px; border-radius: 6px; border: 1px solid rgba(147,168,181,0.3); background: rgba(110,130,144,0.08); color: var(--text-2); font: 12px/1.45 var(--font-sans); overflow-wrap: anywhere; }
+.local-auth-link { margin-left: 4px; padding: 0; border: 0; background: none; color: var(--sky-hi); font: inherit; text-decoration: underline; cursor: pointer; }
+.local-auth-step { padding: 12px; border-radius: 8px; border: 1px solid rgba(218,214,204,0.2); background: rgba(255,255,255,0.035); }
+.local-auth-step-title { color: var(--text); font: 12.5px var(--font-sans); font-weight: 700; }
+.local-auth-step p { margin: 4px 0 0; color: var(--text-3); font: 12px/1.45 var(--font-sans); }
+.local-auth-step-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.local-auth-button {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(218,214,204,0.24);
+  background: rgba(0,0,0,0.24);
+  color: var(--text-2);
+  cursor: pointer;
+  font: 9.5px var(--font-display);
+  font-weight: 900;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+}
+.local-auth-button.primary { border-color: rgba(197,187,170,0.55); background: rgba(218,214,204,0.14); color: var(--brass-bright); }
+.local-auth-button:hover { border-color: var(--brass-hi); }
+.local-auth-url { display: block; margin-top: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-4); font: 10.5px var(--font-mono); }
+.local-auth-device { text-align: center; }
+.local-auth-device-label { color: var(--text-3); font: 9px var(--font-display); font-weight: 800; letter-spacing: 1.1px; text-transform: uppercase; }
+.local-auth-device-code { margin: 6px 0 2px; color: var(--brass-bright); font: 500 26px var(--font-mono); letter-spacing: 4px; }
+.local-auth-device .local-auth-step-actions { justify-content: center; }
+.local-auth-device-expiry { margin-top: 8px; color: var(--text-3); font: 10.5px var(--font-mono); }
+.local-auth-dialog .local-auth-field { display: flex; flex-direction: column; gap: 6px; color: var(--text-2); font: 12px/1.45 var(--font-sans); }
+.local-auth-dialog .local-auth-field input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border-hi);
+  background: rgba(0,0,0,0.3);
+  color: var(--text);
+  font: 12px var(--font-mono);
+}
+.local-auth-dialog .local-auth-field input:focus { outline: none; border-color: rgba(197,187,170,0.6); box-shadow: 0 0 0 3px rgba(197,187,170,0.08); }
+.local-auth-field-note { color: var(--text-4); font: 11px var(--font-sans); }
+.local-auth-field-error { color: var(--terra-hi); font: 11.5px/1.4 var(--font-sans); }
+.local-auth-dialog .local-auth-field input:disabled { opacity: 0.6; }
+.local-auth-options { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: 0; }
+.local-auth-options legend { margin-bottom: 7px; padding: 0; color: var(--text-2); font: 12px/1.45 var(--font-sans); }
+.local-auth-option {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  width: 100%;
+  padding: 9px 11px;
+  text-align: left;
+  border-radius: 7px;
+  border: 1px solid rgba(218,214,204,0.18);
+  background: rgba(0,0,0,0.2);
+  color: var(--text);
+  cursor: pointer;
+}
+.local-auth-option::before { content: ''; width: 12px; height: 12px; margin-top: 3px; border-radius: 50%; border: 1px solid rgba(218,214,204,0.4); }
+.local-auth-option[aria-checked="true"] { border-color: rgba(197,187,170,0.6); background: rgba(218,214,204,0.08); }
+.local-auth-option[aria-checked="true"]::before { border-color: var(--brass-bright); background: radial-gradient(circle, var(--brass-bright) 0 3px, transparent 3.5px); }
+.local-auth-option:hover { border-color: rgba(197,187,170,0.45); }
+.local-auth-option b { display: block; font: 12.5px var(--font-sans); font-weight: 700; }
+.local-auth-option small { display: block; margin-top: 1px; color: var(--text-3); font: 11px var(--font-sans); }
+.local-auth-result { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: rgba(255,255,255,0.03); }
+.local-auth-result svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.local-auth-result b { display: block; color: var(--text); font: 13px var(--font-sans); font-weight: 800; }
+.local-auth-result p { margin: 2px 0 0; color: var(--text-2); font: 12px/1.45 var(--font-sans); }
+.local-auth-result code { display: inline-block; margin-top: 5px; color: var(--text-4); font: 10.5px var(--font-mono); }
+.local-auth-result.success { color: var(--copper-hi); border-color: rgba(132,160,145,0.4); background: rgba(53,76,58,0.14); }
+.local-auth-result.failed { color: var(--terra-hi); border-color: rgba(216,139,106,0.42); background: rgba(91,40,34,0.14); }
+.local-auth-result.neutral { color: var(--text-3); }
+.local-auth-layer .kota-confirm-actions button:disabled { opacity: 0.44; cursor: default; }
+.local-auth-layer .kota-confirm-actions button.local-auth-done { color: var(--copper-hi); border-color: rgba(132,160,145,0.42); background: rgba(132,160,145,0.12); }
+.local-auth-signout-users { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -2px 0 10px; color: var(--text-2); font: 12px var(--font-sans); }
+.local-auth-signout-users b { padding: 1px 8px; border: 1px solid rgba(218,214,204,0.22); border-radius: 999px; background: rgba(0,0,0,0.2); color: var(--text); font-weight: 700; }
+
+@media (prefers-reduced-motion: reduce) {
+  .local-auth-spinner { animation: none; }
+  .tavern-local-auth.is-landing,
+  .local-auth-jev.is-landing { animation: none; box-shadow: 0 0 0 1px rgba(242,198,126,0.75); }
+  .local-auth-more summary::before { transition: none; }
+}
+
+@media (max-width: 780px) {
+  .local-auth-grid, .local-auth-jev-grid { grid-template-columns: 1fr; }
+}

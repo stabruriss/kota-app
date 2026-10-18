@@ -37,6 +37,16 @@ import iconSkills from '../assets/tavern/icons/skills.svg';
 import iconTurns from '../assets/tavern/icons/turns.svg';
 import { skillLoomEntries } from '../lib/account-skills';
 import { ShellComboBox, uniqueShellComboOptions, type ShellComboOption } from './ShellComboBox';
+import { LocalModelCredit, localModelProvider, localModelOptionCredit } from './LocalModelCredit';
+import { KOTA_LOCAL_ENABLED } from '../lib/local-rpc';
+import { onLocalConfiguration, localConfigurationSaveFailure } from '../lib/local-configuration';
+
+import { catalogModel, linkedCatalogProviders, localThinkingForModel, requestKotaLocalLink } from '../lib/local-auth';
+import { useTavernLocal } from '../lib/tavern-local';
+import { localModelLabel, localModelOption } from '../lib/local-magpie';
+import { useJevSettings } from '../lib/jev';
+import { AUTO_ROUTE_MODEL, stringDraftComplete, stringGroupToDraft, stringErrorText, type AutoRouteGroup } from '../lib/string-routing';
+import { StringLocalModelPicker } from './StringLocalModelPicker';
 
 type ProjectAgentModelCache = Record<string, {
   updatedAt: number;
@@ -46,6 +56,7 @@ type ProjectAgentModelCache = Record<string, {
 const SHELL_PROVIDERS = [
   ['claude', 'Claude Code'], ['codex', 'Codex'], ['antigravity', 'Antigravity'],
   ['opencode', 'OpenCode'], ['pi', 'Pi'], ['kimi', 'Kimi Code'],
+  ...(KOTA_LOCAL_ENABLED ? [['kota-local', 'Kota Local']] as const : []),
 ] as const;
 
 const PROJECT_AGENT_MODEL_CACHE_KEY = 'kota-v2.project-agent.model-catalog-cache.v2';
@@ -55,7 +66,7 @@ interface ProjectAgentProfileOverlayProps {
   projectRoot?: string | null;
   existingNames: ReadonlyArray<{ id: AgentId; name: string }>;
   onClose: () => void;
-  onSaved: (detail: ProjectAgentDetail) => void;
+  onSaved: (detail: ProjectAgentDetail, previousProvider: string) => void;
   onRemoveFromProject: (detail: ProjectAgentDetail) => void | Promise<void>;
 }
 
@@ -72,6 +83,8 @@ export function ProjectAgentProfileOverlay({
   const [provider, setProvider] = useState('');
   const [model, setModel] = useState('');
   const [effort, setEffort] = useState('');
+  const [autoRoute, setAutoRoute] = useState<AutoRouteGroup | null>(null);
+  const [stringValid, setStringValid] = useState(true);
   const [shellStatuses, setShellStatuses] = useState<SupportedShellStatus[]>([]);
   const [modelCache, setModelCache] = useState<ProjectAgentModelCache>(() => loadProjectAgentModelCache());
   const [modelRefreshBusy, setModelRefreshBusy] = useState<string | null>(null);
@@ -88,6 +101,30 @@ export function ProjectAgentProfileOverlay({
   const [notice, setNotice] = useState<string | null>(null);
   const inviteInFlight = useRef(false);
   const saveInFlight = useRef(false);
+  const [reload, setReload] = useState(0);
+  const shellEditingNow = useRef(shellEditing); shellEditingNow.current = shellEditing;
+  const shellReadSerial = useRef(0);
+  const acceptSavedShell = useCallback((next: ProjectAgentDetail) => {
+    setDetail(current => current ? { ...current, provider: next.provider, model: next.model,
+      effort: next.effort, autoRoute: next.autoRoute, shellRevision: next.shellRevision } : current);
+    setProvider(next.provider); setModel(next.model); setEffort(next.effort ?? '');
+    setAutoRoute(next.autoRoute ?? null); setStringValid(true);
+  }, []);
+  useEffect(() => {
+    if (!projectRoot || detail?.provider !== 'kota-local') return;
+    let disposed = false;
+    let off: (() => void) | undefined;
+    void onLocalConfiguration(projectRoot, agentId, () => {
+      if (disposed || shellEditingNow.current || saveInFlight.current) return;
+      const serial = ++shellReadSerial.current;
+      void loadProjectAgentDetail({ projectRoot, agentId }, { readOnly: true }).then(next => {
+        if (!disposed && serial === shellReadSerial.current && !shellEditingNow.current && !saveInFlight.current) acceptSavedShell(next);
+      }).catch(() => {
+        if (!disposed && serial === shellReadSerial.current && !shellEditingNow.current && !saveInFlight.current) setError('Could not refresh saved settings. Reopen this profile.');
+      });
+    }).then(unsubscribe => { if (disposed) unsubscribe(); else off = unsubscribe; }).catch(() => {});
+    return () => { disposed = true; ++shellReadSerial.current; off?.(); };
+  }, [projectRoot, agentId, detail?.provider, acceptSavedShell]);
 
   useEffect(() => {
     let cancelled = false;
@@ -109,6 +146,7 @@ export function ProjectAgentProfileOverlay({
         setProvider(next.provider);
         setModel(next.model);
         setEffort(next.effort ?? '');
+        setAutoRoute(next.autoRoute ?? null); setStringValid(true);
         setAvatarId(next.avatarId ?? null);
         setSkills(next.skills);
         setGhost(next.ghost);
@@ -123,7 +161,7 @@ export function ProjectAgentProfileOverlay({
     return () => {
       cancelled = true;
     };
-  }, [agentId, projectRoot]);
+  }, [agentId, projectRoot, reload]);
 
   const editedDisplayName = nameEditing ? composeProjectAgentName(nameDraft) : displayName;
   const skillEntries = skillLoomEntries(accountSkills, skills);
@@ -140,20 +178,49 @@ export function ProjectAgentProfileOverlay({
     if (!detail) return null;
     return shellStatuses.find((status) => status.id === provider) ?? null;
   }, [detail, provider, shellStatuses]);
+  const editingLocal = provider === 'kota-local';
+  const local = useTavernLocal(editingLocal && (shellEditing || model === AUTO_ROUTE_MODEL));
+  const jev = useJevSettings(editingLocal && shellEditing);
+  const automatic = editingLocal && model === AUTO_ROUTE_MODEL;
   const modelCacheEntry = detail ? modelCache[provider] : undefined;
-  const modelOptions = useMemo(() => projectAgentModelOptions(
+  const localModels = linkedCatalogProviders(local.catalog.loading || local.catalog.failed ? null : local.catalog.data)
+    .flatMap(provider => provider.models.map(model => localModelOption(provider.providerId, model.modelId, model.name)));
+  const slash = model.indexOf('/');
+  const localModel = catalogModel(local.catalog.data, model.slice(0, slash), model.slice(slash + 1));
+  const terminalModelOptions = useMemo(() => projectAgentModelOptions(
     providerStatus?.modelOptions ?? [],
     modelCacheEntry?.models ?? [],
     model,
   ), [model, modelCacheEntry?.models, providerStatus?.modelOptions]);
-  const effortOptions = useMemo(() => projectAgentEffortOptions(
+  const terminalEffortOptions = useMemo(() => projectAgentEffortOptions(
     providerStatus?.effortOptions ?? [],
     effort,
   ), [effort, providerStatus?.effortOptions]);
-  const modelCatalogStatus = detail
-    ? projectAgentModelCatalogStatus(providerStatus?.modelOptions?.length ?? 0, modelCacheEntry)
-    : '';
-  const modelRefreshing = !!detail && modelRefreshBusy === provider;
+  const modelOptions = editingLocal ? localModels : terminalModelOptions;
+  const effortOptions = editingLocal ? (localModel?.thinkingLevels ?? []).map(level => ({ id: level, label: level, source: 'provider' })) : terminalEffortOptions;
+  const modelCatalogStatus = editingLocal ? local.catalog.failed ? 'Model catalog unavailable'
+    : model.startsWith('magpie/') && !localModels.some(option => option.id === model) ? 'Magpie model unavailable'
+    : `${localModels.length} ${localModels.length === 1 ? 'model' : 'models'} from signed-in providers` : detail
+    ? projectAgentModelCatalogStatus(providerStatus?.modelOptions?.length ?? 0, modelCacheEntry) : '';
+  const modelRefreshing = editingLocal ? local.catalog.loading : !!detail && modelRefreshBusy === provider;
+  const localSelectionReady = automatic ? stringValid && !!jev.settings?.ready && !jev.loading && !jev.failed
+    && !!autoRoute && stringDraftComplete(stringGroupToDraft(autoRoute))
+    : !local.catalog.loading && !local.catalog.failed
+      && localModels.some(option => option.id === model.trim()) && !!localModel?.thinkingLevels.includes(effort);
+  const localMissingModel = editingLocal && (!model.trim() || model.trim().toLowerCase() === 'default');
+  useEffect(() => {
+    if (shellEditing && editingLocal && localModel && !localModel.thinkingLevels.includes(effort)) {
+      setEffort(localThinkingForModel(localModel.thinkingLevels, effort));
+    }
+  }, [shellEditing, editingLocal, localModel, effort]);
+  const selectModel = (value: string) => {
+    setModel(value); setStringValid(true);
+    if (editingLocal) {
+      const slash = value.indexOf('/');
+      const selected = catalogModel(local.catalog.data, value.slice(0, slash), value.slice(slash + 1));
+      if (selected) setEffort(localThinkingForModel(selected.thinkingLevels, effort));
+    }
+  };
 
   const setSkillActive = (skillId: string, active: boolean) => {
     const selected = skills.includes(skillId);
@@ -202,18 +269,23 @@ export function ProjectAgentProfileOverlay({
     if (!shellEditing) {
       if (detail) {
         setProvider(detail.provider);
-        setModel(detail.model);
-        setEffort(detail.effort ?? '');
+        const selected = detail.provider === 'kota-local' && detail.model.trim().toLowerCase() === 'default' ? '' : detail.model;
+        setModel(selected);
+        setAutoRoute(detail.autoRoute ?? null); setStringValid(true);
+        const slash = selected.indexOf('/');
+        const localModel = catalogModel(local.catalog.data, selected.slice(0, slash), selected.slice(slash + 1));
+        setEffort(detail.provider === 'kota-local' ? selected === AUTO_ROUTE_MODEL ? 'off' : localModel ? localThinkingForModel(localModel.thinkingLevels, detail.effort) : detail.effort ?? '' : detail.effort ?? '');
       }
       setShellEditing(true);
       setNotice(null);
       setError(null);
       return;
     }
-    if (!detail || modelRefreshing) return;
+    if (!detail || (!automatic && modelRefreshing) || (editingLocal && !localSelectionReady)) return;
     const nextModel = model.trim() || 'default';
     const nextEffort = effort.trim();
-    const saved = await save({ provider, model: nextModel, effort: nextEffort || null });
+    const saved = await save({ provider, model: nextModel, effort: automatic ? 'off' : nextEffort || null,
+      ...(automatic ? { autoRoute } : {}) });
     if (saved) {
       setShellEditing(false);
     }
@@ -229,6 +301,7 @@ export function ProjectAgentProfileOverlay({
     skills?: string[];
     model?: string;
     effort?: string | null;
+    autoRoute?: AutoRouteGroup | null;
   } = {}): Promise<boolean> => {
     if (!detail || saveInFlight.current) return false;
     const nextProvider = patch.provider ?? detail.provider;
@@ -248,12 +321,16 @@ export function ProjectAgentProfileOverlay({
       !projectAgentNameFieldsEqual(nextNameFields, currentNameFields);
     const modelChanged = detail.model !== nextModel;
     const effortChanged = (detail.effort ?? '') !== nextEffort;
+    const nextAutoRoute = patch.autoRoute !== undefined ? patch.autoRoute : detail.autoRoute;
+    const routeChanged = nextProvider === 'kota-local' && nextModel === AUTO_ROUTE_MODEL
+      && JSON.stringify(nextAutoRoute) !== JSON.stringify(detail.autoRoute);
     const changedNext =
       nextProvider !== detail.provider ||
       nameChanged ||
       nameFieldsChanged ||
       modelChanged ||
       effortChanged ||
+      routeChanged ||
       detail.ghost !== nextGhost ||
       (detail.avatarId ?? null) !== (nextAvatarId ?? null) ||
       detail.skills.join('\n') !== nextSkills.join('\n');
@@ -272,8 +349,10 @@ export function ProjectAgentProfileOverlay({
         displayName: nextDisplayName,
         nameFields: nextNameFields,
         provider: nextProvider,
+        shellRevision: detail.shellRevision,
         model: nextModel,
         effort: nextEffort || null,
+        ...(nextProvider === 'kota-local' && nextModel === AUTO_ROUTE_MODEL ? { autoRoute: nextAutoRoute } : {}),
         avatarId: nextAvatarId,
         skills: nextSkills,
         ghost: nextGhost,
@@ -286,18 +365,28 @@ export function ProjectAgentProfileOverlay({
       if (patch.provider !== undefined) setProvider(next.provider);
       if (patch.model !== undefined) setModel(next.model);
       if (patch.effort !== undefined) setEffort(next.effort ?? '');
+      if (patch.model !== undefined || patch.autoRoute !== undefined) { setAutoRoute(next.autoRoute ?? null); setStringValid(true); }
       setAvatarId(next.avatarId ?? null);
       setSkills((current) => (patch.skills !== undefined ? next.skills : current));
       setGhost(next.ghost);
-      onSaved(next);
-      setNotice('Saved');
+      onSaved(next, detail.provider);
+      setNotice(next.appliedToSession === true ? 'Saved and applied to the running session.'
+        : next.appliedToSession === false ? 'Saved. Applies on next launch.' : 'Saved');
       if (patch.closeGhost) setGhostExpanded(false);
       if (patch.skills !== undefined) {
         window.dispatchEvent(new Event('kota:file-tree-refresh'));
       }
       return true;
     } catch (err) {
-      setError(String(err));
+      const failure = localConfigurationSaveFailure(err);
+      let refreshFailed = false;
+      if (failure?.reload) {
+        try { acceptSavedShell(await loadProjectAgentDetail({ projectRoot, agentId }, { readOnly: true })); }
+        catch { refreshFailed = true; }
+      }
+      setError(failure ? `${failure.message}${refreshFailed ? ' Could not reload saved settings. Reopen this profile.' : ''}`
+        : String(err) === 'local_config_changed' ? 'Settings changed outside this editor. Reload before saving.'
+        : nextProvider === 'kota-local' && nextModel === AUTO_ROUTE_MODEL ? stringErrorText(err) : String(err));
       return false;
     } finally {
       saveInFlight.current = false;
@@ -435,8 +524,9 @@ export function ProjectAgentProfileOverlay({
                       onChange={(event) => {
                         const next = event.target.value;
                         setProvider(next);
-                        setModel(next === detail?.provider ? detail.model : 'default');
+                        setModel(next === 'kota-local' ? next === detail?.provider && detail.model.toLowerCase() !== 'default' ? detail.model : '' : next === detail?.provider ? detail.model : 'default');
                         setEffort(next === detail?.provider ? detail.effort ?? '' : '');
+                        setStringValid(true);
                       }}>
                       {SHELL_PROVIDERS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
                     </select>
@@ -447,40 +537,60 @@ export function ProjectAgentProfileOverlay({
                 <div className="project-agent-shell-edit-fields">
                   <div className="tavern-profile-field">
                     <span>Model</span>
-                    <ShellComboBox
+                    {editingLocal ? <>
+                      <StringLocalModelPicker key={`${agentId}:${projectRoot}`} ownerKey={`${agentId}:${projectRoot}`} owner={displayName} surface="profile"
+                        applySource={{ projectRoot: projectRoot ?? undefined, agentId }}
+                        ruleFile={projectRoot ? { projectRoot, agentId, kind: 'string' } : undefined} ruleFileDirty={JSON.stringify(autoRoute) !== JSON.stringify(detail?.autoRoute ?? null)}
+                        model={model} group={autoRoute} catalog={local.catalog.data} jev={jev} disabled={!detail || busy != null}
+                        onSelect={choice => selectModel(`${choice.providerId}/${choice.modelId}`)}
+                        onAutoRouteChange={group => { setAutoRoute(group); setModel(AUTO_ROUTE_MODEL); setEffort('off'); }}
+                        onValidityChange={setStringValid} onOpen={() => void local.openModels()}
+                        onJevSettings={() => requestKotaLocalLink('puppeteer-jev')} />
+                      {local.catalog.failed && <button type="button" className="local-model-text" onClick={() => void local.catalog.refresh()}>Update model list</button>}
+                      {!automatic && <small role="status">{modelRefreshing ? 'Fetching model IDs...' : modelCatalogStatus}</small>}
+                    </> : <ShellComboBox
                       value={model}
                       options={modelOptions}
-                      placeholder="Exact model ID"
+                      optionSuffix={editingLocal ? localModelOptionCredit : undefined}
+                      placeholder={editingLocal ? 'Choose a model' : 'Exact model ID'}
                       disabled={!detail || busy != null}
                       status={modelRefreshing ? 'Fetching model IDs...' : modelCatalogStatus}
                       refreshing={modelRefreshing}
-                      onChange={setModel}
-                      onRefresh={() => void refreshModelCatalog()}
-                    />
+                      onChange={selectModel}
+                      onOpen={editingLocal ? () => void local.openModels() : undefined}
+                      onRefresh={() => void (editingLocal ? local.catalog.refresh() : refreshModelCatalog())}
+                    />}
                   </div>
                   <div className="tavern-profile-field">
-                    <span>Effort</span>
-                    <ShellComboBox
-                      value={effort}
+                    <span>{editingLocal ? 'Thinking' : 'Effort'}</span>
+                    {editingLocal ? <select aria-label="Thinking" value={automatic ? 'off' : effort}
+                      disabled={!detail || busy != null || automatic || !localModel || local.catalog.loading || local.catalog.failed}
+                      onChange={event => setEffort(event.target.value)}>
+                      {automatic ? <option value="off">By Auto String</option> : <>
+                        {!localModel?.thinkingLevels.includes(effort) && <option value={effort}>{localModel ? effort : 'Choose a model first'}</option>}
+                        {localModel?.thinkingLevels.map(level => <option key={level} value={level}>{level}</option>)}
+                      </>}
+                    </select> : <ShellComboBox
+                      value={editingLocal && !localModel ? '' : effort}
                       options={effortOptions}
-                      placeholder="default"
-                      disabled={!detail || busy != null}
+                      placeholder={editingLocal ? localModel ? '' : 'Choose a model first' : 'default'}
+                      disabled={!detail || busy != null || (editingLocal && (!localModel || local.catalog.loading || local.catalog.failed))}
                       onChange={setEffort}
-                    />
+                    />}
                   </div>
                 </div>
               ) : (
                 <div className="project-agent-shell-summary" aria-label="Current SHELL settings">
-                  <code title={model || 'default'}>{model || 'default'}</code>
-                  <code title={effort || 'default'}>{effort || 'default'}</code>
+                  <code title={model || 'default'}>{automatic ? 'Auto String' : editingLocal && model.startsWith('magpie/') ? localModelLabel('magpie', model.slice(7), localModel?.name) : model || 'default'}{editingLocal && !automatic && <LocalModelCredit providerId={localModelProvider(model)} />}</code>
+                  <code title={effort || 'default'}>{automatic ? 'By Auto String' : effort || 'default'}</code>
                 </div>
               )}
             </div>
             {shellEditing && (
-              <div className="project-agent-shell-apply-note">Apply on Next Launch</div>
+              <div className="project-agent-shell-apply-note">{editingLocal && !stringValid ? 'Finish the Auto String configuration before saving.' : localMissingModel ? 'Choose a model before saving.' : editingLocal ? 'Save applies to a running Local session, or to its next launch.' : 'Apply on Next Launch'}</div>
             )}
             <div className="tavern-profile-actions">
-              <button type="button" onClick={() => void toggleShellEdit()} disabled={!detail || busy != null}>
+              <button type="button" onClick={() => void toggleShellEdit()} disabled={!detail || busy != null || (shellEditing && editingLocal && !localSelectionReady)}>
                 {shellEditing ? 'Save SHELL' : 'Edit SHELL'}
               </button>
             </div>
@@ -643,6 +753,7 @@ export function ProjectAgentProfileOverlay({
         {(busy || error || notice) && (
           <div className={`tavern-status ${error ? 'error' : ''}`}>
             {error ?? notice ?? (busy ? `Working: ${busy}` : null)}
+            {error === 'Settings changed outside this editor. Reload before saving.' && <button type="button" disabled={busy != null} onClick={() => setReload(value => value + 1)}>Reload</button>}
           </div>
         )}
       </div>
@@ -689,6 +800,7 @@ function inviteButtonLabel(detail: ProjectAgentDetail | null, busy: string | nul
 
 function projectAgentShellProviderMeta(detail: ProjectAgentDetail | null): { label: string; className: string } {
   const provider = (detail?.provider || detail?.cli || 'provider').trim().toLowerCase();
+  if (provider === 'kota-local') return { label: 'Kota Local', className: 'provider-kota-local' };
   if (['claude', 'claude-code', 'claude_code'].includes(provider)) {
     return { label: 'Claude Code', className: 'provider-claude' };
   }

@@ -1,4 +1,4 @@
-import type { ComposerTemporalGap } from '../pty-client';
+import type { ComposerTemporalGap, SoulInput } from '../pty-client';
 
 export const VIOLET_COMPOSER_SENT_EVENT = 'kota:violet-composer-sent';
 export const VIOLET_COMPOSER_DELIVERY_EVENT = 'kota:violet-composer-delivery';
@@ -16,6 +16,9 @@ export interface VioletComposerSentDetail {
   privacy: boolean;
   temporalGap?: ComposerTemporalGap | null;
   delivery?: Omit<VioletComposerDeliveryDetail, 'id'>;
+  messageOrigin?: 'puppeteer';
+  /** Kept so a same-ID Dance Retry reuses the host's first marks/Dreams choice. */
+  soulInput?: SoulInput;
 }
 
 export interface VioletComposerDeliveryDetail {
@@ -42,17 +45,17 @@ export function __clearVioletComposerSentHistoryForTests() {
 }
 
 export function emitVioletComposerSent(
-  detail: Omit<VioletComposerSentDetail, 'id' | 'timestamp'>,
+  detail: Omit<VioletComposerSentDetail, 'id' | 'timestamp'> & { id?: string; timestamp?: string },
 ): VioletComposerSentDetail | null {
   if (typeof window === 'undefined') return null;
-  const id = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+  const id = detail.id ?? (typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
-    : `violet-local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    : `violet-local-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const next: VioletComposerSentDetail = {
     ...detail,
     projectRoot: normalizeProjectRoot(detail.projectRoot),
     id,
-    timestamp: new Date().toISOString(),
+    timestamp: detail.timestamp ?? new Date().toISOString(),
   };
   VIOLET_COMPOSER_SENT_HISTORY.push(next);
   if (VIOLET_COMPOSER_SENT_HISTORY.length > VIOLET_COMPOSER_SENT_HISTORY_LIMIT) {

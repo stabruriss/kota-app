@@ -6,6 +6,7 @@ import {
   githubListRepos,
   ghAuthStatus,
   listWorkspaceProjects,
+  openExternalUrl,
   openWorkspaceProject,
   prepareGithubProject,
   type GhAuthInfo,
@@ -118,7 +119,7 @@ export function ProjectSetupModal({
     const status = await ghAuthStatus();
     setGhAuth(status);
     if (status.cliMissing) {
-      window.open(GITHUB_CLI_INSTALL_URL, '_blank', 'noopener,noreferrer');
+      void openExternalUrl(GITHUB_CLI_INSTALL_URL).catch(() => {});
       return;
     }
     window.dispatchEvent(new CustomEvent('kota:smart-run', {

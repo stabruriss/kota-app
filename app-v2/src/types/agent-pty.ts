@@ -76,9 +76,10 @@ export function linesToGridSnapshot(
 
 /** Which CLI the spawned process is. Hero shell decides this; incarnation
  *  cannot change shell (per I-20.2). */
-export type AgentCli = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'pi' | 'kimi';
+export type AgentCli = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'pi' | 'kimi' | 'kota-local';
 
 export function isAgentCli(value: unknown): value is AgentCli {
+  if (value === 'kota-local') return true;
   return value === 'claude'
     || value === 'codex'
     || value === 'antigravity'

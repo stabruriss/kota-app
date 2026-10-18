@@ -1,0 +1,115 @@
+/* Kota Local (M1 D3): a message whose delivery a Local runtime still owns shows
+   a queue icon outside the bubble, in the delivery-clock gutter (v5 mock).
+   Messages without Local pending targets never get these classes. */
+
+.violet-msg.user.local-pending {
+  grid-template-columns: 22px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: center;
+}
+
+.violet-msg.user.local-pending .violet-msg-content {
+  grid-column: 2;
+}
+
+.violet-msg.agent.local-pending {
+  grid-template-columns: 38px 22px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: center;
+}
+
+.violet-msg.agent.local-pending .violet-msg-content {
+  grid-column: 3;
+}
+
+.violet-msg-local-gutter {
+  grid-column: 1;
+  align-self: center;
+  justify-self: end;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 21px;
+}
+
+.violet-msg.agent.local-pending .violet-msg-local-gutter {
+  grid-column: 2;
+  justify-self: center;
+  margin-top: 0;
+}
+
+/* A terminal target's retry clock keeps its look; the gutter carries the offset. */
+.violet-msg-local-gutter > .violet-msg-retry-send {
+  margin-top: 0;
+}
+
+.violet-msg-local-queue {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: rgba(222, 205, 166, 0.56);
+  background: transparent;
+}
+
+button.violet-msg-local-queue {
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+button.violet-msg-local-queue:hover,
+button.violet-msg-local-queue:focus-visible {
+  color: rgba(234, 216, 170, 0.9);
+  background: rgba(222, 205, 166, 0.05);
+}
+
+button.violet-msg-local-queue:focus-visible {
+  outline: 1px solid rgba(222, 205, 166, 0.4);
+  outline-offset: 2px;
+}
+
+.violet-msg-local-queue svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.violet-msg-local-queue-tip {
+  display: none;
+  position: absolute;
+  left: 0;
+  bottom: 28px;
+  z-index: 8;
+  white-space: nowrap;
+  padding: 6px 9px;
+  border: 1px solid #736b56;
+  border-radius: 5px;
+  background: #343127;
+  color: var(--text);
+  font: 10px var(--font-sans);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.53);
+  pointer-events: none;
+}
+
+.violet-msg-local-queue:hover .violet-msg-local-queue-tip,
+.violet-msg-local-queue:focus-visible .violet-msg-local-queue-tip {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button.violet-msg-local-queue {
+    transition: none;
+  }
+}

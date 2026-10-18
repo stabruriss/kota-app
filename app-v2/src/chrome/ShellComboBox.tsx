@@ -10,12 +10,14 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from 'react';
 
 export type ShellComboOption = {
   id: string;
   label: string;
   source?: string;
+  displayLabel?: string;
 };
 
 const SHELL_COMBO_LIMIT = 12;
@@ -29,6 +31,10 @@ export function ShellComboBox({
   refreshing,
   onChange,
   onRefresh,
+  onOpen,
+  menuFooter,
+  optionSuffix,
+  selectOnly = false,
 }: {
   value: string;
   options: ShellComboOption[];
@@ -38,13 +44,20 @@ export function ShellComboBox({
   refreshing?: boolean;
   onChange: (value: string) => void;
   onRefresh?: () => void;
+  onOpen?: () => void;
+  menuFooter?: ReactNode;
+  optionSuffix?: (option: ShellComboOption) => ReactNode;
+  /** A fixed choice (Local thinking levels): no typing, and the menu always lists every option. */
+  selectOnly?: boolean;
 }) {
   const reactId = useId();
   const listboxId = `${reactId}-listbox`;
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
+  const opened = useRef(onOpen); opened.current = onOpen;
+  useEffect(() => { if (open) opened.current?.(); }, [open]);
   const [activeIndex, setActiveIndex] = useState(0);
-  const matches = useMemo(() => shellComboMatches(value, options), [options, value]);
+  const matches = useMemo(() => selectOnly ? options : shellComboMatches(value, options), [options, selectOnly, value]);
   const clampedActiveIndex = Math.min(activeIndex, Math.max(matches.length - 1, 0));
   const activeOption = matches[clampedActiveIndex];
 
@@ -59,9 +72,11 @@ export function ShellComboBox({
     return () => document.removeEventListener('pointerdown', onPointerDown, true);
   }, [open]);
 
+  // A fixed choice opens on the current value; a free-text search starts at the best match.
+  const selectedIndex = selectOnly ? Math.max(0, matches.findIndex((option) => option.id === value)) : 0;
   useEffect(() => {
-    setActiveIndex(0);
-  }, [matches.length, value]);
+    setActiveIndex(selectedIndex);
+  }, [matches.length, selectedIndex, value]);
 
   const chooseOption = (option: ShellComboOption) => {
     onChange(option.id);
@@ -103,46 +118,52 @@ export function ShellComboBox({
     >
       <div className="project-agent-combo-input-row">
         <input
-          value={value}
+          value={!open ? options.find(option => option.id === value)?.displayLabel || value : value}
           placeholder={placeholder}
           disabled={disabled}
+          readOnly={selectOnly}
           role="combobox"
           aria-expanded={open}
-          aria-autocomplete="list"
+          aria-autocomplete={selectOnly ? 'none' : 'list'}
           aria-controls={open && matches.length > 0 ? listboxId : undefined}
           aria-activedescendant={open && activeOption ? `${listboxId}-option-${clampedActiveIndex}` : undefined}
           onFocus={() => setOpen(true)}
+          onClick={onOpen || selectOnly ? () => setOpen(true) : undefined}
           onChange={(event) => {
             onChange(event.currentTarget.value);
             setOpen(true);
           }}
           onKeyDown={onKeyDown}
         />
-        {open && matches.length > 0 && (
-          <div className="project-agent-combo-menu" id={listboxId} role="listbox">
-            {matches.map((option, index) => (
-              <button
-                type="button"
-                key={`${option.id}:${option.source ?? ''}`}
-                id={`${listboxId}-option-${index}`}
-                className={`project-agent-combo-option ${index === clampedActiveIndex ? 'active' : ''}`}
-                onMouseDown={(event) => event.preventDefault()}
-                onMouseEnter={() => setActiveIndex(index)}
-                onClick={() => chooseOption(option)}
-                role="option"
-                aria-selected={index === clampedActiveIndex}
-                title={option.id}
-              >
-                <span className="project-agent-combo-option-main">
-                  <b>{option.id}</b>
-                </span>
-                {option.source && (
-                  <span className="project-agent-combo-source" title={shellComboSourceLabel(option.source)}>
-                    {shellComboSourceLabel(option.source)}
+        {open && (matches.length > 0 || menuFooter) && (
+          <div className="project-agent-combo-menu">
+            <div id={listboxId} role="listbox">
+              {matches.map((option, index) => (
+                <button
+                  type="button"
+                  key={`${option.id}:${option.source ?? ''}`}
+                  id={`${listboxId}-option-${index}`}
+                  className={`project-agent-combo-option ${index === clampedActiveIndex ? 'active' : ''}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setActiveIndex(index)}
+                  onClick={() => chooseOption(option)}
+                  role="option"
+                  aria-selected={index === clampedActiveIndex}
+                  title={option.id}
+                >
+                  <span className="project-agent-combo-option-main">
+                    <b>{option.displayLabel || option.id}</b>
+                    {optionSuffix?.(option)}
                   </span>
-                )}
-              </button>
-            ))}
+                  {option.source && (
+                    <span className="project-agent-combo-source" title={shellComboSourceLabel(option.source)}>
+                      {shellComboSourceLabel(option.source)}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+            {menuFooter}
           </div>
         )}
       </div>
@@ -179,6 +200,7 @@ export function uniqueShellComboOptions(
       id,
       label: option?.label?.trim() || id,
       source: option?.source?.trim() || undefined,
+      ...(option?.displayLabel ? { displayLabel: option.displayLabel } : {}),
     });
   }
   return Array.from(options.values());

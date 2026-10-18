@@ -8,6 +8,7 @@ dist/
 
 src-tauri/target/
 src-tauri/bin/
+src-tauri/pi-runtime/
 src-tauri/gen/schemas/
 
 # Vitest coverage output

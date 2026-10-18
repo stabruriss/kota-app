@@ -14,8 +14,12 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 use crate::integrations::IntegrationManager;
+use crate::message_origin::MessageOrigin;
 use crate::pty::{agent::AgentSpawnRequest, PtyManager};
 use crate::violet::{self, ActorMessageRecord};
+
+#[path = "local_rpc/actor.rs"]
+mod local;
 
 const BRACKETED_PASTE_START: &str = "\x1b[200~";
 const BRACKETED_PASTE_END: &str = "\x1b[201~";
@@ -28,6 +32,7 @@ pub struct AgentBusManager {
     delivered_keys: Mutex<HashSet<String>>,
     dispatch_watchers: Mutex<HashMap<PathBuf, AgentBusDispatchWatch>>,
     actor_message_log: Mutex<()>,
+    dispatch_processing: Mutex<()>,
 }
 
 struct AgentBusDispatchWatch {
@@ -47,7 +52,9 @@ pub struct ActorMessage {
     pub dedupe_key: Option<String>,
     pub launch_request: Option<AgentSpawnRequest>,
     pub terminal_timing: Option<AgentBusTerminalTiming>,
-    pub temporal_gap_eligible: bool,
+    pub origin: MessageOrigin,
+    /// Host-only: the Telegram text/caption before media paths, for Soul eligibility.
+    pub soul_eligibility: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -108,6 +115,9 @@ pub struct AgentBusSendRequest {
     pub dedupe_key: Option<String>,
     #[serde(default)]
     pub terminal_timing: Option<AgentBusTerminalTiming>,
+    /// Set only by the Telegram bridge in Rust; never read from IPC.
+    #[serde(skip)]
+    pub soul_eligibility: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -223,8 +233,7 @@ impl AgentBusManager {
             .filter(|value| !value.is_empty())
             .unwrap_or("message")
             .to_string();
-        let temporal_gap_eligible =
-            actor_uses_temporal_gap(sender.is_some(), &sender_agent_id, &intent);
+        let origin = MessageOrigin::for_actor(sender.is_some(), &sender_agent_id, &intent);
         let terminal_timing =
             normalize_terminal_timing(&sender_agent_id, &intent, request.terminal_timing)?;
         let delivery = self.send_actor_message(
@@ -241,7 +250,8 @@ impl AgentBusManager {
                 dedupe_key: Some(dedupe_key),
                 launch_request,
                 terminal_timing,
-                temporal_gap_eligible,
+                origin,
+                soul_eligibility: request.soul_eligibility,
             },
         )?;
         Ok(AgentBusSendResult {
@@ -301,8 +311,7 @@ impl AgentBusManager {
             .filter(|value| !value.is_empty())
             .unwrap_or("handoff")
             .to_string();
-        let temporal_gap_eligible =
-            actor_uses_temporal_gap(sender.is_some(), &sender_agent_id, &intent);
+        let origin = MessageOrigin::for_actor(sender.is_some(), &sender_agent_id, &intent);
         let message = ActorMessage {
             project_root: project_root.to_path_buf(),
             actor_id: sender_agent_id,
@@ -314,14 +323,19 @@ impl AgentBusManager {
             dedupe_key: None,
             launch_request,
             terminal_timing: None,
-            temporal_gap_eligible,
+            origin,
+            soul_eligibility: None,
         };
-        let delivery = self.deliver_to_terminal(app, pty, &message);
+        let delivery = if local::applies(pty, &message) {
+            local::retry(app, pty, &message, original_event_id)
+        } else {
+            self.deliver_to_terminal(app, pty, &message)
+        };
         Ok(AgentBusRetryDeliveryResult {
             event_id,
             target_agent_id: target.agent_id,
             submitted: delivery.is_ok(),
-            skipped_reason: delivery.err().map(|err| err.to_string()),
+            skipped_reason: delivery.err().map(|err| crate::violet::ownership::display_error(&err)),
         })
     }
 
@@ -331,7 +345,8 @@ impl AgentBusManager {
         pty: &PtyManager,
         message: ActorMessage,
     ) -> Result<ActorDeliveryResult> {
-        if self.is_duplicate(&message.project_root, message.dedupe_key.as_deref())? {
+        let ownership_retry = ownership_retry_path(&message.project_root, &message.event_id);
+        if self.is_message_duplicate(&message.project_root, &message.event_id, message.dedupe_key.as_deref())? {
             return Ok(ActorDeliveryResult {
                 submitted: false,
                 skipped_reason: None,
@@ -339,7 +354,22 @@ impl AgentBusManager {
             });
         }
 
-        let changed_paths = self.record_actor_message(
+        if !local::applies(pty, &message) {
+            let preflight = pty.agent_check_session(&message.target_agent_id).unwrap_or_else(|| {
+                message.launch_request.as_ref().map_or(Ok(()), |request| {
+                    crate::violet::ownership::check_launch(request)
+                })
+            });
+            if let Err(error) = preflight {
+                if error.is::<crate::violet::ownership::Unavailable>() {
+                    let changed = self.persist_ownership_blocked(&message, false)?;
+                    violet::emit_room_changed(app, &message.project_root, "actor-message", changed);
+                }
+                return Err(error);
+            }
+        }
+
+        let changed_paths = self.record_actor_message_for_delivery(
             &message.project_root,
             &ActorMessageRecord {
                 actor_id: message.actor_id.clone(),
@@ -348,12 +378,18 @@ impl AgentBusManager {
                 target_agent_ids: vec![message.target_agent_id.clone()],
                 event_id: message.event_id.clone(),
                 actor_intent: Some(message.intent.clone()),
+                origin: message.origin,
             },
         )?;
         violet::emit_room_changed(app, &message.project_root, "actor-message", changed_paths);
 
         let delivery = self.deliver_to_terminal(app, pty, &message);
         if let Err(err) = delivery.as_ref() {
+            if err.is::<crate::violet::ownership::Unavailable>() {
+                let changed = self.persist_ownership_blocked(&message, true)?;
+                violet::emit_room_changed(app, &message.project_root, "actor-message", changed);
+                return Err(delivery.unwrap_err());
+            }
             let skipped_text = format!(
                 "{} is not responding. Let's skip this for now.",
                 message.target_agent_id
@@ -368,6 +404,7 @@ impl AgentBusManager {
                     target_agent_ids: vec![message.target_agent_id.clone()],
                     event_id,
                     actor_intent: Some("delivery-skipped".into()),
+                    origin: MessageOrigin::System,
                 },
             )?;
             violet::emit_room_changed(app, &message.project_root, "actor-message", changed_paths);
@@ -383,6 +420,7 @@ impl AgentBusManager {
                 keys.insert(key.to_string());
             }
         }
+        let _ = fs::remove_file(&ownership_retry);
         Ok(ActorDeliveryResult {
             submitted: true,
             skipped_reason: None,
@@ -462,6 +500,40 @@ impl AgentBusManager {
         violet::record_actor_message(project_root, record).map_err(|err| anyhow!(err))
     }
 
+    fn record_actor_message_for_delivery(&self, root: &Path, record: &ActorMessageRecord) -> Result<Vec<PathBuf>> {
+        if read_ownership_retry(&ownership_retry_path(root, &record.event_id))?.is_some_and(|retry| retry.recorded) {
+            return Ok(Vec::new()); // A retry must not add a second time-bucketed room event.
+        }
+        self.record_actor_message(root, record)
+    }
+
+    fn persist_ownership_blocked(&self, message: &ActorMessage, recorded: bool) -> Result<Vec<PathBuf>> {
+        let marker = ownership_retry_path(&message.project_root, &message.event_id);
+        let recorded = recorded || read_ownership_retry(&marker)?.is_some_and(|retry| retry.recorded);
+        mark_ownership_retry(&marker, recorded)?;
+        let notice_id = format!("{}:ownership-blocked", message.event_id);
+        let (_, changed) = self.persist_actor_notice(&message.project_root, ActorMessageRecord {
+            actor_id: message.actor_id.clone(), actor_name: message.actor_name.clone(),
+            target_agent_ids: vec![message.target_agent_id.clone()], event_id: notice_id.clone(),
+            actor_intent: Some("delivery-skipped".into()),
+            origin: MessageOrigin::System,
+            text: format!("Message is pending. {}", crate::violet::ownership::RECOVERY_MESSAGE),
+        }, Some(&notice_id))?;
+        Ok(changed)
+    }
+
+    pub(crate) fn retry_after_terminal_spawn(app: &AppHandle, project_root: &Path) {
+        if !dispatch_ownership_pending_dir(project_root).is_dir() { return; }
+        let app = app.clone();
+        let root = project_root.to_path_buf();
+        thread::spawn(move || {
+            let bus = app.state::<AgentBusManager>();
+            if let Err(error) = bus.process_dispatch_outbox(&app, &root) {
+                crate::kota_debug_log(&format!("[agent-bus] post-start retry: {error}"));
+            }
+        });
+    }
+
     pub fn resolve_target_agent_id(&self, project_root: &Path, target: &str) -> Result<String> {
         Ok(resolve_agent_identity(project_root, target)?.agent_id)
     }
@@ -533,10 +605,19 @@ impl AgentBusManager {
     }
 
     fn process_dispatch_outbox(&self, app: &AppHandle, project_root: &Path) -> Result<()> {
+        self.process_dispatch_outbox_with(project_root, |path| self.process_dispatch_file(app, project_root, path))
+    }
+
+    fn process_dispatch_outbox_with(&self, project_root: &Path, mut process: impl FnMut(&Path) -> Result<AgentBusSendResult>) -> Result<()> {
+        // A spawn notification waits for a concurrent rejection to finish
+        // moving its payload into pending, avoiding a lost retry wake-up.
+        let _guard = self.dispatch_processing.lock().map_err(|_| anyhow!("dispatch processing lock poisoned"))?;
         let outbox = dispatch_outbox_dir(project_root);
         if !outbox.is_dir() {
             return Ok(());
         }
+        let pending = dispatch_ownership_pending_dir(project_root);
+        fs::create_dir_all(&pending)?;
         let processing = dispatch_processing_dir(project_root);
         let delivered = dispatch_delivered_dir(project_root);
         let failed = dispatch_failed_dir(project_root);
@@ -548,6 +629,8 @@ impl AgentBusManager {
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
             .collect::<Vec<_>>();
+        paths.extend(fs::read_dir(&pending)?.filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json")));
         paths.sort();
 
         for path in paths {
@@ -558,13 +641,8 @@ impl AgentBusManager {
             if fs::rename(&path, &processing_path).is_err() {
                 continue;
             }
-            let result = self.process_dispatch_file(app, project_root, &processing_path);
-            let target_dir = if result.is_ok() { &delivered } else { &failed };
-            let target_path = unique_path(target_dir.join(&file_name));
-            let _ = fs::rename(&processing_path, &target_path);
-            if let Err(err) = result {
-                let _ = fs::write(target_path.with_extension("error.txt"), err.to_string());
-            }
+            let result = process(&processing_path);
+            finish_dispatch(project_root, &processing_path, &result)?;
         }
         Ok(())
     }
@@ -611,9 +689,16 @@ impl AgentBusManager {
                 event_id: Some(request.event_id),
                 dedupe_key: Some(request.dedupe_key),
                 terminal_timing: None,
+                soul_eligibility: None,
             },
             launch_request,
         )
+    }
+
+    fn is_message_duplicate(&self, root: &Path, event: &str, key: Option<&str>) -> Result<bool> {
+        if key.is_some_and(|key| self.delivered_keys.lock().is_ok_and(|keys| keys.contains(key))) { return Ok(true); }
+        if ownership_retry_path(root, event).is_file() { return Ok(false); }
+        self.is_duplicate(root, key)
     }
 
     fn is_duplicate(&self, project_root: &Path, key: Option<&str>) -> Result<bool> {
@@ -638,39 +723,61 @@ impl AgentBusManager {
         message: &ActorMessage,
     ) -> Result<()> {
         let now = Local::now();
-        let body = if message.temporal_gap_eligible {
-            app.state::<crate::temporal_context::TemporalContextManager>()
-                .prepare_payload_best_effort(
-                    &message.project_root,
-                    &message.target_agent_id,
-                    &message.text,
-                    now,
-                )
-        } else {
-            message.text.clone()
-        };
+        let body = app.state::<crate::temporal_context::TemporalContextManager>()
+            .prepare_payload_best_effort(
+                message.origin, &message.project_root, &message.target_agent_id, &message.text, now,
+            );
         let payload = render_terminal_message_with_body_at(message, &body, now);
+        if local::applies(pty, message) { return local::deliver(app, pty, message, payload, now, &message.event_id, false); }
         let input = format!("{BRACKETED_PASTE_START}{payload}{BRACKETED_PASTE_END}");
-        match submit_to_agent(app, pty, &message.target_agent_id, &input, &message.intent) {
-            Ok(()) => return Ok(()),
-            Err(first_err) => {
+        let soul = soul_input(message, now);
+        submit_with_resume(
+            || submit_to_agent(app, pty, &message.target_agent_id, &input, &message.intent, soul.clone()),
+            |first_err| {
                 let Some(launch_request) = message.launch_request.clone() else {
                     return Err(first_err);
                 };
                 pty.agent_spawn(app, launch_request)?;
                 thread::sleep(AGENT_BUS_RESUME_GRACE);
-                submit_to_agent(app, pty, &message.target_agent_id, &input, &message.intent)
-            }
-        }
+                Ok(())
+            },
+        )
     }
 }
 
-fn submit_to_agent(app: &AppHandle, pty: &PtyManager, agent_id: &str, input: &str, intent: &str) -> Result<()> {
-    pty.agent_submit_bus_prompt(app, agent_id, input.to_string(), intent)
+fn submit_with_resume(mut submit: impl FnMut() -> Result<()>, resume: impl FnOnce(anyhow::Error) -> Result<()>) -> Result<()> {
+    match submit() {
+        Ok(()) => Ok(()),
+        Err(error) if error.is::<crate::violet::ownership::Unavailable>() => Err(error),
+        Err(error) => { resume(error)?; submit() },
+    }
 }
 
-fn actor_uses_temporal_gap(is_project_agent: bool, actor_id: &str, intent: &str) -> bool {
-    is_project_agent || (actor_id == "laughing-man" && intent == "telegram")
+// Keep the payload file durable and outside the watched outbox while blocked.
+// Existing refreshes retry it; moving it must never create a new timer/queue.
+fn finish_dispatch(root: &Path, processing: &Path, result: &Result<AgentBusSendResult>) -> Result<PathBuf> {
+    let blocked = result.as_ref().err().is_some_and(|e| e.is::<crate::violet::ownership::Unavailable>());
+    let directory = if blocked { dispatch_ownership_pending_dir(root) }
+        else if result.is_ok() { dispatch_delivered_dir(root) } else { dispatch_failed_dir(root) };
+    fs::create_dir_all(&directory)?;
+    let target = unique_path(directory.join(processing.file_name().ok_or_else(|| anyhow!("invalid dispatch path"))?));
+    fs::rename(processing, &target)?;
+    if let Err(error) = result { fs::write(target.with_extension("error.txt"), error.to_string())?; }
+    Ok(target)
+}
+
+fn submit_to_agent(app: &AppHandle, pty: &PtyManager, agent_id: &str, input: &str, intent: &str,
+    soul: Option<crate::soul_push::input::Input>) -> Result<()> {
+    pty.agent_submit_bus_prompt(app, agent_id, input.to_string(), intent, soul)
+}
+
+/// Host-only Soul metadata; only the Telegram bridge supplies eligibility.
+fn soul_input(message: &ActorMessage, now: DateTime<Local>) -> Option<crate::soul_push::input::Input> {
+    Some(crate::soul_push::input::Input {
+        eligibility_text: message.soul_eligibility.clone()?, message_id: message.event_id.clone(),
+        created_at: now.to_rfc3339(), origin: message.origin, original_text: message.text.clone(),
+        target_agent_ids: vec![message.target_agent_id.clone()],
+    })
 }
 
 fn normalize_terminal_timing(
@@ -737,7 +844,7 @@ fn render_terminal_timing_attributes(
     )
 }
 
-fn render_terminal_message_with_body_at(
+pub(crate) fn render_terminal_message_with_body_at(
     message: &ActorMessage,
     body: &str,
     now: DateTime<Local>,
@@ -764,7 +871,7 @@ fn render_terminal_message(message: &ActorMessage) -> String {
     render_terminal_message_at(message, Local::now())
 }
 
-fn escape_attr(value: &str) -> String {
+pub(crate) fn escape_attr(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('"', "&quot;")
@@ -950,6 +1057,31 @@ fn resolve_cli_target_agent_id(project_root: &Path, target: &str) -> Result<Stri
                 "{err}. Use the canonical agent id from the Teammates list, for example `agent-...`"
             )
         })
+}
+
+fn dispatch_ownership_pending_dir(root: &Path) -> PathBuf {
+    root.join("project-memory/.violet/agent-bus/ownership-pending")
+}
+
+fn ownership_retry_path(root: &Path, event_id: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    dispatch_ownership_pending_dir(root).join(format!("{:x}.retry", Sha256::digest(event_id.as_bytes())))
+}
+
+#[derive(Serialize, Deserialize)]
+struct OwnershipRetry { recorded: bool }
+
+fn read_ownership_retry(path: &Path) -> Result<Option<OwnershipRetry>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn mark_ownership_retry(path: &Path, recorded: bool) -> Result<()> {
+    fs::create_dir_all(path.parent().ok_or_else(|| anyhow!("invalid retry path"))?)?;
+    crate::adapter_sync::atomic_replace(path, &serde_json::to_vec(&OwnershipRetry { recorded })?).map_err(|e| anyhow!(e))
 }
 
 fn dispatch_outbox_dir(project_root: &Path) -> PathBuf {
@@ -1243,6 +1375,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_the_telegram_bridge_supplies_soul_metadata_for_its_own_delivery() {
+        let now: DateTime<Local> = DateTime::parse_from_rfc3339("2026-10-16T08:00:00Z").unwrap().into();
+        let mut message = ActorMessage { project_root: "/tmp/kota".into(), actor_id: "laughing-man".into(),
+            actor_name: "Laughing Man".into(), target_agent_id: "agent-target".into(), intent: "telegram".into(),
+            text: "Look at this\n/tmp/kota/project-memory/attachments/composer/att_1_lm/photo.jpg".into(),
+            event_id: "lm-update-7".into(), dedupe_key: None, launch_request: None, terminal_timing: None,
+            origin: MessageOrigin::Telegram, soul_eligibility: None };
+        assert!(soul_input(&message, now).is_none());
+        message.soul_eligibility = Some("Look at this".into());
+        let input = soul_input(&message, now).unwrap();
+        assert_eq!((input.message_id.as_str(), input.eligibility_text.as_str()), ("lm-update-7", "Look at this"));
+        assert!(input.valid_for("agent-target") && input.original_text.ends_with("photo.jpg"));
+    }
+
+    #[test]
     fn structured_bbs_target_cannot_fall_back_to_another_agents_matching_name() {
         let account = crate::agent_directory::tests::Account::new();
         let root = account.project("p", false);
@@ -1272,7 +1419,8 @@ mod tests {
             dedupe_key: None,
             launch_request: None,
             terminal_timing: None,
-            temporal_gap_eligible: false,
+            origin: MessageOrigin::Bartender,
+            soul_eligibility: None,
         };
 
         let text = render_terminal_message(&message);
@@ -1285,17 +1433,13 @@ mod tests {
     }
 
     #[test]
-    fn temporal_gap_is_limited_to_project_agents_and_laughing_man_telegram() {
-        assert!(actor_uses_temporal_gap(true, "agent-a", "custom-intent"));
-        assert!(actor_uses_temporal_gap(false, "laughing-man", "telegram"));
-        assert!(!actor_uses_temporal_gap(false, "laughing-man", "status"));
-        assert!(!actor_uses_temporal_gap(false, "ember", "reminder"));
-        assert!(!actor_uses_temporal_gap(false, "bbs", "bbs-thread"));
-        assert!(!actor_uses_temporal_gap(
-            false,
-            "bartender",
-            "resolve-conflict"
-        ));
+    fn only_telegram_bus_input_passes_the_shared_user_origin_allowlist() {
+        assert!(!MessageOrigin::for_actor(true, "agent-a", "custom-intent").allows_user_context());
+        assert!(MessageOrigin::for_actor(false, "laughing-man", "telegram").allows_user_context());
+        for (actor, intent) in [("laughing-man", "status"), ("ember", "reminder"),
+            ("bbs", "bbs-thread"), ("bartender", "resolve-conflict")] {
+            assert!(!MessageOrigin::for_actor(false, actor, intent).allows_user_context());
+        }
     }
 
     #[test]
@@ -1320,7 +1464,8 @@ mod tests {
             dedupe_key: None,
             launch_request: None,
             terminal_timing: timing,
-            temporal_gap_eligible: false,
+            origin: MessageOrigin::Ember,
+            soul_eligibility: None,
         };
         let now = DateTime::parse_from_rfc3339("2026-08-18T09:00:03-07:00")
             .unwrap()
@@ -1407,6 +1552,7 @@ mod tests {
             target_agent_ids: vec!["__kota_human_telegram__".into()],
             event_id: event_id.into(),
             actor_intent: Some("reminder".into()),
+            origin: MessageOrigin::Ember,
         };
 
         let (first, first_paths) = manager
@@ -1490,6 +1636,127 @@ mod tests {
 
         assert!(err.contains("agent not found for reference: 座山雕CC48"));
         assert!(err.contains("canonical agent id"));
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod ownership_delivery_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn ownership_denial_never_respawns_or_reports_submit_success() {
+        let submits = Cell::new(0);
+        let resumes = Cell::new(0);
+        let result = submit_with_resume(
+            || { submits.set(submits.get() + 1); Err(crate::violet::ownership::Unavailable("fixture".into()).into()) },
+            |_| { resumes.set(resumes.get() + 1); Ok(()) },
+        );
+        assert!(result.unwrap_err().is::<crate::violet::ownership::Unavailable>());
+        assert_eq!(submits.get(), 1);
+        assert_eq!(resumes.get(), 0);
+    }
+
+    #[test]
+    fn ordinary_dead_process_keeps_its_single_resume_attempt() {
+        let submits = Cell::new(0);
+        let resumes = Cell::new(0);
+        submit_with_resume(
+            || { submits.set(submits.get() + 1); if submits.get() == 1 { Err(anyhow!("dead process")) } else { Ok(()) } },
+            |_| { resumes.set(resumes.get() + 1); Ok(()) },
+        ).unwrap();
+        assert_eq!(submits.get(), 2);
+        assert_eq!(resumes.get(), 1);
+    }
+
+    #[test]
+    fn late_denial_stays_pending_and_fresh_retry_delivers_once() {
+        let root = std::env::temp_dir().join(format!("kota-bus-ownership-{}", Uuid::new_v4()));
+        let event = "test-ownership-event";
+        let record = ActorMessageRecord { actor_id:"agent-sender".into(), actor_name:"Sender".into(),
+            text:"synthetic payload".into(), target_agent_ids:vec!["agent-target".into()],
+            event_id:event.into(), actor_intent:Some("message".into()), origin: MessageOrigin::A2a };
+        let manager = AgentBusManager::default();
+        // A race rejects only after the optimistic event has been recorded.
+        manager.record_actor_message(&root, &record).unwrap();
+        assert!(manager.is_duplicate(&root, Some(event)).unwrap());
+        let marker = ownership_retry_path(&root, event);
+        mark_ownership_retry(&marker, true).unwrap();
+        let processing = dispatch_processing_dir(&root).join("fixture.json");
+        fs::create_dir_all(processing.parent().unwrap()).unwrap();
+        fs::write(&processing, b"synthetic dispatch").unwrap();
+        let denial = Err(crate::violet::ownership::Unavailable("fixture".into()).into());
+        let pending = finish_dispatch(&root, &processing, &denial).unwrap();
+        assert!(pending.starts_with(dispatch_ownership_pending_dir(&root)));
+        assert!(!dispatch_delivered_dir(&root).exists());
+        assert_eq!(fs::read(&pending).unwrap(), b"synthetic dispatch");
+        // Survives an App restart; room-event existence is not a delivery ACK.
+        let manager = AgentBusManager::default();
+        assert!(!manager.is_message_duplicate(&root, event, Some(event)).unwrap());
+        let writes = Cell::new(0);
+        submit_with_resume(|| { writes.set(writes.get() + 1); Ok(()) }, |_| panic!("fresh process is already alive")).unwrap();
+        let raw = root.join("project-memory/raw_logs/actor-agent-sender.md");
+        let recorded_bytes = fs::read(&raw).unwrap();
+        assert!(manager.record_actor_message_for_delivery(&root, &record).unwrap().is_empty());
+        assert_eq!(fs::read(&raw).unwrap(), recorded_bytes);
+        let room = violet::read_cache(&root, serde_json::from_value(serde_json::json!({})).unwrap()).unwrap();
+        assert_eq!(room.messages.iter().filter(|message| message.native_event_id.as_deref() == Some(event)).count(), 1);
+        manager.delivered_keys.lock().unwrap().insert(event.into());
+        fs::remove_file(marker).unwrap();
+        fs::rename(&pending, &processing).unwrap();
+        let delivered = finish_dispatch(&root, &processing, &Ok(AgentBusSendResult {
+            event_id:event.into(), target_agent_id:"agent-target".into(), submitted:true, skipped_reason:None, duplicate:false,
+        })).unwrap();
+        assert!(delivered.starts_with(dispatch_delivered_dir(&root)));
+        assert!(manager.is_message_duplicate(&root, event, Some(event)).unwrap());
+        assert!(AgentBusManager::default().is_message_duplicate(&root, event, Some(event)).unwrap());
+        assert_eq!(writes.get(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn early_denial_is_visible_once_and_existing_dispatch_refresh_delivers_after_recovery() {
+        let root = std::env::temp_dir().join(format!("kota-bus-early-{}", Uuid::new_v4()));
+        let message = ActorMessage {
+            project_root: root.clone(), actor_id: "agent-sender".into(), actor_name: "Sender".into(),
+            target_agent_id: "agent-target".into(), intent: "message".into(), text: "synthetic payload".into(),
+            event_id: "fixture-early".into(), dedupe_key: Some("fixture-early".into()),
+            launch_request: None, terminal_timing: None, origin: MessageOrigin::A2a, soul_eligibility: None,
+        };
+        let manager = AgentBusManager::default();
+        fs::create_dir_all(dispatch_outbox_dir(&root)).unwrap();
+        fs::write(dispatch_outbox_dir(&root).join("fixture.json"), b"synthetic dispatch").unwrap();
+        manager.process_dispatch_outbox_with(&root, |_| {
+            manager.persist_ownership_blocked(&message, false)?;
+            Err(crate::violet::ownership::Unavailable("private diagnostic".into()).into())
+        }).unwrap();
+        assert!(manager.persist_ownership_blocked(&message, false).unwrap().is_empty());
+        assert!(!violet::actor_event_exists(&root, &message.event_id).unwrap());
+        let room = violet::read_cache(&root, serde_json::from_value(serde_json::json!({})).unwrap()).unwrap();
+        assert_eq!(room.messages.len(), 1);
+        assert!(room.messages[0].text.starts_with("Message is pending."));
+        assert!(!room.messages[0].text.contains("private diagnostic"));
+        assert!(!dispatch_delivered_dir(&root).join("fixture.json").exists());
+        let record = ActorMessageRecord { actor_id: message.actor_id.clone(), actor_name: message.actor_name.clone(),
+            text: message.text.clone(), target_agent_ids: vec![message.target_agent_id.clone()],
+            event_id: message.event_id.clone(), actor_intent: Some(message.intent.clone()), origin: message.origin };
+        let submits = Cell::new(0);
+        let deliver = |_: &Path| {
+            manager.record_actor_message_for_delivery(&root, &record)?;
+            submits.set(submits.get() + 1);
+            fs::remove_file(ownership_retry_path(&root, &message.event_id))?;
+            Ok(AgentBusSendResult { event_id: message.event_id.clone(), target_agent_id: message.target_agent_id.clone(),
+                submitted: true, skipped_reason: None, duplicate: false })
+        };
+        // The post-spawn wake uses this same processor; no new outbox event is needed.
+        manager.process_dispatch_outbox_with(&root, deliver).unwrap();
+        manager.process_dispatch_outbox_with(&root, |_| panic!("already delivered")).unwrap();
+        assert_eq!(submits.get(), 1);
+        assert!(dispatch_delivered_dir(&root).join("fixture.json").exists());
+        let room = violet::read_cache(&root, serde_json::from_value(serde_json::json!({})).unwrap()).unwrap();
+        assert_eq!(room.messages.iter().filter(|item| item.native_event_id.as_deref() == Some(message.event_id.as_str())).count(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 }

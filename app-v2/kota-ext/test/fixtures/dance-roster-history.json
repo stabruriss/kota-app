@@ -1,0 +1,28 @@
+[
+  {
+    "id": "agent-601f5ed996",
+    "name": "郭子仪",
+    "lastReply": {
+      "at": "2026-10-08T02:10:00Z",
+      "text": "The local test package is ready. I am checking the artifact before delivery."
+    },
+    "lastReplyOrder": 10,
+    "recentUserMessages": [{ "at": "2026-10-08T02:07:00Z", "text": "Build the next local test package after the review passes." }]
+  },
+  {
+    "id": "agent-99d1b25ab6",
+    "name": "颦儿",
+    "lastReply": {
+      "at": "2026-10-08T02:12:00Z",
+      "text": "Queue reordering works. I am checking the drag handle on narrow screens."
+    },
+    "lastReplyOrder": 12,
+    "recentUserMessages": [{ "at": "2026-10-08T02:08:00Z", "text": "Fix the queued-message drag interaction and verify the handle hit area." }]
+  },
+  {
+    "id": "agent-85eef8fe40",
+    "name": "蘅芜君",
+    "lastReply": null,
+    "recentUserMessages": []
+  }
+]

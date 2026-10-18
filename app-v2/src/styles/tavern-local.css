@@ -1,0 +1,70 @@
+.tavern-local-auth-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-edge);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--brass-hi) 4%, transparent);
+  color: var(--terra-hi);
+  font: 10px var(--font-sans);
+}
+.tavern-local-auth-note[data-auth="ready"] { color: var(--copper-hi); }
+.tavern-local-auth-note[data-auth="checking"],
+.tavern-local-auth-note[data-auth="error"] { color: var(--text-3); }
+.tavern-local-auth-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+[data-auth="checking"] .tavern-local-auth-dot,
+[data-auth="error"] .tavern-local-auth-dot { background: transparent; border: 1px solid currentColor; }
+.tavern-local-auth-note button,
+.tavern-local-provider-chip button,
+.tavern-local-route-explainer button {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brass-bright);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tavern-local-auth-note button:hover,
+.tavern-local-provider-chip button:hover,
+.tavern-local-route-explainer button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.tavern-local-provider-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 48px;
+  padding: 6px 12px 6px 7px;
+  border: 1px solid var(--border-hi);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--brass-hi) 7%, transparent);
+  color: var(--text-2);
+  font: 10px var(--font-sans);
+}
+.tavern-local-provider-chip[data-auth="ready"] { border-color: var(--copper-hi); background: color-mix(in srgb, var(--copper-hi) 7%, transparent); }
+.tavern-local-provider-chip .tavern-provider-icon img { filter: none; opacity: .9; }
+.tavern-local-provider-copy { display: flex; flex-direction: column; gap: 4px; }
+.tavern-local-provider-copy small { color: var(--terra-hi); font-size: 9px; }
+[data-auth="ready"] .tavern-local-provider-copy small { color: var(--copper-hi); }
+[data-auth="checking"] .tavern-local-provider-copy small,
+[data-auth="error"] .tavern-local-provider-copy small { color: var(--text-3); }
+.tavern-local-option-status { margin-left: auto; color: var(--text-3); font: 9px var(--font-sans); }
+.tavern-local-route { min-width: 235px; max-width: 100%; font: 11px var(--font-sans); letter-spacing: 0; text-transform: none; }
+.tavern-local-route-option { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); padding: 8px; }
+.tavern-local-route-disabled { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: 1; padding: 0; border: 0; background: none; color: var(--text-2); opacity: 1; font: 11px var(--font-mono); }
+.tavern-local-route-disabled > span:first-child { opacity: .72; }
+.tavern-local-coming { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--brass-hi); font: 9px var(--font-sans); white-space: nowrap; }
+.tavern-local-route-info { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 1px solid var(--border); border-radius: 50%; background: color-mix(in srgb, var(--text-2) 8%, transparent); color: var(--brass-bright); flex: none; cursor: pointer; }
+.tavern-local-route-info:hover { border-color: var(--brass-hi); }
+.tavern-local-route-info svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+.tavern-local-route-explainer { padding: 11px 12px; border-top: 1px solid var(--border-hi); background: var(--bg-elevated); color: var(--text-2); font: 11px/1.75 var(--font-sans); white-space: normal; }
+.tavern-local-route-explainer strong { display: block; color: var(--brass-bright); margin-bottom: 4px; }
+.tavern-local-route-explainer p { margin: 0; }
+.tavern-local-route-explainer button { display: block; margin: 9px 0 0; padding-top: 9px; border-top: 1px solid var(--border); color: var(--terra-hi); white-space: normal; text-align: left; }

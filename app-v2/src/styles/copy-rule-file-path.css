@@ -1,0 +1,8 @@
+.rule-file-copy { position:relative; display:inline-flex; flex:none; margin:0; }
+.rule-file-copy button { display:grid; place-items:center; width:28px; height:28px; padding:0; border:1px solid transparent; border-radius:4px; background:transparent; color:var(--text-2); cursor:pointer; }
+.rule-file-copy button:hover,.rule-file-copy button:focus-visible { color:white; border-color:var(--border-hi); background:var(--glow-warm); }
+.rule-file-copy button:disabled { opacity:.5; cursor:default; }
+.rule-file-copy-tooltip { position:absolute; z-index:20; right:0; top:34px; display:none; width:max-content; max-width:230px; padding:8px 10px; border:1px solid var(--border-hi); border-radius:4px; background:var(--bg-base); color:var(--text-2); box-shadow:0 5px 20px #0006; font:11px/1.6 var(--font-sans); }
+.rule-file-copy-tooltip small { display:block; margin-top:5px; max-width:210px; text-align:left; }
+.rule-file-copy-tooltip.local-model-warning { color:var(--terra-hi); }
+.rule-file-copy:hover .rule-file-copy-tooltip,.rule-file-copy:focus-within .rule-file-copy-tooltip { display:block; }

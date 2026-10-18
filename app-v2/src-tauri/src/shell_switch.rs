@@ -268,6 +268,8 @@ impl Launch {
         }))
     }
 
+    pub(crate) fn is_fresh(&self) -> bool { self.fresh }
+
     pub(crate) fn prepare_adapter(&mut self) -> Result<(), String> {
         let root = self.root.clone();
         let cwd = self.cwd.clone();
@@ -317,7 +319,7 @@ impl Launch {
                     name_fields: None,
                     provider: shell_name_for_cli(cli).into(),
                     model: shell.model.clone().unwrap_or_else(|| "default".into()),
-                    effort: shell.effort.clone(),
+                    effort: shell.effort.clone(), auto_route: crate::shell_auto_route(&shell, cli),
                     avatar_id: yaml_string(&yaml, "avatar-id"),
                     skills: shell.skills.clone(),
                     ghost,
@@ -325,7 +327,7 @@ impl Launch {
                     archived: false,
                     dismissed: false,
                     kind: None,
-                    record: None,
+                    source: None,
                 },
             };
             let written = compile_provider_adapter(&request, &ctx, cli)?;
@@ -388,6 +390,14 @@ impl Launch {
             if let Some(session) = session_id {
                 yaml_set_string(&mut yaml, "session-id", session);
             }
+        } else if self.cli == AgentCli::KotaLocal {
+            if let Some(session) = session_id {
+                yaml_set_string(&mut yaml, "session-id", session);
+            }
+        } else if let Some(session) = session_id {
+            // PTY ownership preflight pins this to the verified launch ID,
+            // which can differ from a stale saved hint or a latest selector.
+            yaml_set_string(&mut yaml, "session-id", session);
         }
         if let Some(handoff) = &self.handoff {
             yaml_set_value(&mut yaml, "handoff-pending", handoff)?;

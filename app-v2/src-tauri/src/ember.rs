@@ -683,6 +683,7 @@ fn deliver_schedule(
                 event_id: Some(event_id.clone()),
                 dedupe_key: Some(event_id),
                 terminal_timing: Some(reminder_terminal_timing(schedule)),
+                soul_eligibility: None,
             },
             launch_request,
         );
@@ -788,6 +789,7 @@ pub(crate) fn deliver_human_reminder(
             target_agent_ids: vec![HUMAN_TELEGRAM_TARGET_ID.into()],
             event_id: event_id.clone(),
             actor_intent: Some("reminder".into()),
+            origin: crate::message_origin::MessageOrigin::Ember,
         },
         Some(&event_id),
     );
@@ -1203,7 +1205,7 @@ fn schedule_has_working_agent_target(schedule: &EmberSchedule, working: &HashSet
         .any(|agent_id| working.contains(agent_id))
 }
 
-fn configured_account_user_display_name() -> Option<String> {
+pub(crate) fn configured_account_user_display_name() -> Option<String> {
     crate::load_account_user_identity()
         .map(|identity| identity.name.trim().to_string())
         .ok()

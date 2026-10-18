@@ -1,0 +1,22 @@
+{
+  "name": "kota-ext",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs test/fake-provider/*.test.mjs",
+    "test:provider": "node --test test/fake-provider/*.test.mjs",
+    "test:rpc": "node --test test/rpc-integration.test.mjs",
+    "fake-provider": "node test/fake-provider/server.mjs"
+  }
+}

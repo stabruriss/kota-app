@@ -10,16 +10,14 @@ export function VioletTemporalDivider({ gap, agentMeta }: {
 }) {
   const tooltipId = useId();
   // Use the saved send-time values, never the current date or provider logs.
-  const days = gap.targetAgentIds.map((id) => {
+  const rows = gap.targetAgentIds.map((id) => {
     const value = gap.elapsedDaysByTarget?.[id];
-    return value !== undefined && Number.isInteger(value) && value >= 1 ? value : null;
+    const elapsed = value !== undefined && Number.isInteger(value) && value >= 1
+      ? `${value} ${value === 1 ? 'day' : 'days'}`
+      : 'at least 24 hours';
+    const name = agentMeta?.[id]?.name?.trim() || id;
+    return `@${name} last replied in this room ${elapsed} earlier.`;
   });
-  const copy = (value: number | null) => value === null
-    ? 'over 24 hours since last message'
-    : `have been ${value} ${value === 1 ? 'day' : 'days'} since last message`;
-  const rows = days.every((value) => value === days[0])
-    ? [copy(days[0] ?? null)]
-    : gap.targetAgentIds.map((id, index) => `${agentMeta?.[id]?.name ?? id}: ${copy(days[index]!)}`);
   return (
     <div className="violet-temporal-divider" role="separator" aria-label="Cross-day context">
       <span className="provider-badge violet-temporal-mark" tabIndex={0}

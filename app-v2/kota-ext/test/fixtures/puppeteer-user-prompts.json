@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "defaultIntents": ["Metadata only", "Not a saved Group"],
+  "stringFirst": {"questions":{"model":{"type":"choice","instructions":"Fixture user file: first classification 😀.","criteria":{"<model_id>":"First <model_id>: <intent>"}}}},
+  "stringLater": {"questions":{"model":{"type":"choice","instructions":"Fixture user file: later classification.","criteria":{"<model_id>":"Later <model_id>: <intent>"}}}},
+  "danceContext": {"questions":{"target":{"type":"choice","instructions":"Fixture user file: context classification.","criteria":{"<agent_id>":"Context <agent_id>."}}}},
+  "danceRule": {"questions":{"target":{"type":"choice","instructions":"Fixture user file: rule classification.","criteria":{"<agent_id>":"Rule <agent_id>: <condition>"}}}}
+}

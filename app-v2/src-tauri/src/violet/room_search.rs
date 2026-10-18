@@ -380,7 +380,7 @@ fn searchable(event: &ChathistoryEvent, human_only: bool) -> bool {
     intent == Some("reminder")
         || matches!(
             event.shell.as_str(),
-            "claude" | "codex" | "antigravity" | "opencode" | "kimi" | "pi"
+            "claude" | "codex" | "antigravity" | "opencode" | "kimi" | "pi" | "kota-local"
         )
         // agent_provider is a mutable identity snapshot, not the record's source.
         || (event.shell == "system"

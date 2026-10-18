@@ -1,0 +1,10 @@
+/* Magpie reuses the Local provider row and dialog. No new card treatment. */
+.local-magpie-logo img { filter: invert(1); opacity: .9; }
+.local-auth-dialog.local-magpie-settings { width: min(440px, 100%); }
+.local-magpie-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.local-magpie-host { display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: 12px; }
+.local-magpie-settings .local-auth-options { margin-bottom: 3px; }
+.local-auth-dialog.local-magpie-settings input[readonly] { color: var(--text-4); background: rgba(0,0,0,.16); }
+@media (max-width: 780px) {
+  .local-magpie-host { grid-template-columns: minmax(0, 1fr) 86px; }
+}

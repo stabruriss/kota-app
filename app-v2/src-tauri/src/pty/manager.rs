@@ -124,8 +124,56 @@ impl PtyManager {
 
     // ─── Agent PTY (CC / Codex / etc.) ────────────────────────────────
 
+    pub(crate) fn agent_is_local(&self, agent: &str) -> bool {
+        self.agents.is_local(agent)
+    }
+
+    pub(crate) fn agent_local_target(&self, agent: &str, fallback: Option<&AgentSpawnRequest>) -> bool {
+        self.agents.local_target(agent, fallback)
+    }
+
+    pub(crate) fn agent_local_snapshot(&self, agent: &str) -> Result<crate::local_rpc::Snapshot> {
+        self.agents.local_snapshot(agent)
+    }
+
+    pub(crate) fn agent_local_auth_in_use(&self, provider: &str) -> Vec<crate::local_rpc::registry_types::AuthInUse> { self.agents.local_auth_in_use(provider) }
+    pub(crate) fn agent_local_refresh_auth(&self) { self.agents.local_refresh_auth(); }
+
+    pub(crate) fn agent_local_workbench(&self, root: &std::path::Path, agent: &str, since: Option<&crate::local_rpc::WorkbenchCursor>) -> Result<Option<crate::local_rpc::WorkbenchView>> {
+        self.agents.local_workbench(root, agent, since)
+    }
+
+    pub(crate) fn agent_local_workbench_control(&self, scope: &crate::local_rpc::LocalScope, request: serde_json::Value) -> Result<serde_json::Value> {
+        self.agents.local_workbench_control(scope, request)
+    }
+    pub(crate) fn agent_local_detail_control(&self, root: &std::path::Path, agent: &str, request: serde_json::Value) -> Result<Option<serde_json::Value>> {
+        self.agents.local_detail_control(root, agent, request)
+    }
+    pub(crate) fn agent_local_clones(&self, root: &std::path::Path, agent: &str, monitor: Option<u64>) -> Result<Option<serde_json::Value>> {
+        self.agents.local_clones(root,agent,monitor)
+    }
+
+    pub(crate) fn agent_local_input_targets(&self, root: &std::path::Path, agents: &[String]) -> Result<Vec<String>> {
+        self.agents.local_input_targets(root, agents)
+    }
+
+    pub(crate) fn agent_submit_local(&self, app: &AppHandle, agent: &str,
+        input: crate::local_rpc::Injection, source: crate::shell_switch::PromptSource,
+        retry: bool, fallback: Option<AgentSpawnRequest>, soul: Option<crate::soul_push::input::Input>) -> Result<()> {
+        self.agents.submit_local(app, agent, input, source, retry, fallback, soul)
+    }
+
+    pub(crate) fn agent_local_control(&self, app: &AppHandle, agent: &str, request: serde_json::Value) -> Result<serde_json::Value> {
+        self.agents.local_control(app, agent, request)
+    }
+
     pub fn agent_spawn(&self, app: &AppHandle, request: AgentSpawnRequest) -> Result<AgentRoute> {
         self.agents.spawn(app, request)
+    }
+
+    pub(crate) fn agent_start_local_workbench(&self, app: &AppHandle, request: AgentSpawnRequest,
+        attempt: std::sync::Arc<crate::local_rpc::startup::Attempt>) -> Result<AgentRoute> {
+        self.agents.start_local_workbench(app, request, attempt)
     }
 
     pub fn agent_write(&self, app: &AppHandle, agent_id: String, input: String) -> Result<()> {
@@ -141,17 +189,19 @@ impl PtyManager {
         self.agents.try_write_running(app, agent_id, input)
     }
 
-    pub fn agent_submit_prompt(
+    pub(crate) fn agent_submit_prompt(
         &self,
         app: &AppHandle,
         agent_id: String,
         input: String,
+        soul: Option<crate::soul_push::input::Input>,
     ) -> Result<()> {
         self.agents.submit_prompt(
             app,
             &agent_id,
             input,
             crate::shell_switch::PromptSource::Composer,
+            soul,
         )
     }
 
@@ -161,12 +211,14 @@ impl PtyManager {
         agent_id: &str,
         input: String,
         intent: &str,
+        soul: Option<crate::soul_push::input::Input>,
     ) -> Result<()> {
         self.agents.submit_prompt(
             app,
             agent_id,
             input,
             crate::shell_switch::PromptSource::bus(intent),
+            soul,
         )
     }
 
@@ -184,6 +236,10 @@ impl PtyManager {
 
     pub fn agent_close(&self, app: &AppHandle, agent_id: String) -> Result<()> {
         self.agents.close(app, &agent_id)
+    }
+
+    pub(crate) fn agent_check_session(&self, agent_id: &str) -> Option<Result<()>> {
+        self.agents.check_session(agent_id)
     }
 
     pub fn agent_list(&self) -> Vec<AgentSummary> {

@@ -1,4 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import type { AutoRouteGroup } from './lib/string-routing';
 import { listen, type Event, type UnlistenFn } from '@tauri-apps/api/event';
 import { bbsMentionError } from './bbs-mentions';
 import {
@@ -36,6 +37,8 @@ import type {
   WorkspaceDiffScope,
   WorkspaceFileDiffRequest,
   WorkspaceFileDiffResult,
+  WorkspaceNameSearchRequest,
+  WorkspaceNameSearchResult,
   WorkspaceTreeListing,
   WorkspaceTreePathRequest,
   WorkspaceTreeRootKind,
@@ -269,8 +272,20 @@ function emitVioletWorkEvents(state: VioletRoomState): void {
   }
 }
 
+const loadedVioletMessages = new Map<string, VioletChatMessage[]>();
+/** Bounded projection of the room syncs already performed by the App. No IPC. */
+export function peekVioletRoomMessages(projectRoot: string): readonly VioletChatMessage[] {
+  return loadedVioletMessages.get(projectRoot) ?? [];
+}
 function emitVioletRoomSynced(request: VioletRoomRequest, state: VioletRoomState): void {
   if (typeof window === 'undefined') return;
+  if (request.projectRoot) {
+    const merged = new Map((loadedVioletMessages.get(request.projectRoot) ?? []).map(message => [message.id, message]));
+    state.messages.forEach(message => merged.set(message.id, message));
+    loadedVioletMessages.delete(request.projectRoot);
+    loadedVioletMessages.set(request.projectRoot, [...merged.values()].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp)).slice(-200));
+    if (loadedVioletMessages.size > 8) loadedVioletMessages.delete(loadedVioletMessages.keys().next().value!);
+  }
   window.dispatchEvent(new CustomEvent<VioletRoomSyncedEvent>(VIOLET_ROOM_SYNCED_EVENT, {
     detail: { request, state },
   }));
@@ -781,7 +796,7 @@ export function isAgentSessionLeaseConflictError(
   return error instanceof AgentSessionLeaseConflictError;
 }
 
-function parseAgentSessionLeaseConflict(error: unknown): AgentSessionLeaseConflict | null {
+export function parseAgentSessionLeaseConflict(error: unknown): AgentSessionLeaseConflict | null {
   const message = typeof error === 'string'
     ? error
     : error instanceof Error
@@ -862,9 +877,21 @@ export async function writeAgentPty(agentId: string, input: string): Promise<voi
   await invoke('pty_agent_write', { agentId, input });
 }
 
-export async function submitAgentPromptPty(agentId: string, input: string): Promise<void> {
+/** Host-only producer metadata for optional marks/Dreams; never part of the
+ * delivered text. Eligibility is the prose the user typed, without mentions,
+ * attachments or quotes. */
+export interface SoulInput {
+  messageId: string;
+  createdAt: string;
+  origin: 'user' | 'puppeteer';
+  originalText: string;
+  eligibilityText: string;
+  targetAgentIds: string[];
+}
+
+export async function submitAgentPromptPty(agentId: string, input: string, soulInput?: SoulInput): Promise<void> {
   if (!useTauriRuntime()) return;
-  await invoke('pty_agent_submit_prompt', { agentId, input });
+  await invoke('pty_agent_submit_prompt', { agentId, input, soulInput });
 }
 
 export async function resizeAgentPty(
@@ -1469,6 +1496,8 @@ export interface WorkspaceProjectDirtyStatus {
 }
 
 export interface VioletChatMessage {
+  /** Complete Markdown for a newly captured reply longer than the room preview. */
+  overflowPath?: string | null;
   id: string;
   sessionId: string;
   agentId: string;
@@ -1487,6 +1516,8 @@ export interface VioletChatMessage {
   agentDisplayName?: string | null;
   agentAvatarId?: string | null;
   agentProvider?: string | null;
+  /** Set only for newly projected Local replies selected through String's kota/auto. */
+  route?: 'auto' | null;
   model?: string | null;
   effort?: string | null;
   agentStatus?: string | null;
@@ -1510,6 +1541,7 @@ export interface VioletRoomState {
   sources: VioletSourceStatus[];
   workEvents?: AgentWorkStateEvent[];
   agentBusReceipts?: AgentBusReceipt[];
+  localPendingDeliveries?: LocalPendingDelivery[];
   rawLogDir: string;
   chathistoryDir: string;
   syncedAt: string;
@@ -1536,6 +1568,12 @@ export interface AgentBusReceipt {
   eventId: string;
   agentId: string;
   timestamp: string;
+}
+
+/** A Kota Local delivery its runtime still owns (held / sent / accepted / clear_requested). */
+export interface LocalPendingDelivery {
+  messageId: string;
+  targetAgentId: string;
 }
 
 export interface VioletRoomRequest {
@@ -1617,9 +1655,12 @@ export interface SystemPromptReadRequest {
 export interface SystemPromptReadResult {
   path: string;
   content: string;
+  /** Puppeteer only: the preview/runtime use bundled defaults, without overwriting the file. */
+  warning?: string;
 }
 
 export interface TavernHeroProfileDraft {
+  autoRoute?: AutoRouteGroup | null;
   heroId: string;
   name: string;
   nameFields?: ProjectAgentNameFieldsPayload | null;
@@ -1633,7 +1674,18 @@ export interface TavernHeroProfileDraft {
   archived?: boolean;
   dismissed?: boolean;
   kind?: string | null;
-  record?: ProjectAgentRecord | null;
+  source?: TavernHeroSource;
+  sourceState?: TavernHeroSourceState;
+  sourceProjectName?: string;
+  sourceReason?: string;
+}
+
+export type TavernHeroSourceState = 'native' | 'linked' | 'relic' | 'dangling';
+export interface TavernHeroSource {
+  projectId: string | null;
+  agentId: string;
+  agentCwd: string;
+  dismissedAt?: string;
 }
 
 export interface AccountUserIdentity {
@@ -1771,6 +1823,7 @@ export interface ProjectAgentInviteEligibility {
 }
 
 export interface ProjectAgentDetail {
+  autoRoute?: AutoRouteGroup;
   agentId: string;
   displayName: string;
   nameFields?: ProjectAgentNameFieldsPayload | null;
@@ -1788,6 +1841,8 @@ export interface ProjectAgentDetail {
   ghost: string;
   adapterPath: string;
   shellPath: string;
+  shellRevision?: string;
+  appliedToSession?: boolean;
   agentYamlPath: string;
   status: 'active' | 'archived' | string;
   archivedAt?: string | null;
@@ -1815,6 +1870,8 @@ export interface ProjectAgentIdentityListing {
 }
 
 export interface ProjectAgentSaveRequest extends ProjectAgentRequest {
+  shellRevision?: string;
+  autoRoute?: AutoRouteGroup | null;
   provider?: string;
   displayName: string;
   nameFields?: ProjectAgentNameFieldsPayload | null;
@@ -1827,10 +1884,13 @@ export interface ProjectAgentSaveRequest extends ProjectAgentRequest {
 
 export interface ProjectAgentLifecycleRequest extends ProjectAgentRequest {
   forceDirty?: boolean;
+  /** Explicitly abandon saving the invited incarnation's soul before dismissal. */
+  force?: boolean;
 }
 
 export interface ProjectAgentLifecycleResult {
   ok: boolean;
+  soulError?: string | null;
   dirty: boolean;
   dirtySummary: string;
   detail?: ProjectAgentDetail | null;
@@ -2375,6 +2435,13 @@ export async function emberConsolidateDreams(
   return invoke<EmberDreamConsolidateState>('ember_consolidate_dreams', { request });
 }
 
+/** Moves new room messages and archived Dreams into each project's episodes.
+ *  The backend logs its own failures; nothing comes back. */
+export async function emberExportEpisodes(projectRoots: string[]): Promise<void> {
+  if (!useTauriRuntime()) return;
+  await invoke('ember_export_episodes', { projectRoots });
+}
+
 export async function bbsSnapshot(request: BbsProjectRequest): Promise<BbsSnapshot> {
   if (!useTauriRuntime()) {
     return {
@@ -2662,6 +2729,7 @@ export interface VioletFileRefRequest {
 export interface VioletFileRefResolveResult {
   path: string;
   isDir: boolean;
+  version?: string | null;
 }
 
 export async function violetResolveFileRef(
@@ -2679,6 +2747,25 @@ export async function violetOpenFileRef(request: VioletFileRefRequest): Promise<
 export async function violetRevealFileRef(request: VioletFileRefRequest): Promise<void> {
   if (!useTauriRuntime()) throw new Error('File reveal requires the Kota runtime.');
   await invoke('violet_reveal_file_ref', { request });
+}
+
+export async function violetCopyFilePath(path: string): Promise<void> {
+  const hasWebClipboard = typeof navigator.clipboard?.writeText === 'function';
+  try {
+    if (!hasWebClipboard) throw new Error('Clipboard is unavailable.');
+    await navigator.clipboard.writeText(path);
+  } catch (error) {
+    // WKWebView can expose the API but reject a menu click with NotAllowedError.
+    // Keep successful web copies unchanged; macOS can complete the write natively.
+    const denied = typeof error === 'object' && error !== null && 'name' in error && error.name === 'NotAllowedError';
+    if (useTauriRuntime() && (!hasWebClipboard || denied)) {
+      console.warn('[violet-room] web clipboard unavailable; using native path copy', {
+        error, userActivation: navigator.userActivation?.isActive,
+      });
+      if (await invoke<boolean>('violet_copy_file_path', { path })) return;
+    }
+    throw error;
+  }
 }
 
 export async function listWorkspaceProjects(): Promise<WorkspaceProject[]> {
@@ -2727,6 +2814,42 @@ export async function workspaceListTreePath(
 ): Promise<WorkspaceTreeListing> {
   if (!useTauriRuntime()) return mockWorkspaceTreeListing(request.rootKind, request.relativePath ?? '');
   return invoke<WorkspaceTreeListing>('workspace_list_tree_path', { request });
+}
+
+export async function workspaceSearchNames(
+  request: WorkspaceNameSearchRequest,
+): Promise<WorkspaceNameSearchResult> {
+  if (useTauriRuntime()) return invoke<WorkspaceNameSearchResult>('workspace_search_names', { request });
+  // Browser-dev's tiny, static fixture only. The real catalogue lives in Rust;
+  // no filesystem traversal or full-catalogue array crosses the native IPC.
+  const response: WorkspaceNameSearchResult = {
+    generation: request.generation, queryRevision: request.queryRevision, root: null,
+    entries: [], indexedCount: 0, matchedCount: 0, truncated: false,
+    indexTruncated: false, readFailed: false, gitFailed: false, cancelled: !!request.cancel,
+  };
+  if (request.cancel) return response;
+  const all: WorkspaceTreeListing['entries'] = [];
+  const pending = [''];
+  for (const path of pending) {
+    const listing = mockWorkspaceTreeListing(request.rootKind, path);
+    response.root ??= listing.root;
+    for (const entry of listing.entries) {
+      if (!request.includeIgnored && entry.path === '.env.local') continue;
+      all.push(entry);
+      if (entry.kind === 'folder' && !['.git', '.hg', '.svn'].includes(entry.name.toLowerCase())) pending.push(entry.path);
+    }
+  }
+  const hits = all.filter(entry => entry.name.toLowerCase().includes(request.query.trim().toLowerCase()));
+  const retained = new Set<string>();
+  for (const entry of hits.slice(0, 2000)) {
+    let path = entry.path;
+    while (path && !retained.has(path)) {
+      retained.add(path);
+      path = path.slice(0, Math.max(0, path.lastIndexOf('/')));
+    }
+  }
+  return { ...response, entries: all.filter(entry => retained.has(entry.path)),
+    indexedCount: all.length, matchedCount: Math.min(hits.length, 2000), truncated: hits.length > 2000 };
 }
 
 export async function workspaceDiffChanges(
@@ -3617,9 +3740,10 @@ export async function incarnateTavernHero(
 
 export async function loadProjectAgentDetail(
   request: ProjectAgentRequest,
+  options?: { readOnly?: boolean },
 ): Promise<ProjectAgentDetail> {
   if (!useTauriRuntime()) return mockProjectAgentDetail(request.agentId, request.projectRoot);
-  return invoke<ProjectAgentDetail>('project_agent_load_detail', { request });
+  return invoke<ProjectAgentDetail>('project_agent_load_detail', { request, ...(options?.readOnly ? { readOnly: true } : {}) });
 }
 
 export async function commendProjectAgent(
@@ -3639,6 +3763,17 @@ export async function commendProjectAgent(
   }
   return invoke<ProjectAgentRecord>('project_agent_commend', { request });
 }
+
+export async function checkProjectAgentSession(request: ProjectAgentRequest): Promise<boolean> {
+  if (!useTauriRuntime()) return true;
+  return invoke<boolean>('project_agent_check_session', { request });
+}
+
+export function isSessionUnavailableError(error: unknown): boolean {
+  return String(error).includes('KOTA_SESSION_UNAVAILABLE:');
+}
+
+export const SESSION_UNAVAILABLE_MESSAGE = "The saved session can't be resumed. Agent memory is safe. Start a new session?";
 
 export async function resolveProjectAgentLaunch(
   request: ProjectAgentRequest,
@@ -4054,6 +4189,19 @@ export async function renameWhiteboardCanvasPage(
     projectRoot: request.projectRoot ?? null,
     pagePath: request.pagePath,
     title: request.title,
+  });
+}
+
+export async function deleteWhiteboardCanvasPage(request: {
+  projectRoot?: string | null;
+  pagePath: string;
+  activePagePath?: string | null;
+}): Promise<WhiteboardCanvasLoadResult> {
+  if (!useTauriRuntime()) return devWhiteboardCanvas(request.projectRoot);
+  return invoke<WhiteboardCanvasLoadResult>('whiteboard_canvas_delete_page', {
+    projectRoot: request.projectRoot ?? null,
+    pagePath: request.pagePath,
+    activePagePath: request.activePagePath ?? null,
   });
 }
 

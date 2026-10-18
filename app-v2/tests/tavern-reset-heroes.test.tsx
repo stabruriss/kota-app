@@ -38,7 +38,7 @@ function fresh(heroId: string): pty.TavernHeroProfileDraft {
   const p = loadTavernHeroIncarnationProfile(heroId)!;
   return { heroId, name: p.name, nameFields: p.nameFields, provider: p.provider, model: p.model,
     effort: p.effort ?? null, avatarId: p.avatarId, skills: p.skills, ghost: p.ghost, shell: p.shell,
-    kind: p.kind, archived: false, dismissed: false, record: null };
+    kind: p.kind, archived: false, dismissed: false };
 }
 function custom(heroId: string, name: string, patch: Partial<pty.TavernHeroProfileDraft> = {}): pty.TavernHeroProfileDraft {
   return { ...fresh('hero-dex'), heroId, name, nameFields: { titleId: null, given: name, middle: '', surname: '' },

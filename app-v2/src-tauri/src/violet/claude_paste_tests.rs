@@ -78,7 +78,7 @@ fn actual_claude_pastes_produce_one_handoff_and_two_original_messages() {
             assert!(!expanded[0].text.contains("UI-QA-20260920-CLAUDE-1"));
         } else {
             assert_eq!(expanded.len(), 1);
-            assert!(expanded[0].message_origin.is_none());
+            assert_eq!(expanded[0].message_origin.as_deref(), Some("user"));
         }
         assert_eq!(
             native_work_event(expanded.last().unwrap()).unwrap().state,
@@ -345,6 +345,7 @@ fn existing_cache_stays_wrapped_and_only_new_native_lines_are_normalized() {
     write_source_cursor(
         &source_cursor_path(&root, &key).unwrap(),
         &SourceCursor {
+            incarnation: None,
             path: path_string(&source.path),
             offset: old_line.len() as u64,
             line_index: 1,

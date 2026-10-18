@@ -259,3 +259,95 @@ The 0.1.1 release notice review checked npm and Cargo lockfile metadata, bundled
 font licenses, bundled default rules and skills, and GitHub mark/icon assets.
 Dedicated license and secret scanning run against each public release tree as
 part of the release process.
+
+## Notices added for 0.1.24
+
+## Simple Icons Provider Marks
+
+Kota includes selected provider icon SVGs derived from Simple Icons under:
+
+- `app-v2/src/assets/tavern/icons/providers/`
+
+Simple Icons identifies the project as CC0-1.0:
+
+- https://simpleicons.org/
+- https://github.com/simple-icons/simple-icons
+
+These icons are used only as truthful provider/service identifiers in the
+Project Agent Profile SHELL card. Third-party provider names and marks remain
+the property of their respective owners and may be subject to their own brand
+guidelines.
+
+## ignore (native file-name search)
+
+Kota links `ignore` 0.4.33 from the ripgrep project for parallel filesystem
+traversal and Git ignore rules. This dependency is used under its MIT option
+(`MIT OR Unlicense`); its source is not modified or vendored here.
+
+- https://crates.io/crates/ignore/0.4.33
+- https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore
+
+This integration also adds the following transitive packages (or updates the
+previously resolved regex engine). Each is used under its MIT option:
+
+- `globset` 0.4.20 — https://crates.io/crates/globset/0.4.20
+- `bstr` 1.13.1 — https://crates.io/crates/bstr/1.13.1
+- `crossbeam-deque` 0.8.8 — https://crates.io/crates/crossbeam-deque/0.8.8
+- `crossbeam-epoch` 0.9.21 — https://crates.io/crates/crossbeam-epoch/0.9.21
+- `regex-automata` 0.4.18 — https://crates.io/crates/regex-automata/0.4.18
+
+Copyright (c) 2015 Andrew Gallant (ignore, globset)
+Copyright (c) 2018-2019 Andrew Gallant (bstr)
+Copyright (c) 2019 The Crossbeam Project Developers (crossbeam-deque, crossbeam-epoch)
+Copyright (c) 2014 The Rust Project Developers (regex-automata)
+
+The following MIT terms apply to each of the packages listed above:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+## Magpie
+
+Kota's Magpie provider icon (`app-v2/src/assets/tavern/icons/providers/magpie.svg`)
+and Pi model-configuration mapping (`app-v2/src-tauri/src/local_rpc/magpie.rs`)
+are derived from [Magpie](https://github.com/yetone/magpie), revision
+`e4c292f655f5263341b83be6642480c94b228932`, under the MIT License.
+
+Copyright (c) 2026 yetone
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Bundled Pi runtime
+
+The bundled Pi runtime and its dependencies retain their upstream license texts and source references in `app-v2/vendor/pi-runtime/third-party/`. The pinned archive, provenance and file manifest are in `app-v2/vendor/pi-runtime/`.

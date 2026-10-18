@@ -1,0 +1,60 @@
+{
+  "entries": [
+    {
+      "type": "custom_message",
+      "customType": "kota.user",
+      "content": "Synthetic incremental task.",
+      "display": true,
+      "details": {
+        "schema": 1,
+        "messageId": "msg-since",
+        "targetAgentId": "agent-fixture",
+        "createdAt": "2026-10-02T00:00:00Z",
+        "private": false,
+        "kotaId": "msg-since#agent-fixture"
+      },
+      "id": "8e55d64e",
+      "parentId": "a868a9a8",
+      "timestamp": "2026-10-02T06:41:31.071Z"
+    },
+    {
+      "type": "message",
+      "id": "896ceee9",
+      "parentId": "8e55d64e",
+      "timestamp": "2026-10-02T06:41:31.078Z",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Synthetic incremental reply."
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "kota-fake",
+        "model": "fixture-alternate",
+        "usage": {
+          "input": 128,
+          "output": 7,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "reasoning": 0,
+          "totalTokens": 135,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1790923291072,
+        "responseId": "chatcmpl-fixture-14",
+        "rawStopReason": "stop",
+        "thinkingLevel": "high"
+      }
+    }
+  ],
+  "leafId": "896ceee9"
+}

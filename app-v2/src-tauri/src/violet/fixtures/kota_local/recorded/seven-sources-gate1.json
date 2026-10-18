@@ -1,0 +1,872 @@
+[
+  {
+    "id": "514145ea",
+    "modelId": "fixture",
+    "parentId": null,
+    "provider": "kota-fake",
+    "timestamp": "2026-10-02T09:19:48.944Z",
+    "type": "model_change"
+  },
+  {
+    "id": "15553c18",
+    "parentId": "514145ea",
+    "thinkingLevel": "off",
+    "timestamp": "2026-10-02T09:19:48.944Z",
+    "type": "thinking_level_change"
+  },
+  {
+    "id": "2eebe04a",
+    "message": {
+      "content": "",
+      "role": "system",
+      "timestamp": 1790932789015,
+      "toolsAdded": [
+        {
+          "constrainedSampling": {
+            "strict": "prefer",
+            "type": "json_schema"
+          },
+          "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+          "name": "read",
+          "parameters": {
+            "properties": {
+              "limit": {
+                "description": "Maximum number of lines to read",
+                "type": "number"
+              },
+              "offset": {
+                "description": "Line number to start reading from (1-indexed)",
+                "type": "number"
+              },
+              "path": {
+                "description": "Path to the file to read (relative or absolute)",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "constrainedSampling": {
+            "strict": "prefer",
+            "type": "json_schema"
+          },
+          "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+          "name": "bash",
+          "parameters": {
+            "properties": {
+              "command": {
+                "description": "Shell command to execute",
+                "type": "string"
+              },
+              "timeout": {
+                "description": "Timeout in seconds (optional, no default timeout)",
+                "type": "number"
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Send a message to a teammate in the current project. Use the teammate's AKA or agent ID in to. The body is sent unchanged. A successful result means the local dispatch was recorded, not that the teammate has replied.",
+          "name": "kota_agent_bus",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "intent": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "to": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "body"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "description": "Look up projects and agents, read a BBS thread, or publish a new post or reply. Use action agents to find project IDs and the targetRef for at. Set explicit projects or broadcast for a new thread. Use at for an explicit mention and attachments for files to copy into the post. Successful publication does not confirm delivery to another device.",
+          "name": "kota_bbs",
+          "parameters": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "agents",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "show",
+                    "type": "string"
+                  },
+                  "threadId": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action",
+                  "threadId"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "new",
+                    "type": "string"
+                  },
+                  "at": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "attachments": {
+                    "items": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 9,
+                    "type": "array"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "broadcast": {
+                    "type": "boolean"
+                  },
+                  "projects": {
+                    "items": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "action",
+                  "body"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "reply",
+                    "type": "string"
+                  },
+                  "at": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "attachments": {
+                    "items": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxItems": 9,
+                    "type": "array"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "threadId": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action",
+                  "threadId",
+                  "body"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        {
+          "description": "Create, list, read, update, or delete scheduled prompts and draft notes for the current project. Schedule targets use agent names, agent IDs, or the configured human name. A draft is a note without delivery timing. Timing: in and every take a duration such as 10m, 2h, or 1d (every at least 1m); at takes a local datetime such as \"2026-06-18 14:00\"; cron takes a cron expression; idle delivers when the target is idle.",
+          "name": "kota_ember",
+          "parameters": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "list",
+                    "type": "string"
+                  },
+                  "draft": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "anyOf": [
+                      {
+                        "const": "show",
+                        "type": "string"
+                      },
+                      {
+                        "const": "delete",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "id": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "add",
+                    "type": "string"
+                  },
+                  "body": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "draft": {
+                    "const": true,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "action",
+                  "draft",
+                  "body"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "add",
+                    "type": "string"
+                  },
+                  "body": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "endAfter": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "endAt": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "timing": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "anyOf": [
+                              {
+                                "const": "in",
+                                "type": "string"
+                              },
+                              {
+                                "const": "every",
+                                "type": "string"
+                              },
+                              {
+                                "const": "at",
+                                "type": "string"
+                              },
+                              {
+                                "const": "cron",
+                                "type": "string"
+                              }
+                            ]
+                          },
+                          "value": {
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "idle",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "to": {
+                    "items": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "action",
+                  "to",
+                  "timing",
+                  "body"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "const": "update",
+                    "type": "string"
+                  },
+                  "body": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "endAfter": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "endAt": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "id": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "timing": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "anyOf": [
+                              {
+                                "const": "in",
+                                "type": "string"
+                              },
+                              {
+                                "const": "every",
+                                "type": "string"
+                              },
+                              {
+                                "const": "at",
+                                "type": "string"
+                              },
+                              {
+                                "const": "cron",
+                                "type": "string"
+                              }
+                            ]
+                          },
+                          "value": {
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "idle",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "to": {
+                    "items": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "action",
+                  "id"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        {
+          "description": "Request synchronization of this project's agent worktrees through the running Kota app. Use only when the user has asked to sync. Concurrent sync requests are rejected by the existing service.",
+          "name": "kota_bartender",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "sync",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        }
+      ]
+    },
+    "parentId": "15553c18",
+    "timestamp": "2026-10-02T09:19:49.017Z",
+    "type": "message"
+  },
+  {
+    "content": "Original text\n  stays intact.",
+    "customType": "kota.user",
+    "details": {
+      "createdAt": "2026-10-02T00:00:00Z",
+      "kotaId": "input-0#agent-fable-copper",
+      "messageId": "input-0",
+      "private": false,
+      "schema": 1,
+      "targetAgentId": "agent-fable-copper"
+    },
+    "display": true,
+    "id": "d121ad95",
+    "parentId": "2eebe04a",
+    "timestamp": "2026-10-02T09:19:49.018Z",
+    "type": "custom_message"
+  },
+  {
+    "id": "e1e19404",
+    "message": {
+      "api": "openai-completions",
+      "content": [
+        {
+          "text": "Synthetic final reply.",
+          "type": "text"
+        }
+      ],
+      "model": "fixture",
+      "provider": "kota-fake",
+      "rawStopReason": "stop",
+      "responseId": "chatcmpl-fixture-1",
+      "role": "assistant",
+      "stopReason": "stop",
+      "thinkingLevel": "off",
+      "timestamp": 1790932789066,
+      "usage": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "input": 128,
+        "output": 6,
+        "reasoning": 0,
+        "totalTokens": 134
+      }
+    },
+    "parentId": "d121ad95",
+    "timestamp": "2026-10-02T09:19:49.145Z",
+    "type": "message"
+  },
+  {
+    "content": "Original text\n  stays intact.",
+    "customType": "kota.lm",
+    "details": {
+      "createdAt": "2026-10-02T00:00:00Z",
+      "kotaId": "input-1#agent-fable-copper",
+      "messageId": "input-1",
+      "private": false,
+      "schema": 1,
+      "targetAgentId": "agent-fable-copper"
+    },
+    "display": true,
+    "id": "54fd1ce5",
+    "parentId": "e1e19404",
+    "timestamp": "2026-10-02T09:19:49.184Z",
+    "type": "custom_message"
+  },
+  {
+    "id": "9ffd0fe4",
+    "message": {
+      "api": "openai-completions",
+      "content": [
+        {
+          "text": "Synthetic final reply.",
+          "type": "text"
+        }
+      ],
+      "model": "fixture",
+      "provider": "kota-fake",
+      "rawStopReason": "stop",
+      "responseId": "chatcmpl-fixture-2",
+      "role": "assistant",
+      "stopReason": "stop",
+      "thinkingLevel": "off",
+      "timestamp": 1790932789187,
+      "usage": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "input": 128,
+        "output": 6,
+        "reasoning": 0,
+        "totalTokens": 134
+      }
+    },
+    "parentId": "54fd1ce5",
+    "timestamp": "2026-10-02T09:19:49.202Z",
+    "type": "message"
+  },
+  {
+    "content": "Original text\n  stays intact.",
+    "customType": "kota.bus",
+    "details": {
+      "createdAt": "2026-10-02T00:00:00Z",
+      "kotaId": "input-2#agent-fable-copper",
+      "messageId": "input-2",
+      "private": false,
+      "schema": 1,
+      "targetAgentId": "agent-fable-copper"
+    },
+    "display": true,
+    "id": "44289451",
+    "parentId": "9ffd0fe4",
+    "timestamp": "2026-10-02T09:19:49.244Z",
+    "type": "custom_message"
+  },
+  {
+    "id": "0d675df5",
+    "message": {
+      "api": "openai-completions",
+      "content": [
+        {
+          "text": "Synthetic final reply.",
+          "type": "text"
+        }
+      ],
+      "model": "fixture",
+      "provider": "kota-fake",
+      "rawStopReason": "stop",
+      "responseId": "chatcmpl-fixture-3",
+      "role": "assistant",
+      "stopReason": "stop",
+      "thinkingLevel": "off",
+      "timestamp": 1790932789248,
+      "usage": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "input": 128,
+        "output": 6,
+        "reasoning": 0,
+        "totalTokens": 134
+      }
+    },
+    "parentId": "44289451",
+    "timestamp": "2026-10-02T09:19:49.255Z",
+    "type": "message"
+  },
+  {
+    "content": "Original text\n  stays intact.",
+    "customType": "kota.bbs",
+    "details": {
+      "createdAt": "2026-10-02T00:00:00Z",
+      "kotaId": "input-3#agent-fable-copper",
+      "messageId": "input-3",
+      "private": false,
+      "schema": 1,
+      "targetAgentId": "agent-fable-copper"
+    },
+    "display": true,
+    "id": "263ec557",
+    "parentId": "0d675df5",
+    "timestamp": "2026-10-02T09:19:49.289Z",
+    "type": "custom_message"
+  },
+  {
+    "id": "9be38b0e",
+    "message": {
+      "api": "openai-completions",
+      "content": [
+        {
+          "text": "Synthetic final reply.",
+          "type": "text"
+        }
+      ],
+      "model": "fixture",
+      "provider": "kota-fake",
+      "rawStopReason": "stop",
+      "responseId": "chatcmpl-fixture-4",
+      "role": "assistant",
+      "stopReason": "stop",
+      "thinkingLevel": "off",
+      "timestamp": 1790932789291,
+      "usage": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "input": 128,
+        "output": 6,
+        "reasoning": 0,
+        "totalTokens": 134
+      }
+    },
+    "parentId": "263ec557",
+    "timestamp": "2026-10-02T09:19:49.299Z",
+    "type": "message"
+  },
+  {
+    "content": "Original text\n  stays intact.",
+    "customType": "kota.ember",
+    "details": {
+      "createdAt": "2026-10-02T00:00:00Z",
+      "kotaId": "input-4#agent-fable-copper",
+      "messageId": "input-4",
+      "private": false,
+      "schema": 1,
+      "targetAgentId": "agent-fable-copper"
+    },
+    "display": true,
+    "id": "0ad31075",
+    "parentId": "9be38b0e",
+    "timestamp": "2026-10-02T09:19:49.344Z",
+    "type": "custom_message"
+  },
+  {
+    "id": "2b6fba7c",
+    "message": {
+      "api": "openai-completions",
+      "content": [
+        {
+          "text": "Synthetic final reply.",
+          "type": "text"
+        }
+      ],
+      "model": "fixture",
+      "provider": "kota-fake",
+      "rawStopReason": "stop",
+      "responseId": "chatcmpl-fixture-5",
+      "role": "assistant",
+      "stopReason": "stop",
+      "thinkingLevel": "off",
+      "timestamp": 1790932789347,
+      "usage": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "input": 128,
+        "output": 6,
+        "reasoning": 0,
+        "totalTokens": 134
+      }
+    },
+    "parentId": "0ad31075",
+    "timestamp": "2026-10-02T09:19:49.356Z",
+    "type": "message"
+  },
+  {
+    "content": "Original text\n  stays intact.",
+    "customType": "kota.dream",
+    "details": {
+      "createdAt": "2026-10-02T00:00:00Z",
+      "kotaId": "input-5#agent-fable-copper",
+      "messageId": "input-5",
+      "private": false,
+      "schema": 1,
+      "targetAgentId": "agent-fable-copper"
+    },
+    "display": true,
+    "id": "166a4093",
+    "parentId": "2b6fba7c",
+    "timestamp": "2026-10-02T09:19:49.397Z",
+    "type": "custom_message"
+  },
+  {
+    "id": "7d3d5c51",
+    "message": {
+      "api": "openai-completions",
+      "content": [
+        {
+          "text": "Synthetic final reply.",
+          "type": "text"
+        }
+      ],
+      "model": "fixture",
+      "provider": "kota-fake",
+      "rawStopReason": "stop",
+      "responseId": "chatcmpl-fixture-6",
+      "role": "assistant",
+      "stopReason": "stop",
+      "thinkingLevel": "off",
+      "timestamp": 1790932789399,
+      "usage": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "input": 128,
+        "output": 6,
+        "reasoning": 0,
+        "totalTokens": 134
+      }
+    },
+    "parentId": "166a4093",
+    "timestamp": "2026-10-02T09:19:49.409Z",
+    "type": "message"
+  },
+  {
+    "content": "Original text\n  stays intact.",
+    "customType": "kota.bartender",
+    "details": {
+      "createdAt": "2026-10-02T00:00:00Z",
+      "kotaId": "input-6#agent-fable-copper",
+      "messageId": "input-6",
+      "private": false,
+      "schema": 1,
+      "targetAgentId": "agent-fable-copper"
+    },
+    "display": true,
+    "id": "0d6a2359",
+    "parentId": "7d3d5c51",
+    "timestamp": "2026-10-02T09:19:49.447Z",
+    "type": "custom_message"
+  },
+  {
+    "id": "db65e561",
+    "message": {
+      "api": "openai-completions",
+      "content": [
+        {
+          "text": "Synthetic final reply.",
+          "type": "text"
+        }
+      ],
+      "model": "fixture",
+      "provider": "kota-fake",
+      "rawStopReason": "stop",
+      "responseId": "chatcmpl-fixture-7",
+      "role": "assistant",
+      "stopReason": "stop",
+      "thinkingLevel": "off",
+      "timestamp": 1790932789451,
+      "usage": {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 0,
+          "output": 0,
+          "total": 0
+        },
+        "input": 128,
+        "output": 6,
+        "reasoning": 0,
+        "totalTokens": 134
+      }
+    },
+    "parentId": "0d6a2359",
+    "timestamp": "2026-10-02T09:19:49.459Z",
+    "type": "message"
+  }
+]

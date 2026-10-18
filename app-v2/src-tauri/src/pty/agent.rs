@@ -28,7 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::ansi::{AnsiLineDecoder, GridSnapshot};
 use super::input_buffer::{Admission, AfterFailure, InputBuffer, Receipt};
@@ -53,6 +53,9 @@ const AGENT_PROMPT_SUBMIT_CONFIRM_WAIT: Duration = Duration::from_millis(1500);
 const AGENT_PROMPT_NATIVE_CONFIRM_POLL: Duration = Duration::from_millis(50);
 const AGENT_SESSION_LEASE_ERROR_PREFIX: &str = "KOTA_AGENT_SESSION_LEASE_CONFLICT:";
 
+#[path = "../local_rpc/registry.rs"]
+mod local;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentCli {
@@ -63,6 +66,8 @@ pub enum AgentCli {
     Opencode,
     Pi,
     Kimi,
+    #[serde(rename = "kota-local")]
+    KotaLocal,
 }
 
 impl AgentCli {
@@ -70,6 +75,7 @@ impl AgentCli {
     /// dogfood-min spawns the bin bare and lets the user / persona drive the prompt.
     pub(crate) fn bin(self) -> &'static str {
         match self {
+            AgentCli::KotaLocal => "pi",
             AgentCli::Claude => "claude",
             AgentCli::Codex => "codex",
             AgentCli::Antigravity => "agy",
@@ -100,6 +106,7 @@ fn build_spawn_args(
     ensure_default_runtime_args(cli, &mut out);
     if let Some(session_id) = session_id.filter(|session_id| !session_id.trim().is_empty()) {
         match cli {
+            AgentCli::KotaLocal => unreachable!("Local RPC never builds PTY arguments"),
             AgentCli::Claude => {
                 if !claude_args_request_resume(&out) && !claude_args_request_subcommand(&out) {
                     out.splice(0..0, ["--resume".to_string(), session_id.to_string()]);
@@ -170,6 +177,7 @@ fn normalize_runtime_args(cli: AgentCli, args: &[String]) -> Vec<String> {
 
 fn ensure_default_runtime_args(cli: AgentCli, args: &mut Vec<String>) {
     match cli {
+        AgentCli::KotaLocal => unreachable!("Local RPC never builds PTY arguments"),
         AgentCli::Claude => {
             if !has_any_arg(
                 args,
@@ -274,6 +282,7 @@ fn has_any_arg(args: &[String], exact: &[&str], prefixes: &[&str]) -> bool {
 
 fn prepare_provider_workspace(cli: AgentCli, cwd: &Path, home: &Path) -> Result<()> {
     match cli {
+        AgentCli::KotaLocal => Ok(()),
         AgentCli::Claude => ensure_claude_kota_hooks(cwd),
         AgentCli::Codex => ensure_codex_trusted_project(home, cwd),
         AgentCli::Antigravity => ensure_antigravity_trusted_workspace(home, cwd),
@@ -600,6 +609,7 @@ impl StartupTrustPromptAutoAccept {
     fn prompt_seen(&self) -> bool {
         let text = String::from_utf8_lossy(&self.tail).to_lowercase();
         match self.cli {
+            AgentCli::KotaLocal => false,
             AgentCli::Claude => {
                 contains_all(&text, &["quick", "safety", "check", "trust", "folder"])
             }
@@ -638,6 +648,7 @@ fn startup_trust_auto_accept_enabled(cli: AgentCli, args: &[String], cwd: &Path)
             .iter()
             .any(|arg| arg == "--dangerously-skip-permissions"),
         AgentCli::Opencode | AgentCli::Pi | AgentCli::Kimi => false,
+        AgentCli::KotaLocal => false,
     }
 }
 
@@ -962,6 +973,16 @@ fn prompt_submit_sequence(cli: AgentCli) -> &'static str {
     }
 }
 
+/// Soul's envelope on its own lines ahead of the payload, inside the composer's
+/// bracketed paste when there is one (as `shell_switch::compose` places handoffs).
+fn with_envelope(input: &str, envelope: &str) -> String {
+    let (start, end) = ("\u{1b}[200~", "\u{1b}[201~");
+    match input.strip_prefix(start).and_then(|body| body.strip_suffix(end)) {
+        Some(body) => format!("{start}{envelope}\n{body}{end}"),
+        None => format!("{envelope}\n{input}"),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSpawnRequest {
@@ -1152,8 +1173,11 @@ struct AgentState {
     route: AgentRoute,
     size: Mutex<PtySize>,
     generation: AtomicU64,
+    /// With the generation, names one launch in Soul cooldown keys: a relaunch resets it.
+    soul_instance: String,
     clear_next_submit: AtomicBool,
     submit_lock: Mutex<()>,
+    ownership: Mutex<crate::violet::ownership::RunningSession>,
     inputs: InputBuffer,
     launch_prepared: AtomicBool,
     output_signal: OutputSignal,
@@ -1437,7 +1461,12 @@ impl SubmitConfirmation {
 }
 
 impl AgentTerminalPty {
-    pub fn new(req: AgentSpawnRequest) -> Result<Self> {
+    pub fn new(mut req: AgentSpawnRequest) -> Result<Self> {
+        let ownership = crate::violet::ownership::prepare_launch(&mut req)?;
+        Self::new_with_ownership(req, ownership)
+    }
+
+    fn new_with_ownership(req: AgentSpawnRequest, ownership: crate::violet::ownership::RunningSession) -> Result<Self> {
         let cwd = PathBuf::from(&req.cwd);
         if !cwd.exists() {
             return Err(anyhow!("agent cwd does not exist: {}", cwd.display()));
@@ -1495,8 +1524,10 @@ impl AgentTerminalPty {
                     pixel_height: 0,
                 }),
                 generation: AtomicU64::new(0),
+                soul_instance: uuid::Uuid::new_v4().to_string(),
                 clear_next_submit: AtomicBool::new(false),
                 submit_lock: Mutex::new(()),
+                ownership: Mutex::new(ownership),
                 inputs: InputBuffer::default(),
                 launch_prepared: AtomicBool::new(false),
                 output_signal: OutputSignal {
@@ -1684,7 +1715,13 @@ impl AgentTerminalPty {
         Ok(())
     }
 
-    pub(crate) fn submit_prompt(&self, app: &AppHandle, input: String, source: crate::shell_switch::PromptSource) -> Result<()> {
+    fn check_session(&self) -> Result<()> {
+        self.inner.ownership.lock().expect("session guard poisoned").check()?;
+        Ok(())
+    }
+
+    pub(crate) fn submit_prompt(&self, app: &AppHandle, input: String, source: crate::shell_switch::PromptSource,
+        soul: Option<crate::soul_push::input::Input>) -> Result<()> {
         let _submit_guard = self
             .inner
             .submit_lock
@@ -1703,7 +1740,20 @@ impl AgentTerminalPty {
                 self.inner.agent_id
             ));
         }
+        self.check_session()?;
         let metadata_cwd = self.inner.project_root.join(".agent-workspaces").join(&self.inner.agent_id);
+        let soul = soul.zip(app.try_state::<Arc<crate::soul_push::service::Service>>()).and_then(|(soul, service)| {
+            let scope = crate::soul_push::input::Scope {
+                project_root: self.inner.project_root.clone(), project_id: self.inner.project_id.clone(),
+                agent_cwd: metadata_cwd.clone(), agent_id: self.inner.agent_id.clone(),
+                key: format!("pty:{}:{}", self.inner.soul_instance, self.inner.generation.load(Ordering::SeqCst)),
+            };
+            Some((service.inner().clone(), service.prepare(scope, &soul)?))
+        });
+        let input = match &soul {
+            Some((_, delivery)) => with_envelope(&input, &delivery.choice.envelope),
+            None => input,
+        };
         let (input, handoff) = crate::shell_switch::compose(&metadata_cwd, self.inner.cli, input, source)
             .map_err(|e| anyhow!(e))?;
         let native_before = self.native_session_marker();
@@ -1740,6 +1790,11 @@ impl AgentTerminalPty {
         let mut enter_attempts = 1_u8;
         let first_enter_baseline = self.output_epoch();
         self.write_confirmed(app, prompt_submit_sequence(self.inner.cli).to_string())?;
+        // Body and first Enter are both written: the host delivered the context.
+        if let Some((service, delivery)) = soul {
+            let app = app.clone();
+            service.confirm(delivery, move |root, paths| crate::violet::emit_room_changed(&app, root, "soul-context", paths));
+        }
         let mut submit_confirm = if self.inner.cli == AgentCli::Pi {
             SubmitConfirmation::PtyWrite
         } else {
@@ -1801,6 +1856,7 @@ impl AgentTerminalPty {
 
     fn native_session_marker(&self) -> Option<NativeSessionMarker> {
         match self.inner.cli {
+            AgentCli::KotaLocal => None,
             AgentCli::Claude => {
                 let project_dir = self
                     .inner
@@ -2884,6 +2940,8 @@ fn apply_agent_git_identity(
     cmd.env("GIT_COMMITTER_NAME", &name);
 }
 
+pub(crate) fn local_rpc_inherits_environment(key: &str) -> bool { should_inherit_agent_spawn_env(key) }
+
 fn should_inherit_agent_spawn_env(key: &str) -> bool {
     if key == "PWD" || key == "OLDPWD" || key == "AI_AGENT" || key.starts_with("KOTA_") {
         return false;
@@ -2932,6 +2990,7 @@ fn opencode_inline_config_env(cli: AgentCli, project_root: &Path) -> Option<Stri
 #[derive(Default)]
 pub struct AgentRegistry {
     ptys: Mutex<HashMap<String, AgentTerminalPty>>,
+    locals: Mutex<HashMap<String, local::LocalAgent>>,
     replacements: Mutex<HashMap<String, Arc<Replacement>>>,
 }
 
@@ -2952,13 +3011,14 @@ impl AgentRegistry {
     }
 
     pub fn spawn(&self, app: &AppHandle, req: AgentSpawnRequest) -> Result<AgentRoute> {
+        if req.cli == AgentCli::KotaLocal { return self.start_local(app, req); }
         let replacement = self.replacement(&req.agent_id);
         let epoch = replacement.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let _guard = replacement.serial.lock().expect("agent replacement poisoned");
-        self.spawn_serial(app, req, &replacement, epoch)
+        self.spawn_serial(app, req, &replacement, epoch, None)
     }
 
-    fn spawn_serial(&self, app: &AppHandle, mut req: AgentSpawnRequest, replacement: &Replacement, epoch: u64) -> Result<AgentRoute> {
+    fn spawn_serial(&self, app: &AppHandle, mut req: AgentSpawnRequest, replacement: &Replacement, epoch: u64, expected_cli: Option<AgentCli>) -> Result<AgentRoute> {
         let agent_id = req.agent_id.clone();
         let previous = self.lookup(&agent_id).ok();
         if previous.as_ref().is_some_and(|p| p.inner.project_root.canonicalize().ok() != Path::new(&req.project_root).canonicalize().ok()) {
@@ -2974,7 +3034,11 @@ impl AgentRegistry {
             if !req.takeover { return Err(lease_conflict_error(lease)); }
         }
         let mut launch = crate::shell_switch::Launch::prepare(&mut req, live).map_err(|e| anyhow!(e))?;
-        let pty = AgentTerminalPty::new(req.clone())?;
+        local::ensure_expected_cli(req.cli, expected_cli)?;
+        if let Some(launch) = launch.as_ref() { req.fresh_session = launch.is_fresh(); }
+        if req.cli == AgentCli::KotaLocal { return Err(crate::local_rpc::error::LocalError::new("local_provider_changed").into()); }
+        let ownership = crate::violet::ownership::prepare_launch(&mut req)?;
+        let pty = AgentTerminalPty::new_with_ownership(req.clone(), ownership)?;
         if let Some(launch) = launch.as_mut() {
             let binary = resolve_on_augmented_path(req.cli.bin(), dirs::home_dir().as_deref());
             if !Path::new(&binary).is_file() { return Err(anyhow!("provider executable is unavailable: {}", req.cli.bin())); }
@@ -2987,6 +3051,7 @@ impl AgentRegistry {
         }
         if let Some(lease) = foreign { terminate_foreign_agent_session(&lease); }
         if let Some(previous) = previous { previous.stop_for_replacement()?; }
+        self.stop_local_for_terminal(&agent_id)?;
         self.ptys.lock().expect("agent registry poisoned").insert(agent_id.clone(), pty.clone());
         let result = (|| {
             if replacement.epoch.load(Ordering::SeqCst) != epoch { return Err(anyhow!("agent startup cancelled or superseded")); }
@@ -3014,6 +3079,7 @@ impl AgentRegistry {
                 stop_error.map(|e| format!("; new process cleanup failed: {e}")).unwrap_or_default(),
                 rollback_error.map(|e| format!("; projection rollback failed: {e}")).unwrap_or_default()));
         }
+        crate::agent_bus::AgentBusManager::retry_after_terminal_spawn(app, Path::new(&req.project_root));
         result
     }
 
@@ -3031,7 +3097,7 @@ impl AgentRegistry {
             takeover: false, fresh_session: false,
         };
         let epoch = replacement.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        self.spawn_serial(app, request, replacement, epoch)?;
+        self.spawn_serial(app, request, replacement, epoch, None)?;
         self.lookup(agent_id)
     }
 
@@ -3045,6 +3111,7 @@ impl AgentRegistry {
     }
 
     pub(crate) fn try_write_running(&self, app: &AppHandle, agent_id: &str, input: String) -> Result<Option<String>> {
+        if self.is_local(agent_id) { return Err(anyhow!("Local agents do not accept terminal keystrokes")); }
         let current = self.lookup(agent_id)?;
         if current.is_running() && !current.submit_child_is_dead() {
             // Raw terminal input stays bound to this process and retains the
@@ -3055,7 +3122,9 @@ impl AgentRegistry {
         Ok(Some(input))
     }
 
-    pub(crate) fn submit_prompt(&self, app: &AppHandle, agent_id: &str, input: String, source: crate::shell_switch::PromptSource) -> Result<()> {
+    pub(crate) fn submit_prompt(&self, app: &AppHandle, agent_id: &str, input: String, source: crate::shell_switch::PromptSource,
+        soul: Option<crate::soul_push::input::Input>) -> Result<()> {
+        if self.is_local(agent_id) { return Err(anyhow!("Local input requires a delivery identity")); }
         let replacement = self.replacement(agent_id);
         let _guard = replacement.serial.lock().expect("agent replacement poisoned");
         if source != crate::shell_switch::PromptSource::Composer {
@@ -3065,24 +3134,35 @@ impl AgentRegistry {
                 // one here and then launch again when it receives that error.
                 return Err(anyhow!("agent process needs to be launched again"));
             }
-            return pty.submit_prompt(app, input, source);
+            return pty.submit_prompt(app, input, source, soul);
         }
-        self.ready_for_input(app, agent_id, &replacement)?.submit_prompt(app, input, source)
+        self.ready_for_input(app, agent_id, &replacement)?.submit_prompt(app, input, source, soul)
+    }
+
+    pub(crate) fn check_session(&self, agent_id: &str) -> Option<Result<()>> {
+        let replacement = self.replacement(agent_id);
+        let _guard = replacement.serial.lock().expect("agent replacement poisoned");
+        let pty = self.lookup(agent_id).ok()?;
+        (pty.is_running() && !pty.submit_child_is_dead()).then(|| pty.check_session())
     }
 
     pub fn resize(&self, agent_id: &str, cols: u16, rows: u16) -> Result<()> {
+        if self.is_local(agent_id) { return Ok(()); }
         self.lookup(agent_id)?.resize(cols, rows)
     }
 
     pub fn scroll(&self, app: &AppHandle, agent_id: &str, lines: i32) -> Result<()> {
+        if self.is_local(agent_id) { return Ok(()); }
         self.lookup(agent_id)?.scroll(app, lines)
     }
 
     pub fn interrupt(&self, app: &AppHandle, agent_id: &str) -> Result<()> {
+        if self.is_local(agent_id) { return self.local_control(app, agent_id, serde_json::json!({"type":"abort"})).map(|_| ()); }
         self.lookup(agent_id)?.interrupt(app)
     }
 
     pub fn close(&self, app: &AppHandle, agent_id: &str) -> Result<()> {
+        if self.is_local(agent_id) { return self.close_local(agent_id); }
         self.replacement(agent_id)
             .epoch
             .fetch_add(1, Ordering::SeqCst);
@@ -3103,11 +3183,13 @@ impl AgentRegistry {
             .values()
             .map(AgentTerminalPty::summary)
             .collect::<Vec<_>>();
+        summaries.extend(self.local_summaries());
         summaries.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
         summaries
     }
 
     pub fn route_for(&self, agent_id: &str) -> Option<AgentRoute> {
+        if let Some(local) = self.local(agent_id) { return Some(local.route()); }
         self.ptys
             .lock()
             .expect("agent registry poisoned")
@@ -3128,6 +3210,14 @@ impl AgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soul_envelope_goes_inside_the_bracketed_paste_ahead_of_the_payload() {
+        let envelope = "<KOTA_MARKS v=\"1\" revision=\"3\">\n- [m-a] Note.\n</KOTA_MARKS>";
+        assert_eq!(with_envelope("\u{1b}[200~hello\nworld\u{1b}[201~", envelope),
+            format!("\u{1b}[200~{envelope}\nhello\nworld\u{1b}[201~"));
+        assert_eq!(with_envelope("plain", envelope), format!("{envelope}\nplain"));
+    }
 
     #[test]
     fn project_commit_email_is_read_per_spawn_without_changing_existing_identity() {

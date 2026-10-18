@@ -6,6 +6,7 @@
 //! raw logs are replayed as a repair source because those messages originate in
 //! Kota rather than in provider-native transcripts.
 
+use crate::soul::dream_usage::DreamUsage;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -33,6 +34,10 @@ use std::thread;
 use std::time::{Duration as StdDuration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter};
 
+mod kota_local;
+mod overflow;
+pub(crate) mod ownership;
+pub(crate) use kota_local::kota_local_sink;
 mod room_search;
 pub use room_search::{search_room, VioletRoomAround, VioletRoomSearchRequest, VioletRoomSearchResult};
 
@@ -49,7 +54,7 @@ const PARSED_EVENT_CACHE_VERSION: &str = "8";
 const ACTOR_RAW_REPLAY_CURSOR_VERSION: &str = "1";
 const FIRST_VIOLET_SEQ: u64 = 1;
 const MAX_SAFE_VIOLET_SEQ: u64 = (1u64 << 53) - 1;
-const MAX_EVENT_TEXT_CHARS: usize = 10_000;
+const MAX_EVENT_TEXT_CHARS: usize = 20_000;
 const CHATHISTORY_LATEST_LIMIT: usize = 500;
 const PRIVATE_START_BUFFER_SECS: i64 = 2;
 const PRIVATE_END_BUFFER_SECS: i64 = 30;
@@ -86,7 +91,7 @@ const CODEX_SANDBOX_DOWNGRADE_TEXT: &str =
     "Codex session lost room access after a Codex update — refresh session to restore.";
 const KIMI_UNKNOWN_EVENT_WARNING: &str =
     "Kimi Code emitted an unrecognized native event. Raw event retained in native logs.";
-const EMBER_DREAM_MAX_ACTIVE_ENTRIES: usize = 15;
+const EMBER_DREAM_MAX_ACTIVE_ENTRIES: usize = 10;
 #[cfg(not(test))]
 const VIOLET_SUMMARY_CLI_TIMEOUT_SECS: u64 = 225;
 const VIOLET_SUMMARY_FAILURE_COOLDOWN_SECS: i64 = 15 * 60;
@@ -266,6 +271,17 @@ struct EmberDreamPromptItem {
     id: String,
     kind: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<DreamUsage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ActiveDream {
+    pub id: String,
+    pub text: String,
+    /// Position in the active list, oldest first. Rewrites and new entries are
+    /// appended by consolidation; the file has no per-entry creation dates.
+    pub position: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -315,6 +331,8 @@ pub struct VioletRoomState {
     pub work_events: Vec<AgentWorkEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_bus_receipts: Vec<AgentBusReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_pending_deliveries: Vec<kota_local::LocalPendingDelivery>,
     pub raw_log_dir: String,
     pub chathistory_dir: String,
     pub synced_at: String,
@@ -323,6 +341,10 @@ pub struct VioletRoomState {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VioletChatMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_path: Option<String>,
+    #[serde(skip)]
+    legacy_dedupe_hash: Option<String>,
     pub id: String,
     pub session_id: String,
     pub agent_id: String,
@@ -349,6 +371,9 @@ pub struct VioletChatMessage {
     pub agent_avatar_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_provider: Option<String>,
+    /// Forward-only Local routing marker; model/effort remain each reply's actual caption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -465,6 +490,14 @@ enum RoomExceptionReshape {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct NativeEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    overflow_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_identity: Option<overflow::TextIdentity>,
+    #[serde(skip)]
+    pending_text: Option<overflow::PendingText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     actor_intent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
@@ -503,6 +536,12 @@ struct AgentIdentitySnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ChathistoryEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overflow_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_dedupe_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
     id: String,
     ts: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -571,6 +610,7 @@ pub struct ActorMessageRecord {
     pub target_agent_ids: Vec<String>,
     pub event_id: String,
     pub actor_intent: Option<String>,
+    pub origin: crate::message_origin::MessageOrigin,
 }
 
 #[derive(Clone, Default)]
@@ -619,6 +659,8 @@ impl Drop for OpencodeSqliteMonitor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SourceCursor {
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incarnation: Option<String>,
     offset: u64,
     line_index: usize,
     updated_at: String,
@@ -634,6 +676,7 @@ struct SourceCursor {
 
 #[derive(Clone, Debug, Default)]
 struct MessageModel {
+    route: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     codex_sandbox_policy: Option<String>,
@@ -644,6 +687,7 @@ impl MessageModel {
         if event.role == "assistant" && event.kind == "message" {
             event.model = self.model.clone();
             event.effort = self.effort.clone();
+            event.route = self.route.clone();
         }
     }
 
@@ -771,8 +815,10 @@ pub fn sync_project(
     let mut sources = Vec::new();
     let mut work_events = Vec::new();
     let mut agent_bus_receipts = Vec::new();
+    let mut local_pending_deliveries = Vec::new();
 
     for agent in agents {
+        if kota_local::sync_agent(project_root, &agent, &mut sources, &mut agent_bus_receipts, &mut local_pending_deliveries) { continue; }
         let mut status = VioletSourceStatus {
             agent_id: agent.agent_id.clone(),
             shell: agent.shell.clone(),
@@ -816,7 +862,11 @@ pub fn sync_project(
                     locate_claude_hook_source(project_root, &agent, session_id)
                 })
             });
-        if parse_error.is_none() {
+        let can_read_hooks = match source_binding_is_current(&agent) {
+            Ok(current) => current,
+            Err(error) => { parse_error.get_or_insert(error); false },
+        };
+        if parse_error.is_none() && can_read_hooks {
             if let Some(source) = hook_source.as_ref() {
                 if output_session_id.is_none() {
                     output_session_id = Some(source.session_id.clone());
@@ -832,7 +882,7 @@ pub fn sync_project(
         }
 
         if let Some(err) = parse_error {
-            status.status = "error".into();
+            status.status = source_error_status(&err).into();
             status.error = Some(err);
         } else if let Some(session_id) = output_session_id {
             let parsed = expand_shell_handoffs(parsed);
@@ -883,6 +933,7 @@ pub fn sync_project(
         sources,
         work_events,
         agent_bus_receipts,
+        local_pending_deliveries,
         raw_log_dir: path_string(&raw_log_dir),
         chathistory_dir: path_string(&chathistory_dir),
         synced_at: Utc::now().to_rfc3339(),
@@ -909,6 +960,7 @@ pub fn read_cache(
         sources: Vec::new(),
         work_events: Vec::new(),
         agent_bus_receipts: Vec::new(),
+        local_pending_deliveries: kota_local::cached_pending_deliveries(project_root, request.agent_ids.as_deref()),
         raw_log_dir: path_string(&raw_log_dir),
         chathistory_dir: path_string(&chathistory_dir),
         synced_at: Utc::now().to_rfc3339(),
@@ -941,7 +993,7 @@ fn dedupe_agent_bus_receipts(receipts: &mut Vec<AgentBusReceipt>) {
 }
 
 fn agent_bus_envelope_event_id(text: &str) -> Option<String> {
-    let trimmed = trim_terminal_envelope_padding(strip_leading_provider_attachment_markers(text));
+    let trimmed = strip_leading_soul_envelope(trim_terminal_envelope_padding(strip_leading_provider_attachment_markers(text)));
     if !is_agent_bus_envelope_text(trimmed) {
         return None;
     }
@@ -1031,22 +1083,74 @@ pub fn consolidate_ember_dreams(
         );
     };
     for project_root in project_roots {
-        let _ = sync_project(
-            project_root,
-            VioletRoomRequest {
-                project_root: None,
-                limit: Some(1),
-                before: None,
-                agent_ids: None,
-                around: None,
-                watch_agent_ids: None,
-            },
-        );
+        sync_room_history(project_root);
     }
-    match run_ember_dream_consolidation(project_roots, &request) {
+    let result = run_ember_dream_consolidation(project_roots, &request);
+    // Again after the run: the Dreams it archived reach old_dreams.md only now.
+    export_ember_episodes(project_roots);
+    match result {
         Ok((processed, archived)) => build_ember_dream_state(processed, archived, None),
         Err(err) => build_ember_dream_state(0, 0, Some(err)),
     }
+}
+
+/// Brings each project's room history up to date, then moves what is new there and in
+/// old_dreams.md into its incarnations' episodes. Ember runs this when the Dream
+/// countdown starts and again after consolidation; the cursors make a repeat a no-op.
+/// Failures only reach the debug log.
+pub fn export_ember_episodes(project_roots: &[PathBuf]) {
+    for error in sync_and_export_episodes(
+        project_roots,
+        &crate::kota_home_dir(),
+        sync_room_history,
+        crate::soul::export::export_after_dream,
+    ) {
+        crate::kota_debug_log(&error);
+    }
+}
+
+fn sync_room_history(project_root: &Path) {
+    let _ = sync_project(
+        project_root,
+        VioletRoomRequest {
+            project_root: None,
+            limit: Some(1),
+            before: None,
+            agent_ids: None,
+            around: None,
+            watch_agent_ids: None,
+        },
+    );
+}
+
+fn sync_and_export_episodes(
+    project_roots: &[PathBuf],
+    kota_home: &Path,
+    mut sync: impl FnMut(&Path),
+    mut export: impl FnMut(&Path, &Path) -> Result<crate::soul::export::ExportReport, String>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for project_root in project_roots {
+        sync(project_root);
+        match export(project_root, kota_home) {
+            Ok(report) => {
+                for agent in report.agents {
+                    if let Some(error) = agent.error {
+                        errors.push(format!(
+                            "[ember] episode export failed for {} in {}: {error}",
+                            agent.agent_id,
+                            project_root.display()
+                        ));
+                    }
+                }
+            }
+            Err(error) => errors.push(format!(
+                "[ember] episode export failed for {}: {error}",
+                project_root.display()
+            )),
+        }
+    }
+    errors
 }
 
 fn read_room_messages(
@@ -1132,7 +1236,20 @@ pub(crate) fn record_composer_temporal_message(
     target_agent_ids: &[String],
     temporal_gap: &crate::temporal_context::ComposerTemporalGap,
 ) -> Result<Vec<PathBuf>, String> {
+    record_composer_message(project_root, message_id, timestamp, text, target_agent_ids, Some(temporal_gap), Some(crate::message_origin::MessageOrigin::User.as_str()))
+}
+
+pub(crate) fn record_puppeteer_composer_message(project_root: &Path, message_id: &str, timestamp: &str,
+    text: &str, target: &str, gap: Option<&crate::temporal_context::ComposerTemporalGap>) -> Result<Vec<PathBuf>, String> {
+    record_composer_message(project_root, message_id, timestamp, text, &[target.to_owned()], gap, Some(crate::message_origin::MessageOrigin::Puppeteer.as_str()))
+}
+
+fn record_composer_message(project_root: &Path, message_id: &str, timestamp: &str, text: &str,
+    target_agent_ids: &[String], temporal_gap: Option<&crate::temporal_context::ComposerTemporalGap>, origin: Option<&str>) -> Result<Vec<PathBuf>, String> {
     let message = VioletChatMessage {
+        overflow_path: None,
+        legacy_dedupe_hash: None,
+        route: None,
         id: message_id.to_string(),
         session_id: "composer".into(),
         agent_id: "user".into(),
@@ -1145,9 +1262,57 @@ pub(crate) fn record_composer_temporal_message(
         native_event_id: Some(message_id.to_string()),
         violet_seq: None,
         actor_intent: None,
-        temporal_gap: Some(temporal_gap.clone()),
-        message_origin: None,
+        temporal_gap: temporal_gap.cloned(),
+        message_origin: origin.map(str::to_owned),
         target_agent_ids: target_agent_ids.to_vec(),
+        agent_display_name: None,
+        agent_avatar_id: None,
+        agent_provider: None,
+        model: None,
+        effort: None,
+        agent_status: None,
+    };
+    write_chathistory_messages(project_root, &[message])
+}
+
+/// This agent's latest projected reply, Soul's `previous_reply`. Reads only the
+/// bounded latest.jsonl; no file or no reply there means none.
+pub(crate) fn latest_reply(project_root: &Path, agent_id: &str) -> Option<String> {
+    read_chathistory_event_file(&chathistory_latest_path(project_root)).ok()?
+        .into_iter()
+        .rev()
+        .find(|event| event.agent_id == agent_id && event.role == "assistant"
+            && event.kind == "message" && event.message_origin.is_none())
+        .map(|event| event.text)
+}
+
+/// The Ghost Sasayaki row for the marks/Dreams delivered with one message. Its id
+/// is fixed per (agent, message), so a repeated confirmation keeps one row.
+pub(crate) fn record_soul_context(project_root: &Path, agent_id: &str, message_id: &str, text: &str)
+    -> Result<Vec<PathBuf>, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(agent_id);
+    hasher.update([0]);
+    hasher.update(message_id);
+    let message = VioletChatMessage {
+        overflow_path: None,
+        legacy_dedupe_hash: None,
+        route: None,
+        id: format!("violet-soul-{:x}", hasher.finalize())[..28].to_string(),
+        session_id: "soul".into(),
+        agent_id: agent_id.into(),
+        shell: "system".into(),
+        role: "system".into(),
+        kind: "context".into(),
+        timestamp: Utc::now().to_rfc3339(),
+        text: text.into(),
+        source_path: None,
+        native_event_id: Some(message_id.into()),
+        violet_seq: None,
+        actor_intent: None,
+        temporal_gap: None,
+        message_origin: None,
+        target_agent_ids: vec![agent_id.into()],
         agent_display_name: None,
         agent_avatar_id: None,
         agent_provider: None,
@@ -1194,10 +1359,12 @@ pub fn record_actor_message(
         actor_intent_line,
         target_line,
     );
-    let raw_block = format!("{raw_block}\n");
+    let raw_block = format!("{raw_block}- message_origin: {}\n\n", record.origin.as_str());
     let raw_path = raw_dir.join(format!("{session_id}.md"));
     append_text(&raw_path, &raw_block)?;
     let message = VioletChatMessage {
+        overflow_path: None,
+        legacy_dedupe_hash: None,
         temporal_gap: None,
         model: None,
         effort: None,
@@ -1211,9 +1378,10 @@ pub fn record_actor_message(
         text: record.text.trim().to_string(),
         source_path: Some(path_string(&source_path)),
         native_event_id: Some(record.event_id.clone()),
+        route: None,
         violet_seq: None,
         actor_intent: record.actor_intent.clone(),
-        message_origin: None,
+        message_origin: Some(record.origin.as_str().into()),
         target_agent_ids: record.target_agent_ids.clone(),
         agent_display_name: Some(record.actor_name.clone()),
         agent_avatar_id: Some(record.actor_id.clone()),
@@ -1506,7 +1674,7 @@ fn collect_violet_watch_plan(
         if !is_supported_violet_shell(&agent.shell) {
             continue;
         }
-        let source = if native_source_should_refresh_for_watch(&agent.shell) {
+        let lookup = || -> Result<Option<NativeSource>, String> { Ok(if native_source_should_refresh_for_watch(&agent.shell) {
             locate_native_source_for_project(project_root, &agent)?
         } else {
             let source = cached_project_native_source(project_root, &agent)?;
@@ -1515,7 +1683,11 @@ fn collect_violet_watch_plan(
             } else {
                 source
             }
-        };
+        }) };
+        let source = lookup().unwrap_or_else(|error| {
+            crate::kota_debug_log(&format!("[violet] source watch paused: {error}"));
+            None
+        });
         if let Some(source) = source {
             collect_violet_source_watch_paths(&agent, &source, &mut plan);
         } else {
@@ -1906,6 +2078,7 @@ fn locate_native_source_for_project(
     };
     // Native lookup can take time. Recheck the exact provider/session generation
     // after it returns, serialized with Save and actual startup commit.
+    let result = (|| {
     let mut source = locate_native_source(agent)?
         .filter(|source| native_source_is_after_agent_session_reset(agent, source));
     if source.is_none() && agent.shell == "codex" {
@@ -1916,20 +2089,40 @@ fn locate_native_source_for_project(
         source = cached_native_source_from_raw_logs(project_root, agent)?
             .filter(|source| native_source_is_after_agent_session_reset(agent, source));
     }
-    finish_source_lookup(agent, expected, source)
+    if let Some(source) = &source {
+        ownership::verify_source(agent, source).map_err(|e| e.to_string())?;
+    } else if agent.session_id.is_some() {
+        ownership::verify_saved_session(agent).map_err(|e| e.to_string())?;
+    }
+    Ok(source)
+    })();
+    finish_source_lookup(agent, expected, result)
+}
+
+fn source_error_status(error: &str) -> &'static str {
+    if error.starts_with(ownership::UNAVAILABLE) { "blocked" } else { "error" }
+}
+
+fn source_binding_is_current(agent: &ProjectAgent) -> Result<bool, String> {
+    let lock = crate::shell_switch::metadata_lock(&agent.cwd);
+    let state = lock.lock().unwrap();
+    Ok(state.starting.is_none() && read_yaml_file(&agent.cwd.join("agent.yaml"))?
+        .as_ref().is_none_or(|yaml| binding_agent_matches(agent, yaml)))
 }
 
 fn finish_source_lookup(
     agent: &ProjectAgent,
     expected: Option<Vec<Option<String>>>,
-    source: Option<NativeSource>,
+    result: Result<Option<NativeSource>, String>,
 ) -> Result<Option<NativeSource>, String> {
     let lock = crate::shell_switch::metadata_lock(&agent.cwd);
     let state = lock.lock().unwrap();
+    if state.starting.is_some() { return Ok(None); }
     let current = read_yaml_file(&agent.cwd.join("agent.yaml"))?;
-    if state.starting.is_some() || current.as_ref().map(binding_fingerprint) != expected {
+    if current.as_ref().map(binding_fingerprint) != expected {
         return Ok(None);
     }
+    let source = result?;
     if let Some(source) = &source {
         store_project_native_source(agent, source);
         if let Err(error) = write_agent_session_binding_locked(agent, source) {
@@ -1956,10 +2149,13 @@ fn cached_project_native_source(
 ) -> Result<Option<NativeSource>, String> {
     if agent.shell == "codex" {
         if let Some(source) = cached_codex_source(agent)? {
+            ownership::verify_source(agent, &source).map_err(|e| e.to_string())?;
             return Ok(Some(source));
         }
     }
-    cached_native_source_from_raw_logs(project_root, agent)
+    let source = cached_native_source_from_raw_logs(project_root, agent)?;
+    if let Some(source) = &source { ownership::verify_source(agent, source).map_err(|e| e.to_string())?; }
+    Ok(source)
 }
 
 fn store_project_native_source(agent: &ProjectAgent, source: &NativeSource) {
@@ -2037,9 +2233,15 @@ fn source_path_is_after_reset(path: &Path, reset: Option<SessionReset>) -> bool 
 }
 
 fn opencode_session_created(db: &Path, session: &str) -> Option<SystemTime> {
-    let conn = open_opencode_db(db).ok()?;
-    let ms: i64 = conn.query_row("select time_created from session where id = ?1", [session], |r| r.get(0)).ok()?;
-    (ms >= 0).then(|| SystemTime::UNIX_EPOCH + StdDuration::from_millis(ms as u64))
+    opencode_session_created_checked(db, session).ok().flatten()
+}
+
+fn opencode_session_created_checked(db: &Path, session: &str) -> Result<Option<SystemTime>, String> {
+    use rusqlite::OptionalExtension;
+    let conn = open_opencode_db(db)?;
+    let ms: Option<i64> = conn.query_row("select time_created from session where id = ?1", [session], |r| r.get(0))
+        .optional().map_err(|error| format!("read opencode session creation: {error}"))?;
+    Ok(ms.filter(|ms| *ms >= 0).map(|ms| SystemTime::UNIX_EPOCH + StdDuration::from_millis(ms as u64)))
 }
 
 fn session_reset(agent: &ProjectAgent) -> Option<SessionReset> {
@@ -2402,18 +2604,14 @@ fn preferred_antigravity_transcript_path(app_dir: &Path, conversation_id: &str) 
     antigravity_transcript_path(app_dir, conversation_id)
 }
 
-fn is_antigravity_transcript_file(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("transcript_full.jsonl" | "transcript.jsonl")
-    )
-}
-
 fn locate_antigravity_source(agent: &ProjectAgent) -> Result<Option<NativeSource>, String> {
     let Some(home) = dirs::home_dir() else {
         return Ok(None);
     };
-    let app_dir = antigravity_app_dir(&home);
+    locate_antigravity_source_in(&antigravity_app_dir(&home), agent)
+}
+
+fn locate_antigravity_source_in(app_dir: &Path, agent: &ProjectAgent) -> Result<Option<NativeSource>, String> {
     let cwd_candidates = antigravity_cwd_candidates(agent);
     let reset = session_reset(agent);
 
@@ -2455,53 +2653,8 @@ fn locate_antigravity_source(agent: &ProjectAgent) -> Result<Option<NativeSource
         }
     }
 
-    let brain_dir = app_dir.join("brain");
-    let mut candidates = Vec::new();
-    collect_matching_files(&brain_dir, &mut candidates, is_antigravity_transcript_file)?;
-    candidates.sort_by(|left, right| {
-        file_modified_time(right)
-            .cmp(&file_modified_time(left))
-            .then_with(|| right.cmp(left))
-    });
-    let mut seen_sessions = HashSet::new();
-    let mut unique_candidates = Vec::new();
-    for path in candidates {
-        if !source_path_is_after_reset(&path, reset) { continue; }
-        let session_id = antigravity_conversation_id_from_transcript(&path)
-            .unwrap_or_else(|| source_session_id(&path));
-        if seen_sessions.insert(session_id.clone()) {
-            unique_candidates.push(preferred_antigravity_transcript_path(&app_dir, &session_id));
-        }
-    }
-    let candidates = unique_candidates;
-    for path in &candidates {
-        if antigravity_transcript_mentions_any_cwd(path, &cwd_candidates)? {
-            let session_id = antigravity_conversation_id_from_transcript(path)
-                .unwrap_or_else(|| source_session_id(path));
-            let path = preferred_antigravity_transcript_path(&app_dir, &session_id);
-            return Ok(Some(NativeSource {
-                kind: "antigravity-jsonl".into(),
-                session_id,
-                path,
-                aux_path: None,
-            }));
-        }
-    }
-    if candidates.len() != 1 {
-        return Ok(None);
-    }
-    let Some(path) = candidates.into_iter().next() else {
-        return Ok(None);
-    };
-    let session_id = antigravity_conversation_id_from_transcript(&path)
-        .unwrap_or_else(|| source_session_id(&path));
-    let path = preferred_antigravity_transcript_path(&app_dir, &session_id);
-    Ok(Some(NativeSource {
-        kind: "antigravity-jsonl".into(),
-        session_id,
-        path,
-        aux_path: None,
-    }))
+    // Global sole candidates and transcript body paths do not prove ownership.
+    Ok(None)
 }
 
 fn antigravity_conversation_id_from_logs(
@@ -2662,31 +2815,6 @@ fn antigravity_conversation_id_for_cwd(
     Ok(None)
 }
 
-fn antigravity_transcript_mentions_any_cwd(
-    path: &Path,
-    cwd_candidates: &[PathBuf],
-) -> Result<bool, String> {
-    if cwd_candidates.is_empty() {
-        return Ok(false);
-    }
-    let mut needles = HashSet::new();
-    for cwd in cwd_candidates {
-        needles.insert(path_string(cwd));
-        if let Ok(canonical) = cwd.canonicalize() {
-            needles.insert(path_string(&canonical));
-        }
-    }
-    let file = fs::File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines().take(80) {
-        let line = line.map_err(|err| format!("read {}: {err}", path.display()))?;
-        if needles.iter().any(|needle| line.contains(needle)) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 fn sanitize_path_segment(value: &str) -> String {
     let sanitized = value
         .chars()
@@ -2703,15 +2831,6 @@ fn sanitize_path_segment(value: &str) -> String {
     } else {
         sanitized
     }
-}
-
-fn antigravity_conversation_id_from_transcript(path: &Path) -> Option<String> {
-    path.parent()?
-        .parent()?
-        .parent()?
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string)
 }
 
 fn file_modified_time(path: &Path) -> SystemTime {
@@ -3045,7 +3164,7 @@ fn parse_source(
     source: &NativeSource,
     privacy_spans: &[PrivacySpan],
 ) -> Result<Vec<NativeEvent>, String> {
-    match agent.shell.as_str() {
+    let mut events = match agent.shell.as_str() {
         "claude" => parse_jsonl_source_incremental(project_root, agent, source, parse_claude_line),
         "codex" => parse_jsonl_source_incremental_with_tail_bytes(
             project_root,
@@ -3074,7 +3193,9 @@ fn parse_source(
             parse_kimi_malformed_line,
         ),
         other => Err(format!("unsupported parser shell: {other}")),
-    }
+    }?;
+    overflow::finalize_events(project_root, &mut events, privacy_spans);
+    Ok(events)
 }
 
 fn parse_claude_hook_source(
@@ -3899,8 +4020,10 @@ where
         .map_err(|err| format!("stat {}: {err}", source.path.display()))?;
     let file_len = metadata.len();
     let cursor = read_source_cursor(&cursor_path)?;
+    let incarnation = ownership::incarnation(source).map_err(|error| error.to_string())?;
     let cursor_matches = cursor.as_ref().map_or(false, |cursor| {
         cursor.path == path_string(&source.path) && file_len >= cursor.offset
+            && cursor.incarnation.as_ref().is_none_or(|saved| Some(saved) == incarnation.as_ref())
     });
     let reset_cache = !cursor_matches;
     let start_offset = cursor
@@ -3915,6 +4038,7 @@ where
         .as_ref()
         .filter(|_| cursor_matches)
         .map(|cursor| MessageModel {
+            route: None,
             model: cursor.model.clone(),
             effort: cursor.effort.clone(),
             codex_sandbox_policy: cursor.codex_sandbox_policy.clone(),
@@ -3962,6 +4086,8 @@ where
         parsed_new.extend(events);
     }
     if !parsed_new.is_empty() {
+        let privacy_spans = load_privacy_spans(project_root)?;
+        overflow::finalize_events(project_root, &mut parsed_new, &privacy_spans);
         cached.extend(parsed_new);
         cached = dedupe_native_events(cached);
         cached.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -3976,6 +4102,7 @@ where
         &cursor_path,
         &SourceCursor {
             path: path_string(&source.path),
+            incarnation,
             offset: next_offset,
             line_index: next_line_index,
             updated_at: now_iso(),
@@ -4151,6 +4278,17 @@ fn parse_claude_line(
     json: JsonValue,
 ) -> Vec<NativeEvent> {
     if json_bool(&json, &["isMeta"]).unwrap_or(false) {
+        return Vec::new();
+    }
+    // Claude Code's idle-compaction notice is provider housekeeping. Match the
+    // native envelope and full scalar content before chat text is normalized;
+    // ordinary user/assistant quotes and other informational notices must survive.
+    if json.get("type").and_then(JsonValue::as_str) == Some("system")
+        && json.get("subtype").and_then(JsonValue::as_str) == Some("informational")
+        && json.get("level").and_then(JsonValue::as_str) == Some("notice")
+        && json.get("content").and_then(JsonValue::as_str)
+            == Some("Compacted while idle, before the prompt cache expired")
+    {
         return Vec::new();
     }
     // Compaction is not a real chat turn: Claude writes a `system/compact_boundary`
@@ -5609,6 +5747,9 @@ fn opencode_permission_event_from_log_line(
     );
 
     Some(NativeEvent {
+        overflow_path: None,
+        text_identity: None,
+        pending_text: None,
         actor_intent: None,
         model: None,
         effort: None,
@@ -5627,6 +5768,7 @@ fn opencode_permission_event_from_log_line(
         work_signal: Some("activity".into()),
         turn_id: None,
         stop_reason: Some("permission_requested".into()),
+        route: None,
     })
 }
 
@@ -5750,11 +5892,14 @@ fn parse_opencode_message_dir(
 }
 
 fn open_opencode_db(path: &Path) -> Result<Connection, String> {
-    Connection::open_with_flags(
+    let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|err| format!("open opencode db {}: {err}", path.display()))
+    .map_err(|err| format!("open opencode db {}: {err}", path.display()))?;
+    conn.busy_timeout(StdDuration::from_millis(250))
+        .map_err(|err| format!("set opencode busy timeout: {err}"))?;
+    Ok(conn)
 }
 
 fn open_opencode_monitor_db(path: &Path) -> Result<Connection, String> {
@@ -6287,17 +6432,21 @@ fn event(
             Some((handoff, original)) => {
                 let original = format!("{}{original}", &text[..text.len() - candidate.len()]);
                 handoff_bus_id = agent_bus_envelope_event_id(&original);
-                (Some(handoff), truncate_chars(&original, MAX_EVENT_TEXT_CHARS))
+                (Some(handoff), original)
             }
-            None => (None, truncate_chars(&text, MAX_EVENT_TEXT_CHARS)),
+            None => (None, text),
         }
-    } else { (None, truncate_chars(&text, MAX_EVENT_TEXT_CHARS)) };
+    } else { (None, text) };
+    let (text, pending_text) = overflow::prepare_text(text, role, kind);
     let work_signal = match role {
         "assistant" => Some("activity".to_string()),
         "user" => Some("started".to_string()),
         _ => None,
     };
     NativeEvent {
+        overflow_path: None,
+        text_identity: None,
+        pending_text,
         actor_intent: None,
         model: None,
         effort: None,
@@ -6312,7 +6461,9 @@ fn event(
         text,
         source_path: source.path.clone(),
         native_event_id: Some(event_id.to_string()),
-        message_origin: None,
+        message_origin: (role == "user" && kind == "message")
+            .then(|| crate::message_origin::MessageOrigin::User.as_str().into()),
+        route: None,
         work_signal,
         turn_id: None,
         stop_reason: None,
@@ -6325,6 +6476,10 @@ fn expand_shell_handoffs(events: Vec<NativeEvent>) -> Vec<NativeEvent> {
         if let Some(handoff) = event.shell_handoff.take() {
             let mut whisper = event.clone();
             whisper.text = handoff.text;
+            // This is a different body, not the long prompt it was split from.
+            whisper.text_identity = None;
+            whisper.pending_text = None;
+            whisper.overflow_path = None;
             whisper.native_event_id = Some(format!("kota-handoff:{}", handoff.id));
             whisper.role = "system".into();
             whisper.kind = "message".into();
@@ -6350,6 +6505,9 @@ fn control_event(
     turn_id: Option<String>,
 ) -> NativeEvent {
     NativeEvent {
+        overflow_path: None,
+        text_identity: None,
+        pending_text: None,
         actor_intent: None,
         model: None,
         effort: None,
@@ -6366,6 +6524,7 @@ fn control_event(
         native_event_id: Some(event_id.to_string()),
         message_origin: None,
         work_signal: Some(signal.to_string()),
+        route: None,
         turn_id,
         stop_reason: reason,
     }
@@ -6664,7 +6823,7 @@ fn room_message_dedupe_key(message: &VioletChatMessage) -> String {
     if message.temporal_gap.is_some() && message.agent_id == "user" {
         return format!("composer:{}", message.id);
     }
-    let normalized = one_line(&message.text).to_lowercase();
+    let normalized = message.legacy_dedupe_hash.clone().unwrap_or_else(|| overflow::dedupe_hash(&message.text));
     let bucket = DateTime::parse_from_rfc3339(&message.timestamp)
         .map(|time| time.timestamp() / 120)
         .unwrap_or(0);
@@ -6724,7 +6883,7 @@ fn native_event_dedupe_key(event: &NativeEvent) -> String {
         );
     }
 
-    let normalized = one_line(&event.text).to_lowercase();
+    let normalized = overflow::native_dedupe_hash(event);
     let bucket = DateTime::parse_from_rfc3339(&event.timestamp)
         .map(|time| time.timestamp() / 120)
         .unwrap_or(0);
@@ -6780,12 +6939,21 @@ fn is_internal_agent_bus_envelope_event(event: &NativeEvent) -> bool {
 }
 
 fn is_agent_bus_envelope_text(text: &str) -> bool {
-    let trimmed = trim_terminal_envelope_padding(strip_leading_provider_attachment_markers(text));
+    let trimmed = strip_leading_soul_envelope(trim_terminal_envelope_padding(strip_leading_provider_attachment_markers(text)));
     (trimmed.starts_with("<KOTA_MESSAGE ") || trimmed.starts_with("<KOTA_MESSAGE>"))
         && trimmed.ends_with("</KOTA_MESSAGE>")
 }
 
-fn strip_leading_provider_attachment_markers(text: &str) -> &str {
+/// Soul's marks envelope ahead of a bus frame on PTY delivery. Peeled by syntax,
+/// like the temporal gap, in exactly the room's MARKS_BLOCK shape.
+fn strip_leading_soul_envelope(text: &str) -> &str {
+    static BLOCK: OnceLock<regex::Regex> = OnceLock::new();
+    BLOCK.get_or_init(|| regex::Regex::new(r#"^\s*<KOTA_MARKS v="1" revision="[0-9]+">\r?\n[\s\S]*?\r?\n</KOTA_MARKS>(?:\r?\n|$)"#)
+        .expect("valid Soul envelope pattern"))
+        .find(text).map_or(text, |block| &text[block.end()..])
+}
+
+pub(crate) fn strip_leading_provider_attachment_markers(text: &str) -> &str {
     trim_terminal_envelope_padding(strip_leading_provider_attachment_prefix(text))
 }
 
@@ -6880,12 +7048,18 @@ fn looks_like_codex_task_started(text: &str) -> bool {
         && json.get("model_context_window").is_some()
 }
 
-/// Harness-injected envelopes that must never surface as room chat: local
-/// slash-command wrappers, background-task notifications (real user-role
-/// turns, so `isMeta` does not catch them), and whole-message
-/// `<system-reminder>` blocks. Real typed prompts never start with these
-/// tags; reminder blocks appended after real text fail the ends_with check
-/// and are kept.
+// Composer originals are explicitly recorded human input, even when the user
+// pastes a whole harness-looking block. Native provider/bootstrap records do
+// not have this source identity and keep their existing text filters.
+fn is_composer_original(role: &str, agent_id: &str, shell: &str, session_id: &str) -> bool {
+    matches!((role, agent_id, shell, session_id), ("user", "user", "composer", "composer"))
+}
+
+/// Harness-injected native envelopes: local slash-command wrappers, background
+/// task notifications and whole-message `<system-reminder>` blocks. Composer
+/// originals are source-exempt; reminder blocks appended after real text fail
+/// the ends_with check and are kept.
+
 fn is_harness_envelope_text(text: &str) -> bool {
     let trimmed = text.trim_start();
     let trimmed = trimmed
@@ -7275,7 +7449,8 @@ fn write_chathistory_messages_locked(
         .iter()
         .filter(|message| {
             !message.text.trim().is_empty()
-                && !is_bootstrap_noise_text(&message.text)
+                && (is_composer_original(&message.role, &message.agent_id, &message.shell, &message.session_id)
+                    || !is_bootstrap_noise_text(&message.text))
                 && !is_ignorable_codex_internal_context_message(message)
         })
         .cloned()
@@ -7432,13 +7607,8 @@ fn write_turn_credit_events_for_messages(
             }
         }
 
+        // Hero-level credits are gone (SOUL-PLAN v4 §17): the project ledger alone.
         crate::append_project_credit_event(project_root, &event)?;
-        if let Some(hero_id) = hero_id
-            .as_deref()
-            .filter(|id| !id.trim().is_empty() && *id != "unknown")
-        {
-            crate::append_tavern_hero_credit_event(hero_id, &event)?;
-        }
     }
 
     Ok(())
@@ -7991,7 +8161,8 @@ fn is_summary_count_event(event: &ChathistoryEvent) -> bool {
         && event.kind == "message"
         && matches!(event.role.as_str(), "user" | "assistant")
         && !is_project_agent_lifecycle_notification(event)
-        && !is_harness_envelope_text(&event.text)
+        && (is_composer_original(&event.role, &event.agent_id, &event.shell, &event.source.session_id)
+            || !is_harness_envelope_text(&event.text))
         && !is_ember_dream_entry_event(event)
         && !is_ignorable_codex_internal_context_event(event)
         && !event.text.trim().is_empty()
@@ -8325,8 +8496,17 @@ fn run_ember_dream_consolidation(
         return Ok((0, 0));
     }
     let current_dreams = read_active_dream_entries()?;
+    let usage = match crate::soul::dream_usage::summaries(&crate::kota_home_dir()) {
+        Ok(usage) => Some(usage),
+        Err(error) => {
+            // Missing usage is different from zero usage. This auxiliary
+            // signal must not prevent the existing Dream routine from running.
+            crate::kota_debug_log(&format!("[ember] Dream usage unavailable: {error}"));
+            None
+        }
+    };
     let (prompt_items, candidate_items) =
-        build_ember_dream_consolidation_items(&current_dreams, &project_entries);
+        build_ember_dream_consolidation_items(&current_dreams, &project_entries, usage.as_ref());
     if candidate_items.is_empty() {
         append_dream_entry_records(&collected_entries)?;
         return Ok((collected_entries.len(), 0));
@@ -8398,6 +8578,7 @@ fn render_ember_dream_consolidation_prompt(
 fn build_ember_dream_consolidation_items(
     current_dreams: &[String],
     project_entries: &[Vec<EmberDreamEntryRecord>],
+    usage: Option<&HashMap<String, DreamUsage>>,
 ) -> (Vec<EmberDreamPromptItem>, Vec<EmberDreamCandidateItem>) {
     let mut prompt_items = current_dreams
         .iter()
@@ -8406,6 +8587,7 @@ fn build_ember_dream_consolidation_items(
             id: ember_active_dream_id(index),
             kind: "active".into(),
             text: text.clone(),
+            usage: usage.map(|usage| usage.get(&dream_id(text)).cloned().unwrap_or_default()),
         })
         .collect::<Vec<_>>();
     let mut candidate_items = Vec::new();
@@ -8417,6 +8599,7 @@ fn build_ember_dream_consolidation_items(
                     id: id.clone(),
                     kind: "candidate".into(),
                     text: text.clone(),
+                    usage: None,
                 });
                 candidate_items.push(EmberDreamCandidateItem {
                     id,
@@ -8767,7 +8950,26 @@ fn append_dream_entry_records(records: &[EmberDreamEntryRecord]) -> Result<(), S
 }
 
 fn read_active_dream_entries() -> Result<Vec<String>, String> {
-    let path = ember_dreams_path();
+    read_active_dream_entries_at(&ember_dreams_path())
+}
+
+pub(crate) fn read_active_dreams() -> Result<Vec<ActiveDream>, String> {
+    read_active_dreams_at(&ember_dreams_path())
+}
+
+fn read_active_dreams_at(path: &Path) -> Result<Vec<ActiveDream>, String> {
+    Ok(read_active_dream_entries_at(path)?
+        .into_iter()
+        .enumerate()
+        .map(|(position, text)| ActiveDream {
+            id: dream_id(&text),
+            text,
+            position,
+        })
+        .collect())
+}
+
+fn read_active_dream_entries_at(path: &Path) -> Result<Vec<String>, String> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
@@ -8775,10 +8977,12 @@ fn read_active_dream_entries() -> Result<Vec<String>, String> {
         fs::read_to_string(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
     let mut entries = Vec::new();
     let mut in_active = false;
+    let mut has_active_section = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("## ") {
             in_active = trimmed == "## Active Dreams";
+            has_active_section |= in_active;
             continue;
         }
         if in_active && trimmed.starts_with("- ") {
@@ -8788,7 +8992,10 @@ fn read_active_dream_entries() -> Result<Vec<String>, String> {
             }
         }
     }
-    if entries.is_empty() {
+    // Only legacy files without an Active Dreams section need the fallback.
+    // An explicitly empty active section must not turn Last Dream metadata
+    // into a user insight.
+    if !has_active_section {
         for line in text.lines() {
             let trimmed = line.trim();
             if !trimmed.starts_with("- ") || trimmed == "- Never" {
@@ -8917,6 +9124,13 @@ fn normalized_dream_key(value: &str) -> String {
         .to_lowercase()
 }
 
+/// Shared identity for active pushes, account usage and archived episodes.
+/// Keep normalization identical to Dream consolidation's deduplication key.
+pub(crate) fn dream_id(text: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(normalized_dream_key(text).as_bytes()));
+    format!("d-{}", &digest[..8])
+}
+
 fn stable_summary_id(start: &str, end: &str, last_event_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(start.as_bytes());
@@ -8968,7 +9182,8 @@ fn chathistory_events_to_room_messages(
         .into_iter()
         .filter(|event| event.display && event.kind != "tool")
         .filter(|event| !is_project_agent_lifecycle_notification(event))
-        .filter(|event| !is_harness_envelope_text(&event.text))
+        .filter(|event| is_composer_original(&event.role, &event.agent_id, &event.shell, &event.source.session_id)
+            || !is_harness_envelope_text(&event.text))
         .filter(|event| !is_ember_dream_entry_event(event))
         .filter(|event| !is_ignorable_codex_internal_context_event(event))
         .map(message_from_chathistory_event)
@@ -9120,6 +9335,9 @@ fn chathistory_event_from_message(
     snapshot: Option<&AgentIdentitySnapshot>,
 ) -> ChathistoryEvent {
     ChathistoryEvent {
+        overflow_path: message.overflow_path.clone(),
+        legacy_dedupe_hash: message.legacy_dedupe_hash.clone(),
+        route: message.route.clone(),
         id: message.id.clone(),
         ts: message.timestamp.clone(),
         violet_seq: message.violet_seq,
@@ -9166,6 +9384,9 @@ fn chathistory_event_from_message(
 
 fn message_from_chathistory_event(event: ChathistoryEvent) -> VioletChatMessage {
     VioletChatMessage {
+        overflow_path: event.overflow_path,
+        legacy_dedupe_hash: event.legacy_dedupe_hash,
+        route: event.route,
         temporal_gap: event.temporal_gap,
         id: event.id,
         session_id: event.source.session_id,
@@ -9599,6 +9820,8 @@ fn parse_normalized_block(block: &str, session_id: &str, path: &Path) -> Option<
     let agent_avatar_id = is_system_actor.then(|| agent_id.clone());
     let agent_provider = is_system_actor.then(|| "system".into());
     Some(VioletChatMessage {
+        overflow_path: None,
+        legacy_dedupe_hash: None,
         temporal_gap: None,
         model: None,
         effort: None,
@@ -9614,7 +9837,8 @@ fn parse_normalized_block(block: &str, session_id: &str, path: &Path) -> Option<
         native_event_id,
         violet_seq: None,
         actor_intent: metadata_value(metadata, "actor_intent"),
-        message_origin: None,
+        route: None,
+        message_origin: metadata_value(metadata, "message_origin"),
         target_agent_ids,
         agent_display_name: actor_name,
         agent_avatar_id,
@@ -9639,6 +9863,9 @@ fn looks_like_legacy_tool_block(content: &str, metadata: &str) -> bool {
 
 fn event_to_message(event: NativeEvent) -> VioletChatMessage {
     VioletChatMessage {
+        overflow_path: event.overflow_path,
+        legacy_dedupe_hash: event.text_identity.as_ref().map(|identity| identity.room_dedupe_hash.clone()),
+        route: event.route.clone(),
         temporal_gap: None,
         id: if let Some(id) = event.native_event_id.as_ref().filter(|_| {
             event.actor_intent.as_deref() == Some(CODEX_SANDBOX_DOWNGRADE_INTENT)
@@ -9646,6 +9873,8 @@ fn event_to_message(event: NativeEvent) -> VioletChatMessage {
             id.clone()
         } else if event.message_origin.as_deref() == Some("shell_handoff") {
             stable_message_id("shell-handoff", &event.agent_id, "", event.native_event_id.as_deref().unwrap_or_default())
+        } else if let Some(identity) = event.text_identity.as_ref() {
+            identity.message_id.clone()
         } else {
             stable_message_id(&event.session_id, &event.agent_id, &event.timestamp, &event.text)
         },
@@ -10894,6 +11123,9 @@ mod tests {
 
     fn native_event(role: &str, kind: &str, text: &str) -> NativeEvent {
         NativeEvent {
+            overflow_path: None,
+            text_identity: None,
+            pending_text: None,
             actor_intent: None,
             model: None,
             effort: None,
@@ -10909,6 +11141,7 @@ mod tests {
             source_path: PathBuf::from("/tmp/a.jsonl"),
             native_event_id: None,
             message_origin: None,
+            route: None,
             work_signal: None,
             turn_id: None,
             stop_reason: None,
@@ -10953,12 +11186,13 @@ mod tests {
         let body = record["message"]["content"].as_str().unwrap();
         let summary = extract_tag_block(body, "summary").unwrap();
         let result = extract_tag_block(body, "result").unwrap().trim();
-        assert!(body.chars().count() > MAX_EVENT_TEXT_CHARS);
-        assert!(body.find("<subagent_tokens>").unwrap() > MAX_EVENT_TEXT_CHARS);
+        // This captured notification crossed the original 10k boundary.
+        assert!(body.chars().count() > 10_000);
+        assert!(body.find("<subagent_tokens>").unwrap() > 10_000);
 
         let events = parse_claude_notification_record(record.clone());
         assert_eq!(events.len(), 1);
-        let expected_text = truncate_chars(&format!("{summary}\n\n{result}"), MAX_EVENT_TEXT_CHARS);
+        let expected_text = format!("{summary}\n\n{result}").chars().take(MAX_EVENT_TEXT_CHARS).collect::<String>();
         assert_eq!(
             serde_json::to_value(&events[0]).unwrap(),
             serde_json::json!({
@@ -11013,11 +11247,10 @@ mod tests {
         let mut record = claude_notification_fixture("subagent");
         let body = record["message"]["content"].as_str().unwrap();
         let result = extract_tag_block(body, "result").unwrap();
-        record["message"]["content"] = body.replace(result, &"中🙂".repeat(6_000)).into();
+        record["message"]["content"] = body.replace(result, &"中🙂".repeat(MAX_EVENT_TEXT_CHARS)).into();
         let events = parse_claude_notification_record(record);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].text.chars().count(), MAX_EVENT_TEXT_CHARS + 3);
-        assert!(events[0].text.ends_with("..."));
+        assert_eq!(events[0].text.chars().count(), MAX_EVENT_TEXT_CHARS);
         assert!(events[0].text.contains("中🙂"));
         assert_eq!(events[0].role, "assistant");
     }
@@ -11086,7 +11319,7 @@ mod tests {
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].role, "user");
             assert_eq!(events[0].kind, "message");
-            assert_eq!(events[0].message_origin, None);
+            assert_eq!(events[0].message_origin.as_deref(), Some("user"));
         }
     }
 
@@ -11147,6 +11380,12 @@ mod tests {
                 &j["message"]["content"],
             )
             .into_iter()
+            .map(|mut event| {
+                // Simulate the original 10k parser, not today's preview limit.
+                event.text = truncate_chars(&event.text, 10_000);
+                event.pending_text = None;
+                event
+            })
             .filter(|e| !is_harness_envelope_text(&e.text))
             .collect()
         })
@@ -11840,6 +12079,8 @@ mod tests {
         text: &str,
     ) -> VioletChatMessage {
         VioletChatMessage {
+            overflow_path: None,
+            legacy_dedupe_hash: None,
             temporal_gap: None,
             model: None,
             effort: None,
@@ -11852,6 +12093,7 @@ mod tests {
             timestamp: timestamp.into(),
             text: text.into(),
             source_path: Some("/tmp/s.jsonl".into()),
+            route: None,
             native_event_id: Some(id.into()),
             violet_seq: None,
             actor_intent: None,
@@ -12856,6 +13098,15 @@ done"#;
         let events = filter_internal_agent_bus_envelopes(events);
         assert!(events.is_empty());
 
+        // Soul's marks envelope may lead a PTY bus frame; a loose tag is not peeled.
+        let marks = "<KOTA_MARKS v=\"1\" revision=\"3\">\n- [m-a] Note.\n</KOTA_MARKS>\n";
+        let frame = "<KOTA_MESSAGE id=\"agentbus-agent-a-message-4\" from=\"agent-a\" to=\"agent-b\" intent=\"handoff\">\nhello\n</KOTA_MESSAGE>";
+        let marked = native_event("user", "message", &format!("{marks}{frame}"));
+        assert!(is_internal_agent_bus_envelope_event(&marked));
+        assert_eq!(agent_bus_receipt_from_event(&marked).unwrap().event_id, "agentbus-agent-a-message-4");
+        let loose = native_event("user", "message", &format!("<KOTA_MARKS>\nliteral\n</KOTA_MARKS>\n{frame}"));
+        assert!(!is_internal_agent_bus_envelope_event(&loose));
+
         let synthetic_actor_message = native_event("assistant", "message", "hello");
         let (room, shared) =
             split_for_violet_outputs(vec![synthetic_actor_message], Path::new("/tmp/kota"));
@@ -13570,6 +13821,7 @@ done"#;
                 target_agent_ids: vec!["alice".into()],
                 event_id: "bartender-conflict:alice:abc123:def456".into(),
                 actor_intent: Some("conflict".into()),
+                origin: crate::message_origin::MessageOrigin::Bartender,
             },
         )
         .unwrap();
@@ -13670,6 +13922,7 @@ done"#;
                 target_agent_ids: vec!["alice".into()],
                 event_id: "actor-note-immediate".into(),
                 actor_intent: None,
+                origin: crate::message_origin::MessageOrigin::Bartender,
             },
         )
         .unwrap();
@@ -13811,9 +14064,12 @@ done"#;
             &root,
             &[
                 VioletChatMessage {
+                    overflow_path: None,
+                    legacy_dedupe_hash: None,
                     temporal_gap: None,
                     model: None,
                     effort: None,
+                    route: None,
                     id: "tool-event".into(),
                     session_id: "s".into(),
                     agent_id: "alice".into(),
@@ -13834,9 +14090,12 @@ done"#;
                     agent_status: None,
                 },
                 VioletChatMessage {
+                    overflow_path: None,
+                    legacy_dedupe_hash: None,
                     temporal_gap: None,
                     model: None,
                     effort: None,
+                    route: None,
                     id: "message-event".into(),
                     session_id: "s".into(),
                     agent_id: "alice".into(),
@@ -13886,9 +14145,12 @@ done"#;
             &root,
             &[
                 VioletChatMessage {
+                    overflow_path: None,
+                    legacy_dedupe_hash: None,
                     temporal_gap: None,
                     model: None,
                     effort: None,
+                    route: None,
                     id: "local-command".into(),
                     session_id: "s".into(),
                     agent_id: "alice".into(),
@@ -13909,9 +14171,12 @@ done"#;
                     agent_status: None,
                 },
                 VioletChatMessage {
+                    overflow_path: None,
+                    legacy_dedupe_hash: None,
                     temporal_gap: None,
                     model: None,
                     effort: None,
+                    route: None,
                     id: "real-user".into(),
                     session_id: "s".into(),
                     agent_id: "alice".into(),
@@ -14017,9 +14282,12 @@ done"#;
         let root = temp_violet_dir("violet-cache-pages");
         fs::create_dir_all(&root).unwrap();
         let message = |timestamp: &str, text: &str| VioletChatMessage {
+            overflow_path: None,
+            legacy_dedupe_hash: None,
             temporal_gap: None,
             model: None,
             effort: None,
+            route: None,
             id: stable_message_id("s", "alice", timestamp, text),
             session_id: "s".into(),
             agent_id: "alice".into(),
@@ -14098,9 +14366,12 @@ done"#;
         let root = temp_violet_dir("violet-filter-fallback");
         fs::create_dir_all(&root).unwrap();
         let message = |agent_id: &str, timestamp: &str, text: &str| VioletChatMessage {
+            overflow_path: None,
+            legacy_dedupe_hash: None,
             temporal_gap: None,
             model: None,
             effort: None,
+            route: None,
             id: stable_message_id("s", agent_id, timestamp, text),
             session_id: "s".into(),
             agent_id: agent_id.into(),
@@ -14167,6 +14438,7 @@ done"#;
                 target_agent_ids: vec!["alice".into()],
                 event_id: "bartender-conflict:alice:one:two".into(),
                 actor_intent: Some("conflict".into()),
+                origin: crate::message_origin::MessageOrigin::Bartender,
             },
         )
         .unwrap();
@@ -14240,6 +14512,9 @@ done"#;
     #[test]
     fn bootstrap_filter_drops_codex_setup_events() {
         let task_started = NativeEvent {
+            overflow_path: None,
+            text_identity: None,
+            pending_text: None,
             actor_intent: None,
             model: None,
             effort: None,
@@ -14258,10 +14533,14 @@ done"#;
             work_signal: None,
             turn_id: None,
             stop_reason: None,
+            route: None,
         };
         assert!(is_bootstrap_noise(&task_started));
 
         let adapter = NativeEvent {
+            overflow_path: None,
+            text_identity: None,
+            pending_text: None,
             text: "# AGENTS.md instructions for /tmp/kota/.agent-workspaces/alice\n\n<INSTRUCTIONS>\n<!-- kota:adapter:AGENTS.md -->\n</INSTRUCTIONS>".into(),
             ..task_started
         };
@@ -14435,9 +14714,12 @@ done"#;
         write_chathistory_messages(
             &root,
             &[VioletChatMessage {
+                overflow_path: None,
+                legacy_dedupe_hash: None,
                 temporal_gap: None,
                 model: None,
                 effort: None,
+                route: None,
                 id: "old-message".into(),
                 session_id: session_id.into(),
                 agent_id: agent_id.into(),
@@ -14544,9 +14826,12 @@ done"#;
         write_chathistory_messages(
             &root,
             &[VioletChatMessage {
+                overflow_path: None,
+                legacy_dedupe_hash: None,
                 temporal_gap: None,
                 model: None,
                 effort: None,
+                route: None,
                 id: "old-visible-message".into(),
                 session_id: session_id.into(),
                 agent_id: agent_id.into(),
@@ -14879,25 +15164,6 @@ done"#;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "commentary");
         assert_eq!(events[0].work_signal.as_deref(), Some("activity"));
-    }
-
-    #[test]
-    fn antigravity_transcript_can_be_matched_by_launch_cwd() {
-        let root = temp_violet_dir("antigravity-cwd-match");
-        let cwd = root.join("AgentWorkspaces/project/agent-a");
-        fs::create_dir_all(&cwd).unwrap();
-        let transcript = root.join("transcript.jsonl");
-        fs::write(
-            &transcript,
-            format!(
-                "{{\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"tool_calls\":[{{\"args\":{{\"DirectoryPath\":\"\\\"{}\\\"\"}}}}]}}\n",
-                cwd.display()
-            ),
-        )
-        .unwrap();
-
-        assert!(antigravity_transcript_mentions_any_cwd(&transcript, &[cwd]).unwrap());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -15414,7 +15680,8 @@ done"#;
             }],
         ];
 
-        let (prompt_items, candidates) = build_ember_dream_consolidation_items(&current, &projects);
+        let (prompt_items, candidates) =
+            build_ember_dream_consolidation_items(&current, &projects, Some(&HashMap::new()));
 
         assert_eq!(prompt_items.len(), 3);
         assert_eq!(prompt_items[0].id, "active-1");
@@ -15503,11 +15770,13 @@ done"#;
                 id: "active-1".into(),
                 kind: "active".into(),
                 text: "Existing Dream.".into(),
+                usage: Some(DreamUsage::default()),
             },
             EmberDreamPromptItem {
                 id: "candidate-1".into(),
                 kind: "candidate".into(),
                 text: "Candidate Dream.".into(),
+                usage: None,
             },
         ];
         let incomplete = vec![EmberDreamDecision {
@@ -15552,10 +15821,19 @@ done"#;
 mod shell_switch_tests;
 
 #[cfg(test)]
+mod message_origin_tests;
+
+#[cfg(test)]
 mod claude_paste_tests;
+
+#[cfg(test)]
+mod claude_idle_compaction_tests;
 
 #[cfg(test)]
 mod model_effort_tests;
 
 #[cfg(test)]
 mod sandbox_downgrade_tests;
+
+#[cfg(test)]
+mod ember_dream_tests;

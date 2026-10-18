@@ -1,0 +1,18 @@
+.local-model-credit {
+  display: inline;
+  margin-left: 6px;
+  color: var(--terra-hi);
+  font: 500 10px/1.4 var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.project-agent-combo-option-main:has(> .local-model-credit) {
+  display: flex;
+  align-items: baseline;
+}
+
+.project-agent-combo-option-main > .local-model-credit {
+  flex-shrink: 0;
+}

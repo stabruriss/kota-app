@@ -1,0 +1,12 @@
+# Kota Auto String
+# Configure this Local agent's auto-route block. Preserve unrelated settings.
+# Use 2-6 models, numbered model-1 through model-N in order.
+# Each model uses an exact provider/model ID and an effort supported by that model.
+# Effort values: off, minimal, low, medium, high, xhigh, max.
+# Give each model a non-empty intent of at most 200 characters.
+# default-model must name one of those model-N entries.
+# threshold: 0.05-0.95 in steps of 0.05.
+# Use linked providers. Do not add credentials to this file.
+# After completing the group, select it with model: kota/auto and effort: off.
+# File edits take effect when this Local agent next starts.
+# If the intended routing choices are unclear, ask the user before choosing.

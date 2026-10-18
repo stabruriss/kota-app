@@ -14,6 +14,7 @@ import {
 import { ATTR_WIDE, type AgentCli, type GridSnapshot } from '../src/types/agent-pty';
 import { __resetMockSmartPtyForTests } from '../src/pty-client';
 import * as ptyClient from '../src/pty-client';
+import * as reincarnation from '../src/lib/reincarnation';
 import {
   InputBar,
   escapePromptPath,
@@ -278,6 +279,8 @@ describe('Composer · bottom input bar', () => {
       expect(onSend).toHaveBeenCalledWith('alice', 'line one\nline two', {
         broadcast: false,
         privacy: false,
+        eligibilityText: 'line one\nline two',
+        onAccepted: expect.any(Function),
       });
     });
   });
@@ -326,6 +329,8 @@ describe('Composer · bottom input bar', () => {
       expect(onSend).toHaveBeenCalledWith('alice', 'secret', {
         broadcast: false,
         privacy: false,
+        eligibilityText: 'secret',
+        onAccepted: expect.any(Function),
       });
     });
   });
@@ -349,6 +354,8 @@ describe('Composer · bottom input bar', () => {
       expect(onSend).toHaveBeenCalledWith('alice', 'wake me', {
         broadcast: false,
         privacy: false,
+        eligibilityText: 'wake me',
+        onAccepted: expect.any(Function),
       });
     });
   });
@@ -385,6 +392,8 @@ describe('Composer · bottom input bar', () => {
       expect(onSend).toHaveBeenCalledWith('alice', 'first\nsecond', {
         broadcast: false,
         privacy: false,
+        eligibilityText: 'first\nsecond',
+        onAccepted: expect.any(Function),
       });
     });
   });
@@ -464,6 +473,8 @@ describe('Composer · bottom input bar', () => {
         {
           broadcast: false,
           privacy: false,
+          eligibilityText: '',
+          onAccepted: expect.any(Function),
         },
       );
     });
@@ -986,6 +997,153 @@ describe('M1 · canvas shell landmarks', () => {
         await Promise.resolve();
       });
       expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('moves episodes once as the Dream countdown appears, without holding the countdown up', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
+    const workspace = hydrationWorkspace('dream-episodes', []);
+    // The export never settles: nothing in the countdown may wait for it.
+    const exportEpisodes = vi.spyOn(ptyClient, 'emberExportEpisodes').mockImplementation(() => new Promise(() => {}));
+    const send = vi.spyOn(ptyClient, 'agentBusSend').mockImplementation(async (request) => ({
+      eventId: request.eventId || `event-${request.target}`,
+      targetAgentId: request.target,
+      submitted: true,
+      duplicate: false,
+      skippedReason: null,
+    }));
+    vi.spyOn(ptyClient, 'emberPrepareDreams').mockImplementation(async (request) => ({
+      accountDreamsPath: '/tmp/Kota/dreams/dreams.md',
+      entriesDir: '/tmp/Kota/dreams/entries',
+      archiveDir: '/tmp/Kota/dreams/archive',
+      projectDreamsPath: `${request.projectRoot}/project-memory/dreams.md`,
+      projected: false,
+    }));
+    const consolidate = vi.spyOn(ptyClient, 'emberConsolidateDreams').mockResolvedValue({
+      accountDreamsPath: '/tmp/Kota/dreams/dreams.md',
+      entriesDir: '/tmp/Kota/dreams/entries',
+      oldDreamsPath: '/tmp/Kota/dreams/old_dreams.md',
+      promptPath: '$KOTA_HOME/heroes/system-ember/ember-dream-consolidate.md',
+      processedEntryCount: 1,
+      activeEntryCount: 1,
+      archivedEntryCount: 0,
+      updatedAt: new Date().toISOString(),
+      error: null,
+    });
+    const dreamProjects = [
+      {
+        projectId: workspace.projectId,
+        projectRoot: workspace.localRoot,
+        projectName: workspace.projectId,
+        agents: [{ id: 'alice', name: 'Alice' }],
+      },
+      {
+        projectId: 'other',
+        projectRoot: '/tmp/kota/other',
+        projectName: 'other',
+        agents: [{ id: 'bob', name: 'Bob' }],
+      },
+    ];
+    const renderColumn = (workingAgents: ReadonlySet<AgentId>) => (
+      <RightColumn
+        sceneKey="conversation"
+        workspace={workspace}
+        workingAgents={workingAgents}
+        onOpenHotMem={vi.fn()}
+        dreamProjects={dreamProjects}
+      />
+    );
+    const view = render(renderColumn(new Set<AgentId>(['alice'])));
+
+    try {
+      const switchButton = screen.getByRole('switch', { name: 'Good Night' });
+      fireEvent.click(switchButton);
+      fireEvent.click(switchButton);
+      // The working-desk scene comes first: no countdown, nothing moved yet.
+      expect(screen.queryByText('Start dreaming in')).not.toBeInTheDocument();
+      expect(exportEpisodes).not.toHaveBeenCalled();
+
+      view.rerender(renderColumn(new Set()));
+      const countdown = screen.getByText('Start dreaming in').closest('.ember-dream-countdown') as HTMLElement;
+      expect(exportEpisodes).toHaveBeenCalledTimes(1);
+      expect(exportEpisodes).toHaveBeenCalledWith([workspace.localRoot, '/tmp/kota/other']);
+
+      act(() => vi.advanceTimersByTime(90_000));
+      expect(within(countdown).getByText('8:30')).toBeInTheDocument();
+      fireEvent.click(within(countdown).getByRole('button', { name: 'Pause' }));
+      fireEvent.click(within(countdown).getByRole('button', { name: 'Resume' }));
+
+      // Skipping the rest dreams now; the move after consolidation is the backend's.
+      fireEvent.click(within(countdown).getByRole('button', { name: 'Skip' }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(send).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        vi.advanceTimersByTime(120_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(consolidate).toHaveBeenCalledTimes(1);
+      expect(exportEpisodes).toHaveBeenCalledTimes(1);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('moves no episodes for a Good Night cancelled before or during the countdown', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
+    const workspace = hydrationWorkspace('dream-episodes-cancel', []);
+    const exportEpisodes = vi.spyOn(ptyClient, 'emberExportEpisodes').mockResolvedValue(undefined);
+    const send = vi.spyOn(ptyClient, 'agentBusSend');
+    const dreamProjects = [{
+      projectId: workspace.projectId,
+      projectRoot: workspace.localRoot,
+      projectName: workspace.projectId,
+      agents: [{ id: 'alice', name: 'Alice' }],
+    }];
+    const renderColumn = (workingAgents: ReadonlySet<AgentId>) => (
+      <RightColumn
+        sceneKey="conversation"
+        workspace={workspace}
+        workingAgents={workingAgents}
+        onOpenHotMem={vi.fn()}
+        dreamProjects={dreamProjects}
+      />
+    );
+    const view = render(renderColumn(new Set<AgentId>(['alice'])));
+    const toggleNight = (name: 'Good Night' | 'Back to Kota') => {
+      act(() => vi.advanceTimersByTime(1700));
+      const switchButton = screen.getByRole('switch', { name });
+      fireEvent.click(switchButton);
+      fireEvent.click(switchButton);
+    };
+
+    try {
+      // Cancelled on the working-desk scene: going idle afterwards starts nothing.
+      toggleNight('Good Night');
+      toggleNight('Back to Kota');
+      view.rerender(renderColumn(new Set()));
+      expect(screen.queryByText('Start dreaming in')).not.toBeInTheDocument();
+      expect(exportEpisodes).not.toHaveBeenCalled();
+
+      // Cancelled during the countdown: the one move it began is all there is.
+      toggleNight('Good Night');
+      expect(screen.getByText('Start dreaming in')).toBeInTheDocument();
+      expect(exportEpisodes).toHaveBeenCalledTimes(1);
+      expect(exportEpisodes).toHaveBeenCalledWith([workspace.localRoot]);
+      toggleNight('Back to Kota');
+      act(() => vi.advanceTimersByTime(600_000));
+      expect(screen.queryByText('Start dreaming in')).not.toBeInTheDocument();
+      expect(exportEpisodes).toHaveBeenCalledTimes(1);
+      expect(send).not.toHaveBeenCalled();
     } finally {
       view.unmount();
       vi.useRealTimers();
@@ -1837,11 +1995,11 @@ describe('W3+W5 · composer target picker', () => {
     render(<App />);
     fireEvent.keyDown(window, { key: '9', metaKey: true });
     await userEvent.click(screen.getByLabelText('Search room history'));
-    const search = screen.getByRole('searchbox');
+    const search = screen.getByRole('searchbox', { name: 'Search messages' });
     fireEvent.change(search, { target: { value: 'preserved search' } });
     fireEvent.keyDown(search, { key: '9', metaKey: true });
     expect(screen.queryByTestId('group-chat-overlay')).not.toBeInTheDocument();
-    expect(screen.getByRole('searchbox')).toHaveValue('preserved search');
+    expect(screen.getByRole('searchbox', { name: 'Search messages' })).toHaveValue('preserved search');
     fireEvent.keyDown(search, { key: '9', metaKey: true });
     expect(screen.getByTestId('group-chat-overlay')).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Search room history' })).toBeInTheDocument();
@@ -1849,7 +2007,7 @@ describe('W3+W5 · composer target picker', () => {
     await userEvent.click(screen.getByLabelText('Close search'));
     expect(document.querySelector<HTMLElement>('.workspace')?.inert).toBe(false);
     await userEvent.click(screen.getByLabelText('Search room history'));
-    expect(screen.getByRole('searchbox')).toHaveValue('');
+    expect(screen.getByRole('searchbox', { name: 'Search messages' })).toHaveValue('');
   });
 
   it('Ctrl+0 minimizes terminals without closing the group chat overlay', async () => {
@@ -2832,6 +2990,84 @@ describe('W3+W5 · composer target picker', () => {
     });
     if (outcome === 'failed') expect(retryButton).toBeInTheDocument();
     else expect(retryButton).not.toBeInTheDocument();
+  });
+
+  it('advances staggered Agent Bus deadlines even when the first confirmation changes no state', async () => {
+    vi.useFakeTimers();
+    const projectRoot = '/tmp/kota-agent-bus-staggered-deadlines';
+    const start = Date.parse('2026-07-18T13:00:00.000Z');
+    vi.setSystemTime(start);
+    const messages: ptyClient.VioletChatMessage[] = [0, 20_000].map((offset, index) => ({
+      id: `bus-${index}`, sessionId: 'bus-fixture', agentId: 'alice', shell: 'system',
+      role: 'assistant', kind: 'message', timestamp: new Date(start + offset).toISOString(),
+      text: `Timed bus message ${index}`, nativeEventId: `agentbus-deadline-${index}`, targetAgentIds: ['bob'],
+    }));
+    const readReceipt = vi.fn(() => messages[0].nativeEventId!);
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages, sources: [], workEvents: [],
+      agentBusReceipts: [{ agentId: 'bob', timestamp: messages[0].timestamp, get eventId() { return readReceipt(); } }],
+      rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`, syncedAt: messages[0].timestamp,
+    });
+    const view = render(<VioletRoomPanel projectRoot={projectRoot} agentIds={['alice', 'bob']} />);
+    try {
+      await act(async () => {});
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      readReceipt.mockClear();
+      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(178_900); });
+      expect(readReceipt).not.toHaveBeenCalled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(readReceipt).toHaveBeenCalled();
+      // The first message was already confirmed, so there is no state update
+      // to restart an effect. The second deadline must still remain scheduled.
+      expect(vi.getTimerCount()).toBe(1);
+      readReceipt.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(readReceipt).toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      readReceipt.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(readReceipt).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the Agent Bus deadline on project switch and leaves old-only rooms without polling', async () => {
+    vi.useFakeTimers();
+    const projectRoot = '/tmp/kota-agent-bus-deadline-switch';
+    const start = Date.parse('2026-07-18T13:00:00.000Z');
+    vi.setSystemTime(start);
+    const readCache = vi.spyOn(ptyClient, 'readVioletRoomCache').mockImplementation(async (request = {}) => ({
+      messages: [{
+        id: 'bus-switch', sessionId: 'bus-fixture', agentId: 'alice', shell: 'system',
+        role: 'assistant', kind: 'message',
+        timestamp: new Date(start - (request.projectRoot === projectRoot ? 0 : 600_000)).toISOString(),
+        text: 'Deadline follows its project', nativeEventId: 'agentbus-switch', targetAgentIds: ['bob'],
+      }], sources: [], workEvents: [], agentBusReceipts: [],
+      rawLogDir: `${request.projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${request.projectRoot}/project-memory/chathistory`, syncedAt: new Date(start).toISOString(),
+    }));
+    const view = render(<VioletRoomPanel projectRoot={projectRoot} agentIds={['alice', 'bob']} />);
+    try {
+      await act(async () => {});
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(vi.getTimerCount()).toBe(1);
+      view.rerender(<VioletRoomPanel projectRoot={`${projectRoot}-other`} agentIds={['alice', 'bob']} />);
+      await act(async () => {});
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(vi.getTimerCount()).toBe(0);
+      readCache.mockClear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(240_000); });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(readCache).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it('uses one deadline, not polling, before offering to send an unconfirmed Composer message now', async () => {
@@ -4806,6 +5042,7 @@ describe('M6.A · quick incarnate picker', () => {
         expect(view.container.querySelector('.stage')).not.toHaveAttribute('aria-busy');
       });
       await userEvent.click(screen.getByTestId('ribbon-add'));
+      await userEvent.click(await screen.findByRole('button', { name: /^Show all/ }));
       expect(await screen.findByTestId(`incarnate-shortcut-${profile.heroId}`)).toBeEnabled();
       expect(screen.getByTestId(`incarnate-shortcut-${existing.heroId}`)).toBeEnabled();
       expect(screen.queryByTestId(`incarnate-shortcut-${archived.heroId}`)).not.toBeInTheDocument();
@@ -4873,6 +5110,7 @@ describe('M6.A · quick incarnate picker', () => {
       expect(screen.queryByTestId('incarnate-shortcut-hero-cc')).not.toBeInTheDocument();
       expect(screen.getByTestId('incarnate-shortcut-hero-dex')).toHaveTextContent('Dex');
       expect(screen.queryByTestId('incarnate-shortcut-custom-gone')).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /^Show all/ }));
       expect(screen.getByTestId('incarnate-shortcut-custom-live')).toHaveTextContent('Live');
     } finally {
       localStorage.restore();
@@ -5007,11 +5245,47 @@ describe('M6.A · quick incarnate picker', () => {
     render(<App />);
     await userEvent.click(screen.getByTestId('seat-violet'));
     const before = currentAgentChipIds();
-    await userEvent.click(await screen.findByTestId('incarnate-seat-violet-hero-cc'));
+    expect(await screen.findByTestId('shortcut-recruit-modal')).toBeInTheDocument();
+    await userEvent.click(await screen.findByTestId('incarnate-shortcut-hero-cc'));
     const alice = await waitForNewAgentChip(before);
     expect(within(screen.getByTestId('seat-violet')).getByText('CC')).toBeInTheDocument();
     expect(screen.getByTestId('seat-bob')).toHaveTextContent('Open seat');
     await waitFor(() => expect(winFrame(alice)).toHaveClass('focused'));
+  });
+
+  it('recruits a cross-project incarnation after Yes and retries its source without a Tavern snapshot fallback', async () => {
+    const source = hydrationWorkspace('Atlas', ['agent-source']);
+    vi.spyOn(ptyClient, 'listWorkspaceProjects').mockResolvedValue([source]);
+    vi.spyOn(ptyClient, 'listProjectAgentIdentities').mockImplementation(async root => root === source.localRoot ? [hydrationIdentity('agent-source', 'Rowan')] : []);
+    vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockImplementation(async request => hydrationDetail(request.agentId, request.projectRoot ?? '/tmp/kota-test', 'Rowan'));
+    vi.spyOn(reincarnation, 'readRecruitPreview').mockResolvedValue({ state: 'linked', heroName: 'Rowan', sourceProjectName: 'Atlas', sourceAgentName: 'Rowan', marks: 8, episodes: 124 });
+    const direct = vi.spyOn(reincarnation, 'recruitFromIncarnation').mockImplementation(async request => {
+      const root = request.projectRoot || '/tmp/kota-test';
+      const spec = hydrationAgent(request.agentId, root);
+      return { request: { ...spec, cli: 'codex' as const }, projectRoot: root, adapterPath: spec.adapterPath!, shellPath: `${spec.cwd}/SHELL.yaml`, matchedSkills: [], missingSkills: [] };
+    });
+    direct.mockRejectedValueOnce(new Error('Source incarnation is no longer reachable.'));
+    const tavern = vi.spyOn(ptyClient, 'incarnateTavernHero');
+    const invite = vi.spyOn(ptyClient, 'inviteProjectAgentToTavern');
+    const spawn = vi.spyOn(ptyClient, 'spawnAgentPty');
+    render(<App />);
+    await userEvent.click(screen.getByTestId('seat-violet'));
+    await userEvent.click(await screen.findByRole('button', { name: /^mock\/Atlas/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Rowan' }));
+    await screen.findByRole('alertdialog', { name: 'Reincarnate Rowan?' });
+    expect(direct).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled();
+    const before = currentAgentChipIds();
+    await userEvent.click(screen.getByRole('button', { name: 'Yes' }));
+    await screen.findByText(/Source incarnation is no longer reachable/);
+    expect(tavern).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    const agentId = await waitForNewAgentChip(before);
+    expect(agentId).not.toBe('agent-source');
+    expect(direct).toHaveBeenCalledTimes(2);
+    expect(direct.mock.calls[1][0]).toMatchObject({ sourceProjectRoot: source.localRoot, sourceAgentId: 'agent-source', agentId, nameFields: { given: 'Rowan' } });
+    expect(spawn.mock.calls.some(([request]) => request.agentId === agentId && request.cli === 'codex')).toBe(true);
+    expect(screen.getByTestId('seat-violet')).toHaveTextContent('Rowan');
+    expect(tavern).not.toHaveBeenCalled(); expect(invite).not.toHaveBeenCalled();
   });
 });
 
@@ -6253,6 +6527,215 @@ describe('Project agent hydration recovery', () => {
     };
   }
 
+  describe('Saved provider Fresh confirmation', () => {
+    async function openProviderDetail() {
+      const workspace = hydrationWorkspace('saved-provider-fresh', ['agent-alpha']);
+      const { restoreStorage } = mockWorkspaceBootstrap(workspace);
+      let savedDetail = hydrationDetail('agent-alpha', workspace.localRoot, 'Alpha');
+      vi.spyOn(ptyClient, 'inspectProjectAgentIdentities').mockResolvedValue({
+        identities: [hydrationIdentity('agent-alpha', 'Alpha')],
+        workspaceEntryCount: 1,
+      });
+      vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockImplementation(async () => savedDetail);
+      vi.spyOn(ptyClient, 'listAccountSkills').mockResolvedValue([]);
+      vi.spyOn(ptyClient, 'supportedShellsStatus').mockResolvedValue([]);
+      vi.spyOn(ptyClient, 'listAgentPtys').mockResolvedValue([]);
+      const save = vi.spyOn(ptyClient, 'saveProjectAgentDetail').mockImplementation(async (request) => {
+        savedDetail = {
+          ...savedDetail,
+          provider: request.provider ?? savedDetail.provider,
+          cli: (request.provider ?? savedDetail.cli) as AgentCli,
+          model: request.model,
+          effort: request.effort,
+          avatarId: request.avatarId,
+          args: ['--model', request.model],
+        };
+        return savedDetail;
+      });
+      // Model the backend's Fresh resolver: it reads the saved configuration,
+      // rather than receiving provider/model values from the frontend.
+      const startFresh = vi.spyOn(ptyClient, 'startFreshProjectAgentSession').mockImplementation(async () => ({
+        detail: savedDetail,
+        request: {
+          ...workspace.agents[0]!,
+          cli: savedDetail.cli,
+          args: savedDetail.args,
+          sessionId: null,
+          freshSession: true,
+        },
+      }));
+      const spawn = vi.spyOn(ptyClient, 'spawnAgentPty');
+      const resolveLaunch = vi.spyOn(ptyClient, 'resolveProjectAgentLaunch');
+      const view = render(<App />);
+      try {
+        await screen.findByTestId('chip-agent-alpha');
+        await waitFor(() => expect(view.container.querySelector('.stage')).not.toHaveAttribute('aria-busy'));
+        fireEvent.contextMenu(screen.getByTestId('chip-agent-alpha'));
+        await userEvent.click(within(screen.getByRole('menu')).getByText('Detail'));
+        const dialog = await screen.findByRole('dialog', { name: 'Project agent detail' });
+        const shell = within(dialog).getByRole('region', { name: 'SHELL' });
+        await waitFor(() => expect(within(shell).getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+        await userEvent.click(within(shell).getByRole('button', { name: 'Edit SHELL' }));
+        return {
+          dialog, shell, save, startFresh, spawn, resolveLaunch,
+          savedDetail: () => savedDetail,
+          cleanup: () => { view.unmount(); restoreStorage(); },
+        };
+      } catch (error) {
+        view.unmount();
+        restoreStorage();
+        throw error;
+      }
+    }
+
+    function freshDialog() {
+      return screen.queryByRole('dialog', { name: 'Start fresh session for Alpha?' });
+    }
+
+    it('waits for a changed provider to save, then confirms through Fresh using the saved configuration', async () => {
+      const task = await openProviderDetail();
+      const persist = task.save.getMockImplementation()!;
+      let finishSave!: () => void;
+      const pending = new Promise<void>((resolve) => { finishSave = resolve; });
+      task.save.mockImplementationOnce(async (request) => { await pending; return persist(request); });
+      try {
+        await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
+        const model = within(task.shell).getByPlaceholderText('Exact model ID');
+        await userEvent.clear(model);
+        await userEvent.type(model, 'private-claude-model');
+        await userEvent.keyboard('{Enter}');
+        expect(task.save).not.toHaveBeenCalled();
+        expect(freshDialog()).not.toBeInTheDocument();
+
+        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        expect(task.save).toHaveBeenCalledOnce();
+        expect(task.savedDetail().provider).toBe('codex');
+        expect(freshDialog()).not.toBeInTheDocument();
+        expect(task.startFresh).not.toHaveBeenCalled();
+        await act(async () => { finishSave(); await pending; });
+
+        const dialog = await screen.findByRole('dialog', { name: 'Start fresh session for Alpha?' });
+        expect(dialog).toHaveClass('danger', 'plain-copy');
+        expect(within(dialog).getByText(
+          'This will end the current terminal session and apply the saved provider, model, and effort in a fresh session. Your identity, Ghost, workspace files, and project memory stay unchanged.',
+        )).toBeInTheDocument();
+        expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+        expect(task.savedDetail()).toMatchObject({ provider: 'claude', model: 'private-claude-model' });
+        expect(task.startFresh).not.toHaveBeenCalled();
+        expect(task.spawn).not.toHaveBeenCalled();
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Start Fresh Session' }));
+        await waitFor(() => expect(task.spawn).toHaveBeenCalledOnce());
+        expect(task.startFresh).toHaveBeenCalledExactlyOnceWith({ agentId: 'agent-alpha', projectRoot: null });
+        expect(task.spawn.mock.calls[0][0]).toMatchObject({
+          agentId: 'agent-alpha', cli: 'claude', args: ['--model', 'private-claude-model'],
+          sessionId: null, freshSession: true,
+        });
+        expect(task.resolveLaunch).not.toHaveBeenCalled();
+      } finally { task.cleanup(); }
+    });
+
+    it('keeps the provider saved on Cancel and does not prompt again on a subsequent model-only save', async () => {
+      const task = await openProviderDetail();
+      try {
+        await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
+        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        const dialog = await screen.findByRole('dialog', { name: 'Start fresh session for Alpha?' });
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+        expect(freshDialog()).not.toBeInTheDocument();
+        expect(task.savedDetail().provider).toBe('claude');
+        expect(task.startFresh).not.toHaveBeenCalled();
+        expect(task.spawn).not.toHaveBeenCalled();
+
+        await userEvent.click(within(task.shell).getByRole('button', { name: 'Edit SHELL' }));
+        expect(within(task.shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('claude');
+        const model = within(task.shell).getByPlaceholderText('Exact model ID');
+        await userEvent.clear(model);
+        await userEvent.type(model, 'next-claude-model');
+        await userEvent.keyboard('{Enter}');
+        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        await waitFor(() => expect(within(task.shell).getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+        expect(task.save).toHaveBeenCalledTimes(2);
+        expect(task.savedDetail()).toMatchObject({ provider: 'claude', model: 'next-claude-model' });
+        expect(freshDialog()).not.toBeInTheDocument();
+        expect(task.startFresh).not.toHaveBeenCalled();
+        expect(task.spawn).not.toHaveBeenCalled();
+      } finally { task.cleanup(); }
+    });
+
+    it.each(['unchanged', 'model', 'effort'])('does not prompt when the provider stays the same (%s)', async (change) => {
+      const task = await openProviderDetail();
+      try {
+        await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
+        await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'codex');
+        if (change !== 'unchanged') {
+          const input = within(task.shell).getByPlaceholderText(change === 'model' ? 'Exact model ID' : 'default');
+          await userEvent.clear(input);
+          await userEvent.type(input, change === 'model' ? 'private-codex-model' : 'high');
+          await userEvent.keyboard('{Enter}');
+        }
+        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        await waitFor(() => expect(within(task.shell).getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+        expect(task.save).toHaveBeenCalledTimes(change === 'unchanged' ? 0 : 1);
+        expect(task.savedDetail().provider).toBe('codex');
+        expect(freshDialog()).not.toBeInTheDocument();
+        expect(task.startFresh).not.toHaveBeenCalled();
+        expect(task.spawn).not.toHaveBeenCalled();
+      } finally { task.cleanup(); }
+    });
+
+    it('does not prompt for an avatar save while another provider is only staged', async () => {
+      const task = await openProviderDetail();
+      try {
+        await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
+        await userEvent.click(within(task.dialog).getByRole('button', { name: 'Change avatar' }));
+        await userEvent.click(within(task.dialog).getAllByRole('radio').find((option) => option.getAttribute('aria-checked') !== 'true')!);
+        await waitFor(() => expect(task.save).toHaveBeenCalledOnce());
+        await within(task.dialog).findByText('Saved');
+        expect(task.save.mock.calls[0][0].provider).toBe('codex');
+        expect(within(task.shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('claude');
+        expect(freshDialog()).not.toBeInTheDocument();
+        expect(task.startFresh).not.toHaveBeenCalled();
+        expect(task.spawn).not.toHaveBeenCalled();
+      } finally { task.cleanup(); }
+    });
+
+    it('does not prompt while a provider save is pending or after it fails', async () => {
+      const task = await openProviderDetail();
+      let failSave!: (error: Error) => void;
+      task.save.mockImplementationOnce(() => new Promise((_, reject) => { failSave = reject; }));
+      try {
+        await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
+        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        expect(task.save).toHaveBeenCalledOnce();
+        expect(freshDialog()).not.toBeInTheDocument();
+        await act(async () => { failSave(new Error('fixture save failed')); });
+        await within(task.dialog).findByText('Error: fixture save failed');
+        expect(task.savedDetail().provider).toBe('codex');
+        expect(within(task.shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('claude');
+        expect(freshDialog()).not.toBeInTheDocument();
+        expect(task.startFresh).not.toHaveBeenCalled();
+        expect(task.spawn).not.toHaveBeenCalled();
+      } finally { task.cleanup(); }
+    });
+
+    it('compares the actual returned provider rather than the requested dropdown value', async () => {
+      const task = await openProviderDetail();
+      task.save.mockResolvedValueOnce(task.savedDetail());
+      try {
+        await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
+        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        await waitFor(() => expect(within(task.shell).getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+        expect(task.save).toHaveBeenCalledOnce();
+        expect(task.save.mock.calls[0][0].provider).toBe('claude');
+        await userEvent.click(within(task.shell).getByRole('button', { name: 'Edit SHELL' }));
+        expect(within(task.shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('codex');
+        expect(freshDialog()).not.toBeInTheDocument();
+        expect(task.startFresh).not.toHaveBeenCalled();
+        expect(task.spawn).not.toHaveBeenCalled();
+      } finally { task.cleanup(); }
+    });
+  });
+
   it('passes the detail provider or CLI fallback through to seat badges without changing seat titles', async () => {
     const workspace = hydrationWorkspace('fable-provider-seats', ['agent-alpha', 'agent-beta']);
     const { restoreStorage } = mockWorkspaceBootstrap(workspace);
@@ -6491,7 +6974,7 @@ describe('Project agent hydration recovery', () => {
       fireEvent.keyDown(window, { key: '1', metaKey: true });
       let dialog = await screen.findByRole('dialog', { name: "Session can't resume" });
       expect(within(dialog).getByText(
-        'The saved session has expired. Start a new session?',
+        "The saved session can't be resumed. Agent memory is safe. Start a new session?",
       )).toBeInTheDocument();
       await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
       expect(startFresh).not.toHaveBeenCalled();
@@ -6837,5 +7320,171 @@ describe('Project agent hydration recovery', () => {
       restoreStorage();
       vi.useRealTimers();
     }
+  });
+});
+
+
+describe('PTY session ownership recovery', () => {
+  it.each(['Cancel', 'OK'] as const)('ownership preflight %s retains the draft and emits nothing', async choice => {
+    const view = render(<App />);
+    const id = await recruitHero('hero-cc');
+    const check = vi.spyOn(ptyClient, 'checkProjectAgentSession').mockResolvedValue(false);
+    const submit = vi.spyOn(ptyClient, 'submitAgentPromptPty').mockResolvedValue();
+    const fresh = vi.spyOn(ptyClient, 'startFreshProjectAgentSession');
+    const spawn = vi.spyOn(ptyClient, 'spawnAgentPty');
+    try {
+      await userEvent.type(screen.getByTestId('input-field'), 'keep my unsent draft');
+      await userEvent.click(screen.getByTestId('ib-send'));
+      const dialog = await screen.findByRole('dialog', { name: "Session can't resume" });
+      expect(check).toHaveBeenCalledWith(expect.objectContaining({ agentId: id }));
+      expect(violetComposerSentHistory()).toHaveLength(0);
+      expect(submit).not.toHaveBeenCalled();
+      await userEvent.click(within(dialog).getByRole('button', { name: choice }));
+      await waitFor(() => expect(screen.getByTestId('ib-send')).not.toBeDisabled());
+      expect(composerText()).toBe('keep my unsent draft');
+      expect(submit).not.toHaveBeenCalled();
+      expect(violetComposerSentHistory()).toHaveLength(0);
+      expect(fresh).toHaveBeenCalledTimes(choice === 'OK' ? 1 : 0);
+      expect(spawn).toHaveBeenCalledTimes(choice === 'OK' ? 1 : 0);
+    } finally { view.unmount(); }
+  });
+
+  it('ownership recovery coalesces simultaneous open requests for a running agent', async () => {
+    const view = render(<App />);
+    const id = await recruitHero('hero-cc');
+    vi.spyOn(ptyClient, 'checkProjectAgentSession').mockResolvedValue(false);
+    const fresh = vi.spyOn(ptyClient, 'startFreshProjectAgentSession');
+    try {
+      fireEvent.doubleClick(chip(id));
+      fireEvent.doubleClick(chip(id));
+      const dialog = await screen.findByRole('dialog', { name: "Session can't resume" });
+      expect(screen.getAllByRole('dialog', { name: "Session can't resume" })).toHaveLength(1);
+      await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await flushHydrationPromises();
+      expect(screen.queryByRole('dialog', { name: "Session can't resume" })).not.toBeInTheDocument();
+      expect(fresh).not.toHaveBeenCalled();
+    } finally { view.unmount(); }
+  });
+
+  it('ownership recovery keeps the draft if Fresh fails', async () => {
+    const view = render(<App />);
+    await recruitHero('hero-cc');
+    vi.spyOn(ptyClient, 'checkProjectAgentSession').mockResolvedValue(false);
+    vi.spyOn(ptyClient, 'startFreshProjectAgentSession').mockRejectedValue(new Error('fixture startup failed'));
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const submit = vi.spyOn(ptyClient, 'submitAgentPromptPty').mockResolvedValue();
+    try {
+      await userEvent.type(screen.getByTestId('input-field'), 'keep after failed fresh');
+      await userEvent.click(screen.getByTestId('ib-send'));
+      const dialog = await screen.findByRole('dialog', { name: "Session can't resume" });
+      await userEvent.click(within(dialog).getByRole('button', { name: 'OK' }));
+      await waitFor(() => expect(screen.getByTestId('ib-send')).not.toBeDisabled());
+      expect(composerText()).toBe('keep after failed fresh');
+      expect(submit).not.toHaveBeenCalled();
+      expect(violetComposerSentHistory()).toHaveLength(0);
+    } finally { view.unmount(); }
+  });
+
+  it('clears the composer as soon as the room bubble appears while PTY delivery is still pending', async () => {
+    const view = render(<App />);
+    const id = await recruitHero('hero-cc');
+    vi.spyOn(ptyClient, 'checkProjectAgentSession').mockResolvedValue(true);
+    let finishSubmit!: () => void;
+    const submit = vi.spyOn(ptyClient, 'submitAgentPromptPty').mockImplementation(
+      () => new Promise<void>(resolve => { finishSubmit = resolve; }),
+    );
+    try {
+      await userEvent.click(screen.getByTestId('group-chat-trigger'));
+      await userEvent.type(screen.getByTestId('input-field'), 'clear on bubble while pending');
+      await userEvent.click(screen.getByTestId('ib-send'));
+      expect(await screen.findByText('clear on bubble while pending')).toBeInTheDocument();
+      await waitFor(() => expect(submit).toHaveBeenCalledWith(id, expect.stringContaining('clear on bubble while pending'), expect.anything()));
+      expect(composerText()).toBe('');
+      await userEvent.type(screen.getByTestId('input-field'), 'next draft while pending');
+      expect(composerText()).toBe('next draft while pending');
+      await act(async () => finishSubmit());
+      await waitFor(() => expect(screen.getByTestId('ib-send')).not.toBeDisabled());
+      expect(composerText()).toBe('next draft while pending');
+    } finally { view.unmount(); }
+  });
+
+  it('ownership race after a partial broadcast never resends a successful recipient', async () => {
+    const view = render(<App />);
+    await enableBroadcastMode();
+    const a = recruitedHeroAgents['hero-cc'][0]!;
+    const b = recruitedHeroAgents['hero-dex'][0]!;
+    vi.spyOn(ptyClient, 'checkProjectAgentSession').mockResolvedValue(true);
+    let rejected = false;
+    const submit = vi.spyOn(ptyClient, 'submitAgentPromptPty').mockImplementation(async id => {
+      if (id === b && !rejected) { rejected = true; throw new Error('KOTA_SESSION_UNAVAILABLE: fixture'); }
+    });
+    try {
+      await userEvent.type(screen.getByTestId('input-field'), 'one broadcast');
+      await userEvent.click(screen.getByTestId('ib-send'));
+      const dialog = await screen.findByRole('dialog', { name: "Session can't resume" });
+      await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: "Session can't resume" })).not.toBeInTheDocument());
+      expect(composerText()).toBe('');
+      expect(violetComposerSentHistory().at(-1)?.delivery?.retryTargetAgentIds).toEqual([b]);
+      await userEvent.click(screen.getByTestId('group-chat-trigger'));
+      await userEvent.click(await screen.findByRole('button', { name: 'Queued message — try sending now' }));
+      await waitFor(() => expect(submit.mock.calls.filter(([id]) => id === b)).toHaveLength(2));
+      expect(composerText()).toBe('');
+      expect(submit.mock.calls.filter(([id]) => id === a)).toHaveLength(1);
+      expect(violetComposerSentHistory().at(-1)?.targetAgentIds).toEqual([b]);
+      // Host-only Soul metadata names the first composer message; room Retry has no draft.
+      const [first] = violetComposerSentHistory().slice(-2);
+      expect(submit.mock.calls.find(([id]) => id === a)?.[2]).toEqual({ messageId: first!.id, createdAt: first!.timestamp,
+        origin: 'user', originalText: 'one broadcast', eligibilityText: 'one broadcast', targetAgentIds: first!.targetAgentIds });
+      expect(submit.mock.calls.at(-1)?.[2]).toBeUndefined();
+    } finally { view.unmount(); }
+  });
+
+  it.each(['Cancel', 'OK'] as const)('ownership partial %s cannot suppress a later identical new draft', async choice => {
+    const view = render(<App />);
+    await enableBroadcastMode();
+    const a = recruitedHeroAgents['hero-cc'][0]!;
+    const b = recruitedHeroAgents['hero-dex'][0]!;
+    vi.spyOn(ptyClient, 'checkProjectAgentSession').mockResolvedValue(true);
+    let rejected = false;
+    const submit = vi.spyOn(ptyClient, 'submitAgentPromptPty').mockImplementation(async id => {
+      if (id === b && !rejected) { rejected = true; throw new Error('KOTA_SESSION_UNAVAILABLE: fixture'); }
+    });
+    try {
+      await userEvent.type(screen.getByTestId('input-field'), 'ok');
+      await userEvent.click(screen.getByTestId('ib-send'));
+      const dialog = await screen.findByRole('dialog', { name: "Session can't resume" });
+      await userEvent.click(within(dialog).getByRole('button', { name: choice }));
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: "Session can't resume" })).not.toBeInTheDocument());
+      expect(composerText()).toBe('');
+      await userEvent.type(screen.getByTestId('input-field'), 'ok');
+      await userEvent.click(screen.getByTestId('ib-send'));
+      await waitFor(() => expect(composerText()).toBe(''));
+      expect(submit.mock.calls.filter(([id]) => id === a)).toHaveLength(2);
+      expect(submit.mock.calls.filter(([id]) => id === b)).toHaveLength(2);
+      expect(violetComposerSentHistory().at(-1)?.targetAgentIds).toEqual([a, b]);
+    } finally { view.unmount(); }
+  });
+
+  it('a transient session preflight error reports the existing launch failure and keeps the draft', async () => {
+    const view = render(<App />);
+    const id = await recruitHero('hero-cc');
+    vi.spyOn(ptyClient, 'checkProjectAgentSession').mockRejectedValue(new Error('fixture database busy'));
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const fresh = vi.spyOn(ptyClient, 'startFreshProjectAgentSession');
+    const submit = vi.spyOn(ptyClient, 'submitAgentPromptPty');
+    try {
+      await userEvent.type(screen.getByTestId('input-field'), 'retain on temporary failure');
+      await userEvent.click(screen.getByTestId('ib-send'));
+      await waitFor(() => expect(alert).toHaveBeenCalledWith(`Open ${id} failed: fixture database busy`));
+      expect(composerText()).toBe('retain on temporary failure');
+      expect(screen.queryByRole('dialog', { name: "Session can't resume" })).not.toBeInTheDocument();
+      expect(fresh).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
+      expect(violetComposerSentHistory()).toHaveLength(0);
+      fireEvent.doubleClick(chip(id));
+      await waitFor(() => expect(alert).toHaveBeenCalledTimes(2));
+      expect(fresh).not.toHaveBeenCalled();
+    } finally { view.unmount(); }
   });
 });

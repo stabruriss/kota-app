@@ -45,6 +45,7 @@ export interface AgentRibbonProps {
   onTable: readonly AgentAtTable[];
   offTable: readonly OffTableAgent[];
   targetAgent: AgentId | null;
+  danceActive?: boolean;
   privateAgents?: ReadonlySet<AgentId>;
   chatFilterActive?: boolean;
   chatFilterTargetAgents?: readonly AgentId[];
@@ -86,6 +87,7 @@ export function AgentRibbon({
   onTable,
   offTable,
   targetAgent,
+  danceActive = false,
   privateAgents,
   chatFilterActive,
   chatFilterTargetAgents = [],
@@ -137,6 +139,17 @@ export function AgentRibbon({
   );
   const hasOff = offTable.length > 0;
   const [expanded, setExpanded] = useState(false);
+  const danceClick = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelDanceClick = () => { if (danceClick.current) clearTimeout(danceClick.current); danceClick.current = null; };
+  useEffect(() => cancelDanceClick, [danceActive]);
+  const openAgent = (id: AgentId) => {
+    if (agentsHydrating) return;
+    if (!danceActive) { onOpenAgent(id); return; }
+    cancelDanceClick();
+    danceClick.current = setTimeout(() => { danceClick.current = null; onOpenAgent(id); }, 220);
+  };
+  const doubleAgent = (id: AgentId) => { cancelDanceClick(); onDblClickAgent?.(id); };
+  const contextAgent = (id: AgentId, point: { x: number; y: number }) => { cancelDanceClick(); onAgentContextMenu?.(id, point); };
   const showOff = hasOff && expanded;
   const onTableRowRef = useRef<HTMLDivElement | null>(null);
   const onTableStripRef = useRef<HTMLDivElement | null>(null);
@@ -298,7 +311,8 @@ export function AgentRibbon({
   });
 
   return (
-    <div className="ribbon-wrap" data-testid="agent-ribbon">
+    <div className={`ribbon-wrap${danceActive ? ' dance-active' : ''}`} data-testid="agent-ribbon">
+      {danceActive && <span className="ribbon-dance-label">PUPPETEER DANCING</span>}
       <div className="ribbon">
         <RibbonRow
           className="on-table"
@@ -425,11 +439,9 @@ export function AgentRibbon({
                 cmdSlot={index + 1}
                 fileTreeHover={fileTreeHoveredAgent === id}
                 hostRef={(node) => setChipNode(index + 1, node)}
-                onClick={() => {
-                  if (!agentsHydrating) onOpenAgent(id);
-                }}
-                onDoubleClick={onDblClickAgent && !agentsHydrating ? () => onDblClickAgent(id) : undefined}
-                onContextMenu={agentsHydrating ? undefined : onAgentContextMenu}
+                onClick={() => openAgent(id)}
+                onDoubleClick={onDblClickAgent && !agentsHydrating ? () => doubleAgent(id) : undefined}
+                onContextMenu={agentsHydrating || !onAgentContextMenu ? undefined : contextAgent}
                 onCommend={agentsHydrating ? undefined : onCommendAgent}
                 record={agentRecords?.[id]}
               />
@@ -467,11 +479,9 @@ export function AgentRibbon({
                     minimized={minSet.has(a.id)}
                     disabled={agentsHydrating}
                     fileTreeHover={fileTreeHoveredAgent === a.id}
-                    onClick={() => {
-                      if (!agentsHydrating) onOpenAgent(a.id);
-                    }}
-                    onDoubleClick={onDblClickAgent && !agentsHydrating ? () => onDblClickAgent(a.id) : undefined}
-                    onContextMenu={agentsHydrating ? undefined : onAgentContextMenu}
+                    onClick={() => openAgent(a.id)}
+                    onDoubleClick={onDblClickAgent && !agentsHydrating ? () => doubleAgent(a.id) : undefined}
+                    onContextMenu={agentsHydrating || !onAgentContextMenu ? undefined : contextAgent}
                     onCommend={agentsHydrating ? undefined : onCommendAgent}
                     record={agentRecords?.[a.id]}
                   />

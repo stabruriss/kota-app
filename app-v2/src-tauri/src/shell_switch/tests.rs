@@ -51,10 +51,25 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn resumed_pty_commits_verified_id_instead_of_stale_saved_hint() {
+    let f = Fixture::new();
+    let mut request = f.request(false);
+    let mut launch = Launch::prepare(&mut request, None).unwrap().unwrap();
+    assert!(!launch.is_fresh());
+    assert_eq!(request.session_id.as_deref(), Some("old-session"));
+    // Ownership preflight replaces a stale hint before process creation.
+    request.session_id = Some("verified-session".into());
+    launch.commit(request.session_id.as_deref()).unwrap();
+    assert_eq!(yaml_string(&f.yaml(), "session-id").as_deref(), Some("verified-session"));
+    assert!(yaml_string(&f.yaml(), "session-reset-at").is_none());
+}
+
+#[test]
 fn actual_save_and_reopen_keep_applied_shell_ghost_and_session_until_start() {
     let f = Fixture::new();
     let manager = IntegrationManager::default();
     let save = |provider: &str| ProjectAgentSaveRequest {
+        shell_revision: Some(crate::puppeteer_setup::revision(Some(&fs::read(f.cwd.join("SHELL.yaml")).unwrap()))),
         agent_id: "agent-fixture73".into(),
         project_root: Some(path_string(&f.root)),
         provider: Some(provider.into()),
@@ -62,6 +77,7 @@ fn actual_save_and_reopen_keep_applied_shell_ghost_and_session_until_start() {
         name_fields: None,
         model: "default".into(),
         effort: None,
+        auto_route: None,
         avatar_id: None,
         skills: Vec::new(),
         ghost: "Incarnation Ghost.".into(),
@@ -97,6 +113,53 @@ fn actual_save_and_reopen_keep_applied_shell_ghost_and_session_until_start() {
         .unwrap()
         .text
         .contains("from codex to kimi"));
+}
+
+#[test]
+fn a_legacy_default_local_agent_can_save_identity_ghost_and_skills_without_pi() {
+    let f = Fixture::new();
+    f.target("kota-local");
+    let manager = IntegrationManager::default();
+    let request = |name: &str, ghost: &str, skills: Vec<String>| ProjectAgentSaveRequest {
+        shell_revision: Some(crate::puppeteer_setup::revision(Some(&fs::read(f.cwd.join("SHELL.yaml")).unwrap()))),
+        agent_id: "agent-fixture73".into(), project_root: Some(path_string(&f.root)),
+        provider: Some("kota-local".into()), display_name: name.into(), name_fields: None,
+        model: "default".into(), effort: None, auto_route: None, avatar_id: None, skills, ghost: ghost.into(),
+    };
+    // This uses the ordinary save entry point, with no Backend, helper or App.
+    // Missing credentials/defaults cannot obstruct these non-SHELL edits.
+    save_project_agent_detail(&manager, request("Renamed fixture", "Incarnation Ghost.", vec![])).unwrap();
+    save_project_agent_detail(&manager, request("Renamed fixture", "Updated fixture Ghost.", vec![])).unwrap();
+    let saved = save_project_agent_detail(&manager, request("Renamed fixture", "Updated fixture Ghost.", vec!["fixture-missing-skill".into()])).unwrap();
+    assert_eq!(saved.model, "default");
+    assert_eq!(saved.effort, None);
+    assert_eq!(saved.skills, ["fixture-missing-skill"]);
+    assert_eq!(saved.ghost, "Updated fixture Ghost.");
+    let yaml = read_yaml_mapping(&f.cwd.join("SHELL.yaml")).unwrap();
+    assert_eq!(yaml_string(&yaml, "model").as_deref(), Some("default"));
+    assert!(yaml_value::<Vec<String>>(&yaml, "args").unwrap().is_empty());
+}
+
+#[test]
+fn changing_a_terminal_shell_to_local_requires_a_concrete_model_and_thinking_before_any_write() {
+    let f = Fixture::new();
+    let manager = IntegrationManager::default();
+    let agent_before = fs::read(f.cwd.join("agent.yaml")).unwrap();
+    let shell_before = fs::read(f.cwd.join("SHELL.yaml")).unwrap();
+    let request = |model: &str, effort: Option<&str>| ProjectAgentSaveRequest {
+        shell_revision: Some(crate::puppeteer_setup::revision(Some(&fs::read(f.cwd.join("SHELL.yaml")).unwrap()))),
+        agent_id: "agent-fixture73".into(), project_root: Some(path_string(&f.root)), provider: Some("kota-local".into()),
+        display_name: "Tester".into(), name_fields: None, model: model.into(), effort: effort.map(str::to_owned),
+        auto_route: None, avatar_id: None, skills: vec![], ghost: "Incarnation Ghost.".into(),
+    };
+    for (model, effort, expected) in [("default", None, "model_required"), ("fable/plain", None, "thinking_invalid"), ("fable/plain", Some("bogus"), "thinking_invalid")] {
+        assert_eq!(save_project_agent_detail(&manager, request(model, effort)).err().unwrap(), expected);
+        assert_eq!(fs::read(f.cwd.join("agent.yaml")).unwrap(), agent_before);
+        assert_eq!(fs::read(f.cwd.join("SHELL.yaml")).unwrap(), shell_before);
+    }
+    let saved = save_project_agent_detail(&manager, request("fable/plain", Some("off"))).unwrap();
+    assert_eq!(saved.model, "fable/plain");
+    assert_eq!(saved.effort.as_deref(), Some("off"));
 }
 
 #[test]
@@ -529,4 +592,124 @@ fn six_default_shells_do_not_send_default_or_invent_effort() {
             "{cli:?}: {args:?}"
         );
     }
+}
+
+#[test]
+fn switching_a_local_agent_with_an_auto_route_pair_to_another_provider_writes_the_same_bytes() {
+    let manager = IntegrationManager::default();
+    let local = "provider: kota-local\nmodel: fable/plain\neffort: \"off\"\nargs: []\n";
+    let carrying = Fixture::new();
+    let group = crate::local_rpc::auto_route::fixture_group();
+    let block = serde_yaml::to_string(&crate::local_rpc::auto_route::ShellGroup::from(&group)).unwrap();
+    fs::write(carrying.cwd.join("SHELL.yaml"), format!("{local}auto-route:\n{}", block.lines().map(|l| format!("  {l}\n")).collect::<String>())).unwrap();
+    let plain = Fixture::new();
+    fs::write(plain.cwd.join("SHELL.yaml"), local).unwrap();
+    let save = |f: &Fixture, provider: &str| save_project_agent_detail(&manager, ProjectAgentSaveRequest {
+        shell_revision: Some(crate::puppeteer_setup::revision(Some(&fs::read(f.cwd.join("SHELL.yaml")).unwrap()))),
+        agent_id: "agent-fixture73".into(), project_root: Some(path_string(&f.root)), provider: Some(provider.into()),
+        display_name: "Tester".into(), name_fields: None, model: "default".into(), effort: None,
+        auto_route: None, avatar_id: None, skills: Vec::new(), ghost: "Incarnation Ghost.".into(),
+    }).unwrap();
+    for provider in ["codex", "claude"] {
+        let detail = save(&carrying, provider);
+        save(&plain, provider);
+        assert_eq!(detail.auto_route, None);
+        let shell = fs::read_to_string(carrying.cwd.join("SHELL.yaml")).unwrap();
+        assert_eq!(shell, fs::read_to_string(plain.cwd.join("SHELL.yaml")).unwrap(), "{provider}");
+        assert!(!shell.contains("auto-route"), "{provider}");
+        regenerate_project_adapters_in_root(&carrying.root).unwrap();
+        regenerate_project_adapters_in_root(&plain.root).unwrap();
+        for adapter in ["AGENTS.md", "CLAUDE.md"] {
+            let read = |f: &Fixture| fs::read_to_string(f.cwd.join(adapter)).ok().map(|text| text.replace(&path_string(&f.root), "<root>")
+                .replace(&f.root.file_name().unwrap().to_string_lossy().to_string(), "<project>"));
+            assert_eq!(read(&carrying), read(&plain), "{provider} {adapter}");
+        }
+    }
+}
+
+#[test]
+fn a_local_agent_keeps_its_auto_route_pair_when_a_concrete_model_is_saved() {
+    let f = Fixture::new();
+    let mut group = crate::local_rpc::auto_route::fixture_group();
+    group.models[1].provider_id = "ollama".into(); group.models[1].model_id = "qwen3:32b".into();
+    let shell = ShellYaml { provider: Some("kota-local".into()), model: Some("kota/auto".into()), effort: Some("off".into()), auto_route: Some((&group).into()), ..ShellYaml::default() };
+    fs::write(f.cwd.join("SHELL.yaml"), compile_shell_yaml_text(&shell)).unwrap();
+    let manager = IntegrationManager::default();
+    let saved = save_project_agent_detail(&manager, ProjectAgentSaveRequest {
+        shell_revision: Some(crate::puppeteer_setup::revision(Some(&fs::read(f.cwd.join("SHELL.yaml")).unwrap()))),
+        agent_id: "agent-fixture73".into(), project_root: Some(path_string(&f.root)), provider: Some("kota-local".into()),
+        display_name: "Tester".into(), name_fields: None, model: "fable/plain".into(), effort: Some("high".into()),
+        auto_route: None, avatar_id: None, skills: Vec::new(), ghost: "Incarnation Ghost.".into(),
+    }).unwrap();
+    let pair = saved.auto_route.expect("the pair stays for the next switch back");
+    assert_eq!(pair, group);
+    let shell = parse_shell_yaml(&fs::read_to_string(f.cwd.join("SHELL.yaml")).unwrap()).unwrap();
+    assert_eq!(shell.model.as_deref(), Some("fable/plain"));
+    assert_eq!(shell.auto_route.unwrap().models[1].model, "ollama/qwen3:32b");
+}
+
+#[test]
+fn local_profile_rejects_a_stale_raw_shell_before_identity_skills_or_ghost_writes() {
+    let f = Fixture::new(); f.target("kota-local");
+    let manager = IntegrationManager::default();
+    let before = fs::read(f.cwd.join("SHELL.yaml")).unwrap();
+    let identity = fs::read(f.cwd.join("agent.yaml")).unwrap();
+    let adapter = fs::read(f.cwd.join("AGENTS.md")).unwrap();
+    let mut changed = b"# Agent changed this file\n".to_vec(); changed.extend(&before);
+    fs::write(f.cwd.join("SHELL.yaml"), &changed).unwrap();
+    let request = ProjectAgentSaveRequest {
+        agent_id: "agent-fixture73".into(), project_root: Some(path_string(&f.root)), provider: Some("kota-local".into()),
+        display_name: "Renamed".into(), name_fields: None, model: "default".into(), effort: None,
+        auto_route: None, avatar_id: None, skills: vec!["new-skill".into()], ghost: "Changed ghost".into(),
+        shell_revision: Some(crate::puppeteer_setup::revision(Some(&before))),
+    };
+    assert_eq!(save_project_agent_detail(&manager, request).err().unwrap(), "local_config_changed");
+    assert_eq!(fs::read(f.cwd.join("SHELL.yaml")).unwrap(), changed);
+    assert_eq!(fs::read(f.cwd.join("agent.yaml")).unwrap(), identity);
+    assert_eq!(fs::read(f.cwd.join("AGENTS.md")).unwrap(), adapter);
+}
+
+#[test]
+fn local_detail_carries_the_exact_shell_revision_after_normalization() {
+    let f = Fixture::new(); f.target("kota-local");
+    let manager = IntegrationManager::default();
+    let detail = load_project_agent_detail(&manager, Some(&path_string(&f.root)), "agent-fixture73").unwrap();
+    assert_eq!(detail.shell_revision, Some(crate::puppeteer_setup::revision(Some(&fs::read(f.cwd.join("SHELL.yaml")).unwrap()))));
+    f.target("codex");
+    let terminal = load_project_agent_detail(&manager, Some(&path_string(&f.root)), "agent-fixture73").unwrap();
+    assert_eq!(terminal.shell_revision, None);
+}
+
+#[test]
+fn readonly_local_rule_detail_keeps_prepared_empty_group_and_comments_byte_for_byte() {
+    let f = Fixture::new();
+    let text = format!("{}# Personal formatting stays\nprovider: kota-local\nmodel: fable/plain\neffort: high\nargs: []\nauto-route: {{threshold: 0.85, default-model: model-1, models: []}}\n", crate::puppeteer_setup::STRING_COMMENTS);
+    fs::write(f.cwd.join("SHELL.yaml"), &text).unwrap();
+    let identity = fs::read(f.cwd.join("agent.yaml")).unwrap();
+    let adapter = fs::read(f.cwd.join("AGENTS.md")).unwrap();
+    let manager = IntegrationManager::default();
+    let detail = load_project_agent_detail_with_repairs(&manager, Some(&path_string(&f.root)), "agent-fixture73", false).unwrap();
+    assert_eq!(detail.shell_revision, Some(crate::puppeteer_setup::revision(Some(text.as_bytes()))));
+    assert_eq!(detail.model, "fable/plain");
+    assert_eq!(detail.auto_route, None);
+    assert_eq!(fs::read(f.cwd.join("SHELL.yaml")).unwrap(), text.as_bytes());
+    assert_eq!(fs::read(f.cwd.join("agent.yaml")).unwrap(), identity);
+    assert_eq!(fs::read(f.cwd.join("AGENTS.md")).unwrap(), adapter);
+}
+
+#[test]
+fn repairing_local_rule_detail_retains_prepared_empty_group_and_instructions() {
+    let f = Fixture::new(); let path = f.cwd.join("SHELL.yaml");
+    fs::write(&path, format!("{}provider: kota-local\nmodel: fable/plain\neffort: high\nargs: []\nauto-route: {{threshold: 0.85, default-model: model-1, models: []}}\n", crate::puppeteer_setup::STRING_COMMENTS)).unwrap();
+    let manager = IntegrationManager::default();
+    let detail = load_project_agent_detail(&manager, Some(&path_string(&f.root)), "agent-fixture73").unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(crate::puppeteer_setup::STRING_COMMENTS));
+    assert!(text.contains("  models: []\n"));
+    assert!(parse_shell_yaml(&text).unwrap().auto_route.unwrap().is_empty());
+    assert_eq!(detail.model, "fable/plain");
+    assert_eq!(detail.auto_route, None);
+    assert_eq!(detail.shell_revision, Some(crate::puppeteer_setup::revision(Some(text.as_bytes()))));
+    load_project_agent_detail(&manager, Some(&path_string(&f.root)), "agent-fixture73").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
 }

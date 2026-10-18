@@ -26,6 +26,7 @@ import {
   type RoomQuoteReference,
 } from '../lib/room-quote';
 import { RoomQuoteMark } from '../lib/room-quote-mark';
+import type { DanceComposerDraft } from '../lib/dance-composer';
 
 // ──────────────────────────────────────────── Component ────
 export interface InputBarProps {
@@ -40,6 +41,7 @@ export interface InputBarProps {
   agentMeta?: Readonly<Record<AgentId, Agent>>;
   mentionAgentIds?: readonly AgentId[];
   broadcastMode?: boolean;
+  danceMode?: boolean;
   broadcastRecipientCount?: number;
   broadcastPrivacyInfo?: {
     privateNames: readonly string[];
@@ -54,7 +56,14 @@ export interface InputBarProps {
   onSend?: (
     target: AgentId | null,
     payload: string,
-    options?: { broadcast: boolean; privacy: boolean; mentions?: ComposerMention[] },
+    options?: {
+      broadcast: boolean;
+      privacy: boolean;
+      mentions?: ComposerMention[];
+      dance?: DanceComposerDraft;
+      eligibilityText?: string;
+      onAccepted?: () => void;
+    },
   ) => boolean | void | Promise<boolean | void>;
   onPasteImage?: (file: File) => Promise<string | null>;
   onMaterializeAttachments?: (attachments: readonly ComposerAttachment[]) => Promise<ComposerAttachment[]>;
@@ -62,6 +71,7 @@ export interface InputBarProps {
   onBroadcastToggle?: () => void;
   onPrivacyToggle?: () => void;
   onFocus?: () => void;
+  onDraftChange?: () => void;
 }
 
 export interface InputBarHandle {
@@ -70,7 +80,7 @@ export interface InputBarHandle {
   insertPaths: (paths: readonly string[]) => void;
   insertAttachment: (attachment: ComposerAttachment) => void;
   insertQuote: (quote: RoomQuoteReference) => RoomQuoteInsertResult;
-  serialize: () => { payload: string; mentions: ComposerMention[] };
+  serialize: () => { payload: string; mentions: ComposerMention[]; eligibilityText: string };
   /** BBS-only metadata channel. The room serializer above deliberately stays unchanged. */
   serializeBbs: () => { body: string; mentions: ComposerMention[]; attachments: ComposerAttachment[] };
   clear: () => void;
@@ -229,7 +239,7 @@ function isBlockElement(node: Node): node is HTMLElement {
   return node.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has((node as HTMLElement).tagName);
 }
 
-function serializeNode(node: Node, options: { includeAttachments: boolean }): string {
+function serializeNode(node: Node, options: { includeAttachments: boolean; includeMentions?: boolean }): string {
   if (node.nodeType === Node.TEXT_NODE) {
     return node.nodeValue ?? '';
   }
@@ -240,6 +250,7 @@ function serializeNode(node: Node, options: { includeAttachments: boolean }): st
 
   const el = node as HTMLElement;
   if (el.matches(MENTION_SELECTOR)) {
+    if (options.includeMentions === false) return '';
     return el.dataset.aka ? `@${el.dataset.aka}` : el.textContent ?? '';
   }
 
@@ -294,9 +305,9 @@ function collectMentions(editor: HTMLElement | null): ComposerMention[] {
   return out;
 }
 
-function editorPlainText(editor: HTMLElement | null): string {
+function editorPlainText(editor: HTMLElement | null, includeMentions = true): string {
   if (!editor) return '';
-  return normalizeSerializedText(serializeNode(editor, { includeAttachments: false }));
+  return normalizeSerializedText(serializeNode(editor, { includeAttachments: false, includeMentions }));
 }
 
 function clearEditor(editor: HTMLElement) {
@@ -531,6 +542,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   agentMeta,
   mentionAgentIds = [],
   broadcastMode = false,
+  danceMode = false,
   broadcastRecipientCount = 0,
   broadcastPrivacyInfo,
   privacyMode = false,
@@ -543,18 +555,29 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onBroadcastToggle,
   onPrivacyToggle,
   onFocus,
+  onDraftChange,
 }: InputBarProps, ref) {
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const previewUrlsRef = useRef<Set<string>>(new Set());
   const sendPendingRef = useRef(false);
+  const danceWaitingRef = useRef(false);
   const quotesRef = useRef<RoomQuoteReference[]>([]);
+  const draftFingerprintRef = useRef(value);
+  const notifyDraftChange = useCallback(() => {
+    const fingerprint = JSON.stringify([serializeEditor(fieldRef.current, quotesRef.current), collectMentions(fieldRef.current)]);
+    if (draftFingerprintRef.current === fingerprint) return;
+    draftFingerprintRef.current = fingerprint;
+    onDraftChange?.();
+  }, [onDraftChange]);
   const [hasDraftContent, setHasDraftContent] = useState(() => value.trim().length > 0);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [sendPending, setSendPending] = useState(false);
+  const [danceWaiting, setDanceWaiting] = useState(false);
+  const readOnly = disabled || danceWaiting;
   const [quotes, setQuotes] = useState<RoomQuoteReference[]>([]);
   const selectedTarget = targetAgent ?? captainId ?? null;
-  const hasSendTarget = broadcastMode ? broadcastRecipientCount > 0 : !!selectedTarget;
+  const hasSendTarget = danceMode || (broadcastMode ? broadcastRecipientCount > 0 : !!selectedTarget);
   const embedded = variant === 'embedded';
   const canSend = !disabled && !sendPending && hasDraftContent && hasSendTarget;
   const sendTitle = 'Send (⌘↵)';
@@ -569,10 +592,10 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   const broadcastMixed =
     broadcastMode && broadcastPrivateNames.length > 0 && broadcastPublicNames.length > 0;
   const selectedTargetAgent = selectedTarget ? (agentMeta?.[selectedTarget] ?? AGENTS[selectedTarget]) : null;
-  const targetLabel = selectedTargetAgent?.name ?? selectedTarget ?? 'None';
+  const targetLabel = danceMode ? 'AUTO' : selectedTargetAgent?.name ?? selectedTarget ?? 'None';
   const targetNameParts = splitProjectAgentName(targetLabel);
-  const targetAvatarClass = selectedTargetAgent?.avatarClass ?? (selectedTarget ? avatarClassForAgentFallback(null, selectedTarget) : '');
-  const targetAvatarStyle = avatarImageStyleForId(selectedTargetAgent?.avatarId);
+  const targetAvatarClass = danceMode ? 'system-puppeteer' : selectedTargetAgent?.avatarClass ?? (selectedTarget ? avatarClassForAgentFallback(null, selectedTarget) : '');
+  const targetAvatarStyle = danceMode ? undefined : avatarImageStyleForId(selectedTargetAgent?.avatarId);
   const broadcastTargetLabel = `${broadcastRecipientCount} Agents`;
   const targetPillInteractive = !!onBroadcastToggle;
   const mentionOptions = mentionQuery == null
@@ -603,10 +626,11 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     setHasDraftContent(serialized.trim().length > 0);
     editor.dataset.empty = serialized.trim().length > 0 ? 'false' : 'true';
     onChange(editorPlainText(editor));
+    notifyDraftChange();
     const query = activeMentionQuery(editor);
     setMentionQuery(query?.query ?? null);
     setMentionIndex(0);
-  }, [onChange]);
+  }, [onChange, notifyDraftChange]);
 
   const handleTargetPillClick = useCallback(() => {
     if (!targetPillInteractive) return;
@@ -637,7 +661,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     updateQuotes([]);
     setHasDraftContent(false);
     onChange('');
-  }, [onChange, revokeChipPreview, updateQuotes]);
+    notifyDraftChange();
+  }, [onChange, revokeChipPreview, updateQuotes, notifyDraftChange]);
 
   useLayoutEffect(() => {
     const editor = fieldRef.current;
@@ -654,7 +679,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     const serialized = serializeEditor(editor, quotesRef.current);
     setHasDraftContent(serialized.trim().length > 0);
     editor.dataset.empty = serialized.trim().length > 0 ? 'false' : 'true';
-  }, [value, revokeChipPreview]);
+    notifyDraftChange();
+  }, [value, revokeChipPreview, notifyDraftChange]);
 
   useLayoutEffect(() => {
     const el = fieldRef.current;
@@ -673,7 +699,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   const insertTextAtCursor = useCallback(
     (text: string) => {
       const editor = fieldRef.current;
-      if (!editor || !text || disabled) return;
+      if (!editor || !text || disabled || danceWaitingRef.current) return;
       editor.focus({ preventScroll: true });
       moveCaretAfterPrefixIfNeeded(editor);
       const range = selectionRangeForEditor(editor);
@@ -689,7 +715,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   const insertAttachments = useCallback(
     (attachments: readonly ComposerAttachment[]) => {
       const editor = fieldRef.current;
-      if (!editor || disabled) return;
+      if (!editor || disabled || danceWaitingRef.current) return;
       const unique = attachments.filter((attachment, index) => (
         !!attachment.path && attachments.findIndex((item) => item.path === attachment.path) === index
       ));
@@ -740,6 +766,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
 
   const materializeAndInsert = useCallback(
     async (attachments: readonly ComposerAttachment[]) => {
+      if (danceWaitingRef.current) return;
       const next = onMaterializeAttachments
         ? await onMaterializeAttachments(attachments)
         : [...attachments];
@@ -768,7 +795,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
 
   const insertQuote = useCallback((quote: RoomQuoteReference): RoomQuoteInsertResult => {
     const editor = fieldRef.current;
-    if (!editor || disabled) return 'blocked';
+    if (!editor || disabled || danceWaitingRef.current) return 'blocked';
     const currentRoot = normalizedProjectRoot(quoteProjectRoot);
     const originRoot = normalizedProjectRoot(quote.projectRoot);
     if (!currentRoot || !originRoot || currentRoot !== originRoot) return 'blocked';
@@ -777,11 +804,12 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     if (existing.length >= ROOM_QUOTE_MAX) return 'limit';
 
     updateQuotes([...existing, quote]);
+    notifyDraftChange();
     setHasDraftContent(true);
     editor.dataset.empty = 'false';
     focusEditorAtEnd(editor);
     return 'inserted';
-  }, [disabled, quoteProjectRoot, updateQuotes]);
+  }, [disabled, quoteProjectRoot, updateQuotes, notifyDraftChange]);
 
   useEffect(() => {
     const currentRoot = normalizedProjectRoot(quoteProjectRoot);
@@ -795,6 +823,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   }, [quoteProjectRoot, syncEditorState, updateQuotes]);
 
   const removeQuote = useCallback((ref: string) => {
+    if (danceWaitingRef.current) return;
     const existing = quotesRef.current;
     const next = existing.filter((quote) => quote.ref !== ref);
     if (next.length === existing.length) return;
@@ -812,6 +841,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     insertAttachment,
     insertQuote,
     serialize: () => ({
+      eligibilityText: editorPlainText(fieldRef.current, false).trimEnd(),
       payload: serializeEditor(fieldRef.current, quotesRef.current).trimEnd(),
       mentions: collectMentions(fieldRef.current),
     }),
@@ -826,7 +856,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
           kind: chip.dataset.kind as ComposerAttachment['kind'],
         })),
     }),
-    clear: clearDraft,
+    clear: () => { if (!danceWaitingRef.current) clearDraft(); },
   }), [clearDraft, insertAttachment, insertPaths, insertQuote]);
 
   useEffect(() => {
@@ -864,20 +894,42 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     if (!canSend) return;
     sendPendingRef.current = true;
     setSendPending(true);
+    danceWaitingRef.current = danceMode;
+    setDanceWaiting(danceMode);
+    let accepted = false;
+    const accept = () => {
+      if (accepted) return;
+      accepted = true;
+      clearDraft();
+    };
     try {
-      const options: { broadcast: boolean; privacy: boolean; mentions?: ComposerMention[] } = {
+      const options: {
+        broadcast: boolean;
+        privacy: boolean;
+        mentions?: ComposerMention[];
+        dance?: DanceComposerDraft;
+        eligibilityText?: string;
+        onAccepted?: () => void;
+      } = {
         broadcast: broadcastMode,
         privacy: effectivePrivacyMode,
+        // Read from the rich nodes: mentions, attachments and quotes never count as prose.
+        eligibilityText: editorPlainText(fieldRef.current, false).trimEnd(),
+        onAccepted: accept,
       };
       if (mentions.length > 0) options.mentions = mentions;
+      if (danceMode) options.dance = { text: editorPlainText(fieldRef.current).trimEnd(), attachments: Array.from(fieldRef.current?.querySelectorAll<HTMLElement>(ATTACHMENT_SELECTOR) ?? [])
+        .filter(chip => !!chip.dataset.path && chip.dataset.kind !== 'prompt').map(chip => ({ name: chip.dataset.name || basename(chip.dataset.path!), path: chip.dataset.path! })) };
       const result = await onSend(broadcastMode ? null : selectedTarget, payload, options);
       if (result === false) return;
-      clearDraft();
+      accept();
     } catch (err) {
       console.error('[composer] send failed', err);
     } finally {
       sendPendingRef.current = false;
       setSendPending(false);
+      danceWaitingRef.current = false;
+      setDanceWaiting(false);
     }
   };
 
@@ -1066,7 +1118,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
                     aria-label={`Remove quote from ${quote.from.name}`}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => removeQuote(quote.ref)}
-                    disabled={disabled}
+                    disabled={readOnly}
                   >
                     <span aria-hidden="true">×</span>
                   </button>
@@ -1081,23 +1133,24 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
           role="textbox"
           aria-multiline="true"
           aria-label="Prompt composer"
-          contentEditable={!disabled}
+          contentEditable={!readOnly}
+          aria-readonly={readOnly}
           suppressContentEditableWarning
           spellCheck={false}
           data-empty={hasDraftContent ? 'false' : 'true'}
           data-placeholder={composerPlaceholder}
           onFocus={onFocus}
-          onInput={disabled ? undefined : syncEditorState}
-          onBeforeInput={disabled ? undefined : handleBeforeInput}
-          onPaste={disabled ? undefined : handlePaste}
-          onClick={disabled ? undefined : handleClick}
-          onDragOver={disabled ? undefined : handleDragOver}
-          onDrop={disabled ? undefined : handleDrop}
-          onKeyDown={disabled ? undefined : handleKeyDown}
+          onInput={readOnly ? undefined : syncEditorState}
+          onBeforeInput={readOnly ? undefined : handleBeforeInput}
+          onPaste={readOnly ? undefined : handlePaste}
+          onClick={readOnly ? undefined : handleClick}
+          onDragOver={readOnly ? undefined : handleDragOver}
+          onDrop={readOnly ? undefined : handleDrop}
+          onKeyDown={readOnly ? undefined : handleKeyDown}
           data-testid="input-field"
           data-passthrough="false"
         />
-        {mentionQuery != null && mentionOptions.length > 0 && (
+        {!readOnly && mentionQuery != null && mentionOptions.length > 0 && (
           <div className="ib-mention-popover" data-testid="ib-mention-popover">
             {mentionOptions.map((option, index) => {
               const avatarClass = option.agent?.avatarClass ?? avatarClassForAgentFallback(null, option.id);

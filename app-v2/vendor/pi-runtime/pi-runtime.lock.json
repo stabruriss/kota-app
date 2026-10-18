@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "runtime": "Pi",
+  "version": "1.3.0",
+  "vendor_revision": "r1",
+  "platform": "darwin-arm64",
+  "archive": "kota-pi-1.3.0-darwin-arm64-r1.tar.gz",
+  "sha256": "81daeb9443e37844393c4a1e5b33322aa81528e6498740eedba4681b980592ce",
+  "size_bytes": 30830753,
+  "archive_root": "kota-pi",
+  "payload_files": 209,
+  "payload_size_bytes": 84148236,
+  "vendor_manifest_sha256": "c0d13c7157aeaa29015211aa10ebebc77bbb0a20a5d46f5c683bd9c01462ebc3",
+  "notices": {
+    "third-party/Bun-UPSTREAM-LICENSE.md": "2c6160ec8fb853f7e8f97d9b249e756c9b0ac44860a68b6bf4f1b0bcbc5c3741",
+    "third-party/JavaScriptCore-COPYING.LIB": "5094ecb9c9dcd0eadc34f3c11511d9b5535063032bc150164ecd1a5d5a445547",
+    "third-party/LGPL-2.0.txt": "cc535c21133c895b56b374c8a1dc1eb948d99003ed2b47372069456b62f42b24",
+    "third-party/LGPL-2.1.txt": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+    "third-party/PI-DEPENDENCY-INVENTORY.json": "268be19eca81d0458142dead656d5bcae22ba82f68780f6ea14d96a3b784169c",
+    "third-party/Photon-Apache-2.0.txt": "c984c291167af70cc5fb7c7f4cec9b4560565110b766a718b3e12aba650327a7",
+    "third-party/Pi-MIT.txt": "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48",
+    "third-party/SOURCE-GUIDE.md": "ae6488f0ffae8539b5cf6e6da7e7ccc4ea5ea1a3818af7700a48b26540235ab7",
+    "third-party/THIRD_PARTY_NOTICES.md": "1d3bde859bb1f034e4ba072edfb24636e62bafd8cac9d706ae83914fc1fd8249",
+    "third-party/TinyCC-COPYING": "512d2d21b6b3384ba64781abb0208a1b87740bc31e2df48e2b206ddb7e4d5779"
+  },
+  "provenance": "kota-pi-1.3.0-darwin-arm64-r1.provenance.json"
+}

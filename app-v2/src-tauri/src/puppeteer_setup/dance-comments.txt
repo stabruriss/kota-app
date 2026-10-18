@@ -1,0 +1,13 @@
+// Kota Dance
+// Configure message routing for this project. Preserve unrelated settings.
+// Keep schema: 1. Use strategy: "rule" after at least two agents have conditions.
+// sentinel is the seated agent ID used as the seed when Dance is enabled.
+// conditions maps active, seated agent IDs (not names) to routing descriptions.
+// At least two descriptions must be non-empty; each is at most 200 characters.
+// Empty conditions are not matched. The sentinel remains the fallback.
+// threshold: 0.05-0.95 in steps of 0.05; the default is 0.50.
+// Use only these fields: schema, enabled, sentinel, strategy, threshold, conditions.
+// Comments are allowed; otherwise use strict JSON with double-quoted keys and strings.
+// Leave enabled: false for the user to turn Dance on. Jev is set up separately.
+// File edits are read for the next message. Do not put keys or credentials here.
+// If the intended routing choices are unclear, ask the user before choosing.

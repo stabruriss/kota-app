@@ -1,0 +1,33 @@
+.soul-dismiss-layer {
+  position: fixed;
+}
+
+.soul-dismiss-error {
+  margin: 18px 0 0;
+  padding: 11px 12px;
+  border-left: 2px solid var(--terra);
+  background: #d88b6a0f;
+  color: var(--terra-hi);
+  font: 12px/1.5 var(--font-sans);
+  overflow-wrap: anywhere;
+}
+
+.soul-dismiss-actions {
+  flex-wrap: wrap;
+}
+
+.soul-dismiss-actions .discard {
+  color: var(--terra-hi);
+  border-color: #d88b6a80;
+}
+
+.soul-dismiss-actions button {
+  padding: 0 11px;
+}
+
+@media (max-width: 430px) {
+  .soul-dismiss-layer { padding: 16px; }
+  .soul-dismiss-layer .kota-confirm-card { width: 100%; padding: 18px 16px; }
+  .soul-dismiss-actions { gap: 6px; }
+  .soul-dismiss-actions button { padding: 0 9px; font-size: 11px; }
+}

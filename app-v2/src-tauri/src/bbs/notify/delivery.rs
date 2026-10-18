@@ -23,6 +23,7 @@ impl Envelope {
             event_id: Some(self.event_id.clone()),
             dedupe_key: Some(self.event_id.clone()),
             terminal_timing: None,
+            soul_eligibility: None,
         }
     }
     pub fn notice(&self) -> crate::violet::ActorMessageRecord {
@@ -33,6 +34,7 @@ impl Envelope {
             target_agent_ids: Vec::new(),
             event_id: self.event_id.clone(),
             actor_intent: Some("bbs-thread".into()),
+            origin: crate::message_origin::MessageOrigin::Bbs,
         }
     }
 }

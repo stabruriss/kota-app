@@ -12,6 +12,12 @@ import { InputBar, escapePromptPath, type InputBarHandle } from '../src/chrome/I
 import { RightColumn } from '../src/chrome/RightColumn';
 import { AGENTS } from '../src/mock/fixtures';
 
+vi.mock('mermaid', () => ({ default: {
+  initialize: vi.fn(),
+  render: vi.fn(async () => ({ svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 80"><text>BBS diagram</text></svg>' })),
+} }));
+vi.mock('mermaid/dist/mermaid.esm.min.mjs', async () => ({ default: (await import('mermaid')).default }));
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -212,6 +218,24 @@ async function openReply() {
 }
 
 describe('Account-wide BBS view', () => {
+  it('renders a Mermaid post through the same isolated preview as room messages', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    try {
+      const snapshot = board();
+      snapshot.threads[0].posts[0].body = 'Existing topic\n\n```mermaid\nflowchart LR\nA[BBS] --> B\n```';
+      vi.spyOn(client, 'bbsSnapshot').mockResolvedValue(snapshot);
+      render(<RightColumn sceneKey="conversation" onOpenHotMem={() => {}} workspace={workspace} projectRoot={workspace.localRoot}
+        roomAgents={['alice']} agentMeta={AGENTS} />);
+      await userEvent.click(screen.getByRole('button', { name: /^Open$/ }));
+      const dialog = await screen.findByRole('dialog', { name: 'Bulletin Board' });
+      await userEvent.click(await within(dialog).findByRole('button', { name: /Existing topic/ }));
+      const image = await within(dialog).findByRole('img', { name: 'Mermaid diagram' });
+      expect(image.closest('.bbs-msg-body')).not.toBeNull();
+      expect(image).toHaveAttribute('src', expect.stringMatching(/^data:image\/svg\+xml/));
+      expect(image.closest('.bbs-msg-body')?.querySelector('code')?.textContent).toBe('flowchart LR\nA[BBS] --> B');
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('shows other projects without a project filter and can open and reply to their threads', async () => {
     const snapshot = board();
     const other = {

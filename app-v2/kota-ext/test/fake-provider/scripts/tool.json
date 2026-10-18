@@ -1,0 +1,1 @@
+{"steps":[{"type":"tool","name":"read","arguments":{"path":"fixture.txt"}},{"type":"text","text":"Synthetic read completed."}]}

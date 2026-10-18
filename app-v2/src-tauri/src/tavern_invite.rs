@@ -2,7 +2,7 @@
 use super::{
     sha256_hex, tavern_display_name_key, tavern_profile_reserves_display_name,
     unique_name_with_roman_suffix, ProjectAgentInviteEligibility, ProjectAgentInviteResult,
-    TavernHeroProfileDraft,
+    TavernHeroProfileDraft, TavernHeroSource,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -78,7 +78,7 @@ pub(super) fn snapshot(
         name: requested_display_name,
         provider: detail.provider.clone(),
         model: detail.model.clone(),
-        effort: detail.effort.clone(),
+        effort: detail.effort.clone(), auto_route: detail.auto_route.clone(),
         avatar_id: detail.avatar_id.clone(),
         skills: detail.skills.clone(),
         ghost: detail.ghost.clone(),
@@ -86,7 +86,17 @@ pub(super) fn snapshot(
         archived: false,
         dismissed: false,
         kind: Some("invited".into()),
-        record: None,
+        // The incarnation this hero follows (SOUL-PLAN v4 §17): read live while it exists,
+        // kept as a relic when it is dismissed.
+        source: Some(TavernHeroSource {
+            project_id: Some(detail.project_id.clone()).filter(|id| !id.trim().is_empty()),
+            agent_id: detail.agent_id.clone(),
+            agent_cwd: Path::new(&detail.agent_yaml_path)
+                .parent()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            dismissed_at: None,
+        }),
     })
 }
 

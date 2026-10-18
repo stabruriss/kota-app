@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "vendor_revision": "r1",
+  "asset": "kota-pi-1.3.0-darwin-arm64-r1.tar.gz",
+  "sha256": "81daeb9443e37844393c4a1e5b33322aa81528e6498740eedba4681b980592ce",
+  "size_bytes": 30830753,
+  "origin": {
+    "url": "https://github.com/earendil-works/pi/releases/download/v1.3.0/pi-darwin-arm64.tar.gz",
+    "archive_sha256": "1f9ae61cdeae04dd68caf1a1e8ab8ec9b292062f6ccb3252e0a9cbe93b5b16f1",
+    "source_commit": "71023aec1546d6d677a65669c5665c0927ce0dd0",
+    "file_count": 209
+  },
+  "excluded_directory": "examples/extensions/doom-overlay",
+  "preserved_file_count": 198,
+  "removed_file_count": 11,
+  "added_files": [
+    "VENDOR-MANIFEST.json",
+    "third-party/Bun-UPSTREAM-LICENSE.md",
+    "third-party/JavaScriptCore-COPYING.LIB",
+    "third-party/LGPL-2.0.txt",
+    "third-party/LGPL-2.1.txt",
+    "third-party/PI-DEPENDENCY-INVENTORY.json",
+    "third-party/Photon-Apache-2.0.txt",
+    "third-party/Pi-MIT.txt",
+    "third-party/SOURCE-GUIDE.md",
+    "third-party/THIRD_PARTY_NOTICES.md",
+    "third-party/TinyCC-COPYING"
+  ],
+  "code_rebuilt_or_patched": false,
+  "archive_recipe": {
+    "format": "PAX tar / gzip",
+    "gzip_level": 9,
+    "gzip_mtime": 0,
+    "gzip_filename": "",
+    "entry_order": "root then sorted relative paths",
+    "entry_uid_gid_mtime": 0,
+    "entry_uname_gname": "",
+    "entry_mode": "copied from prepared input"
+  },
+  "vendor_manifest_sha256": "c0d13c7157aeaa29015211aa10ebebc77bbb0a20a5d46f5c683bd9c01462ebc3"
+}
