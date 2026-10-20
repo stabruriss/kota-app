@@ -2,19 +2,19 @@
   "schema_version": 1,
   "product": "kota",
   "channel": "stable",
-  "version": "0.1.24",
-  "pub_date": "2026-10-18T06:17:42Z",
+  "version": "0.1.25",
+  "pub_date": "2026-10-20T08:56:53Z",
   "minimum_os_version": "13.0",
-  "release_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.24",
-  "release_notes_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.24",
+  "release_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.25",
+  "release_notes_url": "https://github.com/stabruriss/kota-app/releases/tag/v0.1.25",
   "artifacts": [
     {
       "platform": "macos",
       "arch": "arm64",
-      "filename": "Kota-0.1.24-arm64.dmg",
-      "download_url": "https://github.com/stabruriss/kota-app/releases/download/v0.1.24/Kota-0.1.24-arm64.dmg",
-      "sha256": "a3df8e54c62b4ad4ea6d2e5d08a5ba0206a507eae4deca92a907c5529de03c14",
-      "size_bytes": 67282969
+      "filename": "Kota-0.1.25-arm64.dmg",
+      "download_url": "https://github.com/stabruriss/kota-app/releases/download/v0.1.25/Kota-0.1.25-arm64.dmg",
+      "sha256": "7fc934be921f33747c2ba0b7efc9e2794c060c0e41769e926581dc2ac54f848a",
+      "size_bytes": 67628014
     }
   ]
 }
