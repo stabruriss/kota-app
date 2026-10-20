@@ -19436,6 +19436,38 @@ body::before {
   font-size: 14px;
 }
 
+.violet-had-dreams-details > summary {
+  display: flex;
+  gap: 10px;
+  min-height: 25px;
+  outline-offset: 5px;
+}
+
+.violet-had-dreams-arrow {
+  width: 6px;
+  height: 6px;
+  margin-inline: 2px;
+  flex: none;
+  border-right: 1px solid #b6967a;
+  border-bottom: 1px solid #b6967a;
+  transform: rotate(-45deg);
+}
+
+.violet-had-dreams-details[open] .violet-had-dreams-arrow {
+  transform: rotate(45deg);
+}
+
+.violet-had-dreams-details[open] > summary {
+  margin-bottom: 8px;
+}
+
+.violet-had-dreams-text {
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .violet-ember-dream-details summary span,
 .violet-bartender-conflict-details summary span {
   overflow: hidden;

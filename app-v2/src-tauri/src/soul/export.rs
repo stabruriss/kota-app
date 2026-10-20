@@ -1,8 +1,5 @@
-//! Dream-time export into each active incarnation's episodes (SOUL-PLAN v4 §2/§9/§18.6;
-//! sample §4/§6): whitelisted room messages past the Violet cursor, then Dreams archived
-//! to `old_dreams.md` past the line cursor. Ember calls it per project when the Dream
-//! countdown starts and after consolidation; one incarnation's failure never touches
-//! another's, and one incarnation's exports take turns.
+//! Dream-time export of new room messages into each active incarnation's episodes.
+//! Ember calls it when the countdown starts; failures stay local to each incarnation.
 use super::{
     episodes::{self, Episode},
     lock, now_ts, project_slug, read_jsonl, write_json_atomic, SoulPaths,
@@ -17,7 +14,6 @@ use std::{
 /// Shorter messages (after envelopes, @mentions and whitespace) are neighbours only.
 pub(crate) const MIN_INDEXED_CHARS: usize = 16;
 pub(crate) const MESSAGE_W0: f64 = 0.5;
-pub(crate) const OLD_DREAM_W0: f64 = 0.5;
 const STATE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -33,7 +29,7 @@ pub(crate) struct AgentExport {
     pub error: Option<String>,
 }
 
-/// `episodes/state.json` (sample §6) plus the old_dreams.md line cursor.
+/// `episodes/state.json`; legacy old_dreams fields are ignored on read.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct State {
     pub version: u32,
@@ -41,13 +37,11 @@ pub(crate) struct State {
     pub current_project: Option<String>,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectState>,
-    #[serde(default)]
-    pub old_dreams: OldDreamsCursor,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { version: STATE_VERSION, current_project: None, projects: BTreeMap::new(), old_dreams: OldDreamsCursor::default() }
+        Self { version: STATE_VERSION, current_project: None, projects: BTreeMap::new() }
     }
 }
 
@@ -77,12 +71,6 @@ pub(crate) struct Cursor {
     pub segment: Option<String>,
     #[serde(default)]
     pub violet_seq: u64,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct OldDreamsCursor {
-    #[serde(default)]
-    pub lines: usize,
 }
 
 pub(crate) fn read_state(paths: &SoulPaths) -> Result<State, String> {
@@ -212,7 +200,7 @@ pub(crate) fn strip_envelopes(text: &str) -> String {
 /// What a whitelisted message contributes to the pool, if anything (座山雕 10-15). Leading
 /// provider attachment markers (`[Image #3]`, Violet's rule) and host envelopes are peeled;
 /// a message with nothing left is no episode. Nor is this incarnation's own Dream entry,
-/// which reaches the pool through old_dreams.md instead. Neither occupies `prev`.
+/// which never enters the pool. Neither occupies `prev`.
 fn pooled_text(side: &Side, raw: &str) -> Option<String> {
     let peeled = strip_envelopes(crate::violet::strip_leading_provider_attachment_markers(raw));
     let text = crate::violet::strip_leading_provider_attachment_markers(&peeled);
@@ -302,53 +290,6 @@ fn registered_project_id(project_root: &Path) -> Option<String> {
     serde_json::from_slice::<Registration>(&bytes).ok()?.project_id.filter(|id| !id.trim().is_empty())
 }
 
-/// Archived Dreams past the line cursor as `old_dream` episodes, dated by the `## <ts>`
-/// heading above them, with the id 颦儿's `dream_id` gives their text.
-fn old_dream_episodes(kota_home: &Path, cursor: &mut OldDreamsCursor, existing: &mut HashSet<String>, now: &str) -> Result<Vec<Episode>, String> {
-    let path = kota_home.join("dreams").join("old_dreams.md");
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(format!("read {}: {err}", path.display())),
-    };
-    let lines = text.lines().collect::<Vec<_>>();
-    // A file that shrank was rewritten: read it whole again; ids keep this idempotent.
-    let start = if cursor.lines <= lines.len() { cursor.lines } else { 0 };
-    let mut when = lines[..start].iter().rev().find_map(|line| line.strip_prefix("## ")).map(normalize_ts);
-    let mut out = Vec::new();
-    for line in &lines[start..] {
-        if let Some(heading) = line.strip_prefix("## ") {
-            when = Some(normalize_ts(heading));
-            continue;
-        }
-        let Some(bullet) = line.strip_prefix("- ") else { continue };
-        let text = bullet.trim().trim_matches('"').trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let id = crate::violet::dream_id(&text);
-        if !existing.insert(id.clone()) {
-            continue;
-        }
-        out.push(Episode {
-            id,
-            kind: "old_dream".into(),
-            role: None,
-            origin: None,
-            project: None,
-            ts: when.clone().unwrap_or_else(|| now.to_string()),
-            from: None,
-            prev: None,
-            text,
-            indexed: true,
-            w0: Some(OLD_DREAM_W0),
-            replaced_by: None,
-        });
-    }
-    cursor.lines = lines.len();
-    Ok(out)
-}
-
 /// Runs the export for one project with the configured human name and the clock.
 pub(crate) fn export_after_dream(project_root: &Path, kota_home: &Path) -> Result<ExportReport, String> {
     let human = crate::ember::configured_account_user_display_name().unwrap_or_else(|| "user".into());
@@ -357,7 +298,7 @@ pub(crate) fn export_after_dream(project_root: &Path, kota_home: &Path) -> Resul
 
 /// `Err` only when the project itself cannot be read; each incarnation's outcome is a
 /// row of the report. Missing chathistory means no messages, never no export.
-pub(crate) fn export_with(project_root: &Path, kota_home: &Path, human: &str, now: &str) -> Result<ExportReport, String> {
+pub(crate) fn export_with(project_root: &Path, _kota_home: &Path, human: &str, now: &str) -> Result<ExportReport, String> {
     let root = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
     let slug = project_slug(registered_project_id(&root).as_deref(), Some(&root)).unwrap_or_else(|| "project".into());
     let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| slug.clone());
@@ -365,8 +306,8 @@ pub(crate) fn export_with(project_root: &Path, kota_home: &Path, human: &str, no
     let mut report = ExportReport::default();
     for (agent_id, cwd) in active_incarnations(&root)? {
         let paths = SoulPaths::new(&cwd);
-        let row = match export_agent(&paths, &agent_id, &root, &slug, &name, &segments, kota_home, human, now) {
-            Ok((messages, old_dreams)) => AgentExport { agent_id, messages, old_dreams, error: None },
+        let row = match export_agent(&paths, &agent_id, &root, &slug, &name, &segments, human, now) {
+            Ok(messages) => AgentExport { agent_id, messages, old_dreams: 0, error: None },
             Err(error) => AgentExport { agent_id, messages: 0, old_dreams: 0, error: Some(error) },
         };
         report.agents.push(row);
@@ -382,10 +323,9 @@ fn export_agent(
     slug: &str,
     name: &str,
     segments: &[Segment],
-    kota_home: &Path,
     human: &str,
     now: &str,
-) -> Result<(usize, usize), String> {
+) -> Result<usize, String> {
     // Each run reads the cursors and the pool before it appends, so two at once would
     // pool the same messages twice.
     let _lock = lock(&paths.export_lock())?;
@@ -435,15 +375,10 @@ fn export_agent(
         }
     }
     let messages = batch.len();
-    let mut old_cursor = state.old_dreams.clone();
-    let mut old = old_dream_episodes(kota_home, &mut old_cursor, &mut existing, now)?;
-    let old_dreams = old.len();
-    batch.append(&mut old);
     if !batch.is_empty() {
         episodes::append(paths, &batch)?;
     }
     // The cursors move only after the pool took the lines.
-    state.old_dreams = old_cursor;
     let project = state.projects.get_mut(slug).expect("project entry was inserted above");
     if let Some(segment) = last_segment {
         project.cursor = Cursor { segment: Some(segment), violet_seq: max_seq };
@@ -451,5 +386,5 @@ fn export_agent(
     project.last_export = Some(now.to_string());
     project.episodes += messages as u64;
     write_state(paths, &state)?;
-    Ok((messages, old_dreams))
+    Ok(messages)
 }

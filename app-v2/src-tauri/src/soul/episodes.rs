@@ -4,7 +4,7 @@
 use super::{append_lines, lock, read_jsonl, SoulPaths};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const RETIRED_MARK_W0: f64 = 1.0;
+pub(crate) const RETIRED_MARK_W0: f64 = 0.5;
 
 /// One line of episodes.jsonl (UNDER-TABLE-SAMPLE.md §4); field order is the sample's.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ pub(crate) struct Episode {
     pub indexed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub w0: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub replaced_by: Option<String>,
 }
 
@@ -35,7 +35,6 @@ impl Episode {
         project: Option<String>,
         ts: &str,
         text: String,
-        replaced_by: Option<String>,
     ) -> Self {
         Self {
             id,
@@ -49,7 +48,7 @@ impl Episode {
             text,
             indexed: true,
             w0: Some(RETIRED_MARK_W0),
-            replaced_by,
+            replaced_by: None,
         }
     }
 }

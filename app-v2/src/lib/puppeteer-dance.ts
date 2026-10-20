@@ -52,7 +52,7 @@ export function buildDanceRoster(seats: readonly { id: string; name: string }[],
   const inputs = new Map<string, Recent[]>();
   withoutDanceNativeEchoes(messages).forEach((message, index) => {
     if (message.role === 'user' && message.agentId !== 'user' && hasLeadingTemporalGap(message.text)) return;
-    if (message.private || message.kind !== 'message' || ['shell_handoff', 'subagent', 'shadow_clone', 'private'].includes(message.messageOrigin ?? '')) return;
+    if (message.private || message.kind !== 'message' || ['shell_handoff', 'subagent', 'shadow_clone', 'private', 'error'].includes(message.messageOrigin ?? '')) return;
     const time = Date.parse(message.timestamp);
     if (!Number.isFinite(time)) return;
     const recent = { message, time, index };

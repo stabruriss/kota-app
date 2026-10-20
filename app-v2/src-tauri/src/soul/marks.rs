@@ -129,8 +129,7 @@ pub(crate) fn add(paths: &SoulPaths, text: &str, project: Option<String>, ts: &s
     Ok(Added::Added { id, marks })
 }
 
-/// The mark keeps its id (`used` and the Jev cooldown continue); the old text retires
-/// into the episodes as `<id>-r<revision before the edit>` pointing back at the mark.
+/// The mark keeps its id, usage and cooldown. Replaced text does not enter episodes.
 pub(crate) fn edit(paths: &SoulPaths, id: &str, text: &str, ts: &str) -> Result<Edited, String> {
     let text = match check_text(text) {
         Text::Ok(text) => text,
@@ -142,16 +141,6 @@ pub(crate) fn edit(paths: &SoulPaths, id: &str, text: &str, ts: &str) -> Result<
     let Some(index) = marks.marks.iter().position(|mark| mark.id == id) else {
         return Ok(Edited::NotFound);
     };
-    let retired = episodes::Episode::retired_mark(
-        format!("{id}-r{}", marks.revision),
-        marks.marks[index].project.clone(),
-        ts,
-        marks.marks[index].text.clone(),
-        Some(id.to_string()),
-    );
-    // The episode lands first: a failed marks write leaves the mark unchanged, and a
-    // retried edit writes the same retired id again (deduplicated by id downstream).
-    episodes::append(paths, &[retired])?;
     marks.marks[index].text = text;
     marks.marks[index].updated_at = ts.into();
     marks.revision += 1;
@@ -169,7 +158,7 @@ pub(crate) fn delete(paths: &SoulPaths, id: &str, ts: &str) -> Result<Deleted, S
     let mark = marks.marks[index].clone();
     episodes::append(
         paths,
-        &[episodes::Episode::retired_mark(mark.id, mark.project, ts, mark.text, None)],
+        &[episodes::Episode::retired_mark(mark.id, mark.project, ts, mark.text)],
     )?;
     marks.marks.remove(index);
     marks.revision += 1;

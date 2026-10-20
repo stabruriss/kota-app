@@ -4744,6 +4744,7 @@ export function App() {
               workspace={activeWorkspace}
               workspaceProjects={visibleWorkspaceTabs}
               workingAgents={activeWorkingAgents}
+              dreamWorkingAgentIds={globalWorkingAgentIds}
               workingStartedAt={activeWorkingStartedAt}
               onDreamingStatusAgentsChange={handleDreamingStatusAgentsChange}
               roomAgents={shortcutTargetAgents}

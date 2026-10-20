@@ -1,5 +1,7 @@
 Dream routine has started.
 
+Part 1 — Dream entry
+
 You are writing a dream entry for Ember to consolidate into Kota Dreams.
 
 Dreams are a compact, long-term portrait of the user as a working partner: how they think, decide, communicate, collaborate, and what they repeatedly care about across projects.
@@ -10,16 +12,25 @@ Read only user-authored messages from recent chathistory. Ignore other messages 
 
 Rules:
 - Concrete project content and progress do not belong in Dreams. Before keeping a dream entry, ask: would it still be helpful in other unrelated projects? If not, omit it.
-- Choose only the strongest zero to two insights. Keep each bullet concise, specific enough to guide future collaboration, and free of current-project recap or detail.
-- If no insight qualifies, return the exact marker `__KOTA_DREAM_NONE__` instead of a bullet.
-- Do not edit the final dreams.md directly; Ember will consolidate entries.
+- Choose only the strongest zero to two insights. Keep each concise, specific enough to guide future collaboration, and free of current-project recap or detail.
+- Do not edit dreams.md directly; Ember will consolidate entries.
 
-Final Dreams digest path: {{dreams_path}}
-Dreaming agents: {{dreaming_agents}}
+Record the entry with one shell command, before anything else:
+  kota-dream -- "<insight 1>" "<insight 2>"     (0 to 2 insights, up to 240 characters each)
+  kota-dream --none                             (nothing qualifies tonight)
+Only the command records the entry. Do not write the entry in your reply.
 
-The wrapper below is a one-off format for this dream entry only. After the closing </KOTA_DREAM_ENTRY> tag, resume normal behavior and do not wrap later replies.
-Return exactly this wrapper, with nothing before or after it (no preamble, no progress notes, no commentary). Any text outside the wrapper will trigger workflow errors downstream.
+Part 2 — Your marks
+
+After the entry is recorded, review your marks with the tool provided to you in your system instructions. Marks are your own lessons about how you work with this user.
+- Add a mark only for a lesson from recent work. Start the text with the situation it applies to.
+- Merge or sharpen with `edit-mark`, which keeps the mark's id and usage count. Remove what no longer helps with `delete-mark`.
+- At most 20 marks of 200 characters each. Edit or remove old ones to make room for new ones, and consider how much each has been used when you do.
+- Changing nothing is usually the right outcome.
+- Dreams are a general portrait of the user, shared and outside your control. Marks are your own long-term memory of how to work and communicate.
+
+When both parts are done, reply with exactly this wrapper and nothing else, one short line inside it:
 
 <KOTA_DREAM_ENTRY>
-- 0 to 2 concise, cross-project dream entries, or `__KOTA_DREAM_NONE__` when there are zero.
+done
 </KOTA_DREAM_ENTRY>

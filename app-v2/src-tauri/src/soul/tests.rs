@@ -147,21 +147,22 @@ fn add_mark_stops_at_twenty_with_the_approved_reply() {
 }
 
 #[test]
-fn edit_keeps_the_id_and_retires_the_old_text_delete_retires_under_the_mark_id() {
+fn edit_keeps_the_id_without_an_episode_delete_retires_under_the_mark_id() {
     let f = Fixture::new();
     let id = f.add("交付前跑一遍测试。", T1);
+    pushes::record(&f.paths(), &f.home(), &delivery(T1), &[pushed(&id, 0.99)]).unwrap();
+    let push_log = f.file(&f.paths().pushes());
     let out = f.run(&["edit-mark", &id, "交付前自己跑一遍四项收据。"], T2);
     assert_eq!(
         out,
-        format!("Updated {id} (revision 2). The old text is kept as an episode.\n{id}  2026-10-14  交付前自己跑一遍四项收据。")
+        format!("Updated {id} (revision 2).\n{id}  2026-10-14  交付前自己跑一遍四项收据。")
     );
     let mut marks = marks::snapshot(&f.paths()).unwrap();
     let mark = marks.marks.remove(0);
     assert_eq!((mark.created_at.as_str(), mark.updated_at.as_str()), (T1, T2));
-    assert_eq!(
-        f.file(&f.paths().episodes()),
-        format!("{{\"id\":\"{id}-r1\",\"kind\":\"retired_mark\",\"project\":\"project-fixture\",\"ts\":\"{T2}\",\"text\":\"交付前跑一遍测试。\",\"indexed\":true,\"w0\":1.0,\"replaced_by\":\"{id}\"}}\n")
-    );
+    assert!(!f.paths().episodes().exists());
+    assert_eq!(mark.used, 1);
+    assert_eq!(f.file(&f.paths().pushes()), push_log);
     assert_eq!(
         f.run(&["edit-mark", "m-20260101-0000", "x"], T2),
         "No mark with id m-20260101-0000. Run read-mark to see your marks."
@@ -169,12 +170,12 @@ fn edit_keeps_the_id_and_retires_the_old_text_delete_retires_under_the_mark_id()
     assert_eq!(f.run(&["delete-mark", &id], T3), format!("Deleted {id} (revision 3). Its text is kept as an episode."));
     let episodes_text = f.file(&f.paths().episodes());
     assert!(
-        episodes_text.ends_with(&format!("{{\"id\":\"{id}\",\"kind\":\"retired_mark\",\"project\":\"project-fixture\",\"ts\":\"{T3}\",\"text\":\"交付前自己跑一遍四项收据。\",\"indexed\":true,\"w0\":1.0}}\n")),
+        episodes_text.ends_with(&format!("{{\"id\":\"{id}\",\"kind\":\"retired_mark\",\"project\":\"project-fixture\",\"ts\":\"{T3}\",\"text\":\"交付前自己跑一遍四项收据。\",\"indexed\":true,\"w0\":0.5}}\n")),
         "{episodes_text}"
     );
     assert_eq!(f.run(&["read-mark"], T3), "No marks yet. Add one with add-mark \"<text>\".");
     assert_eq!(f.run(&["delete-mark", &id], T3), format!("No mark with id {id}. Run read-mark to see your marks."));
-    assert_eq!(read_jsonl::<episodes::Episode>(&f.paths().episodes()).unwrap().len(), 2);
+    assert_eq!(read_jsonl::<episodes::Episode>(&f.paths().episodes()).unwrap().len(), 1);
 }
 
 #[test]
@@ -246,6 +247,8 @@ fn search_returns_hits_with_neighbour_lines_and_records_returns() {
     assert!(english.starts_with("[violet-e1] 2026-10-02 · project-fixture · you\nRun the four receipts before delivery.\n"), "{english}");
     let dream = f.run(&["search-episode", "话题"], T1);
     assert!(dream.starts_with("[d-7c1e55a0] 2026-10-09 · old dream\n"), "{dream}");
+    // Existing pool lines are neither migrated nor deleted by the new export policy.
+    assert_eq!(f.file(&f.paths().episodes()), format!("{}\n", POOL.join("\n")));
 }
 
 #[test]
@@ -529,14 +532,15 @@ fn export_skips_empty_messages_and_own_dream_entries_without_taking_prev() {
     let root = project(&f, "project");
     events(&root, "2026-10-14", &[
         room_event("violet-u0", 1, "user", "agent-one", "kota-local", "message", "第一条正常消息，足够长可以索引了。", Some("user"), &[], None),
-        // Only a host envelope, only an attachment marker, this incarnation's own Dream entry: none is an episode.
+        // Only a host envelope, only an attachment marker, this incarnation's own Dream entry, or a runtime error: none is an episode.
         room_event("violet-u1", 2, "user", "agent-one", "kota-local", "message", "<KOTA_TEMPORAL_GAP v=\"1\" current_time=\"2026-10-14T02:02:05Z\">\ngap\n</KOTA_TEMPORAL_GAP>\n", Some("user"), &[], None),
         room_event("violet-u2", 3, "user", "agent-one", "kota-local", "message", "[Image #7]\n\n", Some("user"), &[], None),
         room_event("violet-d1", 4, "assistant", "agent-one", "kota-local", "message", "<KOTA_DREAM_ENTRY>\n- 老无派活时喜欢一次只聊一个话题。\n</KOTA_DREAM_ENTRY>", None, &[], None),
-        room_event("violet-a1", 5, "assistant", "agent-one", "kota-local", "message", "收到。", None, &[], None),
+        room_event("violet-e1", 5, "assistant", "agent-one", "kota-local", "message", "Kota Local runtime error: Local RPC command timed out; queued deliveries abandoned.", Some("error"), &[], None),
+        room_event("violet-a1", 6, "assistant", "agent-one", "kota-local", "message", "收到。", None, &[], None),
         // A user quoting a Dream entry wholesale is still the user's message.
-        room_event("violet-u3", 6, "user", "agent-one", "kota-local", "message", "<KOTA_DREAM_ENTRY>用户贴的条目</KOTA_DREAM_ENTRY>", Some("user"), &[], None),
-        room_event("violet-u4", 7, "user", "agent-one", "kota-local", "message", "[Image #8]", Some("user"), &[], None),
+        room_event("violet-u3", 7, "user", "agent-one", "kota-local", "message", "<KOTA_DREAM_ENTRY>用户贴的条目</KOTA_DREAM_ENTRY>", Some("user"), &[], None),
+        room_event("violet-u4", 8, "user", "agent-one", "kota-local", "message", "[Image #8]", Some("user"), &[], None),
     ]);
     let report = super::export::export_with(&root, &f.home(), "老无", T1).unwrap();
     assert_eq!((report.agents[0].messages, report.agents[0].old_dreams, report.agents[0].error.as_deref()), (3, 0, None));
@@ -548,11 +552,11 @@ fn export_skips_empty_messages_and_own_dream_entries_without_taking_prev() {
     // The cursor still moves past what was skipped.
     let state = super::export::read_state(&paths).unwrap();
     let cursor = &state.projects["project-fixture"].cursor;
-    assert_eq!((cursor.segment.as_deref(), cursor.violet_seq, state.projects["project-fixture"].episodes), (Some("2026-10-14.jsonl"), 7, 3));
+    assert_eq!((cursor.segment.as_deref(), cursor.violet_seq, state.projects["project-fixture"].episodes), (Some("2026-10-14.jsonl"), 8, 3));
     // Next time, a skipped message that is now behind the cursor still does not become anyone's neighbour.
     let day = root.join("project-memory/chathistory/events/2026-10-14.jsonl");
     let mut text = fs::read_to_string(&day).unwrap();
-    text.push_str(&room_event("violet-u5", 8, "user", "agent-one", "kota-local", "message", "游标之后的新消息，够长可以索引。", Some("user"), &[], None));
+    text.push_str(&room_event("violet-u5", 9, "user", "agent-one", "kota-local", "message", "游标之后的新消息，够长可以索引。", Some("user"), &[], None));
     text.push('\n');
     fs::write(&day, text).unwrap();
     let again = super::export::export_with(&root, &f.home(), "老无", T2).unwrap();
@@ -562,7 +566,7 @@ fn export_skips_empty_messages_and_own_dream_entries_without_taking_prev() {
 }
 
 #[test]
-fn export_moves_whitelisted_messages_and_archived_dreams_by_cursor() {
+fn export_moves_only_messages_by_cursor_and_ignores_archived_dreams() {
     let f = Fixture::new();
     let root = project(&f, "project");
     events(&root, "2026-10-14", &[
@@ -585,7 +589,7 @@ fn export_moves_whitelisted_messages_and_archived_dreams_by_cursor() {
     let report = super::export::export_with(&root, &f.home(), "老无", T1).unwrap();
     assert_eq!(report.agents.len(), 1);
     let row = &report.agents[0];
-    assert_eq!((row.agent_id.as_str(), row.messages, row.old_dreams, row.error.as_deref()), ("agent-one", 5, 2, None));
+    assert_eq!((row.agent_id.as_str(), row.messages, row.old_dreams, row.error.as_deref()), ("agent-one", 5, 0, None));
     let paths = SoulPaths::new(&root.join(".agent-workspaces/agent-one"));
     let pool = read_jsonl::<episodes::Episode>(&paths.episodes()).unwrap();
     assert_eq!(pool.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()[..5], ["violet-u1", "violet-a1", "violet-u2", "violet-t1", "violet-a2"]);
@@ -599,10 +603,7 @@ fn export_moves_whitelisted_messages_and_archived_dreams_by_cursor() {
     assert_eq!((pool[2].indexed, pool[2].w0, pool[2].prev.as_deref()), (false, None, Some("violet-a1")));
     assert_eq!((pool[3].from.as_deref(), pool[3].origin.as_deref(), pool[3].prev.as_deref(), pool[3].role.as_deref()), (Some("老无"), Some("telegram"), Some("violet-u2"), Some("user")));
     assert!(pool[4].text.starts_with("FULL TEXT 全文") && pool[4].prev.is_none(), "{:?}", pool[4]);
-    let dream = &pool[5];
-    let expected_id = crate::violet::dream_id("老无派活时喜欢一次只聊一个话题，聊完清点再开工。");
-    assert_eq!((dream.id.as_str(), dream.kind.as_str(), dream.project.as_deref(), dream.ts.as_str(), dream.w0, dream.indexed), (expected_id.as_str(), "old_dream", None, "2026-10-09T09:00:00Z", Some(0.5), true));
-    assert_eq!(pool[6].text, "第二条带引号");
+    assert_eq!(pool.len(), 5);
     let short = f.file(&paths.episodes()).lines().nth(2).unwrap().to_string();
     assert!(short.ends_with("\"text\":\"好的\",\"indexed\":false}"), "{short}");
     let state = super::export::read_state(&paths).unwrap();
@@ -612,11 +613,11 @@ fn export_moves_whitelisted_messages_and_archived_dreams_by_cursor() {
         (project_state.cursor.segment.as_deref(), project_state.cursor.violet_seq, project_state.episodes, project_state.stints.len(), project_state.last_export.as_deref()),
         (Some("2026-10-15.jsonl"), 9, 5, 1, Some(T1))
     );
-    assert_eq!(state.old_dreams.lines, old.lines().count());
+    assert!(!f.file(&paths.episodes_state()).contains("old_dreams"));
     // Idempotent: nothing moves twice.
     let again = super::export::export_with(&root, &f.home(), "老无", T2).unwrap();
     assert_eq!((again.agents[0].messages, again.agents[0].old_dreams), (0, 0));
-    assert_eq!(read_jsonl::<episodes::Episode>(&paths.episodes()).unwrap().len(), 7);
+    assert_eq!(read_jsonl::<episodes::Episode>(&paths.episodes()).unwrap().len(), 5);
     // Only what came after the cursors moves next time.
     let day2 = root.join("project-memory/chathistory/events/2026-10-15.jsonl");
     let mut text = fs::read_to_string(&day2).unwrap();
@@ -625,11 +626,22 @@ fn export_moves_whitelisted_messages_and_archived_dreams_by_cursor() {
     fs::write(&day2, text).unwrap();
     fs::write(f.home().join("dreams/old_dreams.md"), format!("{old}## 2026-10-15T01:00:00+00:00\n- 第三条新归档。\n")).unwrap();
     let third = super::export::export_with(&root, &f.home(), "老无", T3).unwrap();
-    assert_eq!((third.agents[0].messages, third.agents[0].old_dreams), (1, 1));
+    assert_eq!((third.agents[0].messages, third.agents[0].old_dreams), (1, 0));
     let pool = read_jsonl::<episodes::Episode>(&paths.episodes()).unwrap();
-    assert_eq!((pool[7].id.as_str(), pool[7].prev.as_deref(), pool[7].origin.as_deref()), ("violet-u3", Some("violet-a2"), Some("puppeteer")));
-    assert_eq!((pool[8].kind.as_str(), pool[8].ts.as_str()), ("old_dream", "2026-10-15T01:00:00Z"));
+    assert_eq!((pool[5].id.as_str(), pool[5].prev.as_deref(), pool[5].origin.as_deref()), ("violet-u3", Some("violet-a2"), Some("puppeteer")));
     assert_eq!(super::export::read_state(&paths).unwrap().projects["project-fixture"].cursor.violet_seq, 10);
+}
+
+#[test]
+fn legacy_old_dream_cursor_and_replaced_by_remain_readable_without_new_writes() {
+    let state: super::export::State = serde_json::from_str(
+        r#"{"version":1,"current_project":"project-fixture","projects":{},"old_dreams":{"lines":7}}"#,
+    ).unwrap();
+    assert_eq!(state.current_project.as_deref(), Some("project-fixture"));
+    assert!(!serde_json::to_string(&state).unwrap().contains("old_dreams"));
+    let episode: episodes::Episode = serde_json::from_str(POOL[3]).unwrap();
+    assert_eq!(episode.replaced_by.as_deref(), Some("m-20261002-9c17"));
+    assert!(!serde_json::to_string(&episode).unwrap().contains("replaced_by"));
 }
 
 #[test]
@@ -680,7 +692,7 @@ fn export_writes_state_for_an_incarnation_with_nothing_to_move() {
 }
 
 #[test]
-fn export_without_chathistory_still_archives_dreams_and_isolates_one_incarnation() {
+fn export_without_chathistory_ignores_dreams_and_isolates_one_incarnation() {
     let f = Fixture::new();
     let root = project(&f, "quiet");
     fs::write(root.join(".agent-workspaces/agent-two/agent.yaml"), "id: agent-two\nstatus: active\n").unwrap();
@@ -690,9 +702,9 @@ fn export_without_chathistory_still_archives_dreams_and_isolates_one_incarnation
     fs::create_dir_all(root.join(".agent-workspaces/agent-one/under-table/episodes/episodes.jsonl")).unwrap();
     let report = super::export::export_with(&root, &f.home(), "老无", T1).unwrap();
     let rows = report.agents.iter().map(|r| (r.agent_id.as_str(), r.messages, r.old_dreams, r.error.is_some())).collect::<Vec<_>>();
-    assert_eq!(rows, [("agent-one", 0, 0, true), ("agent-two", 0, 1, false)]);
+    assert_eq!(rows, [("agent-one", 0, 0, true), ("agent-two", 0, 0, false)]);
     let two = SoulPaths::new(&root.join(".agent-workspaces/agent-two"));
-    assert_eq!(read_jsonl::<episodes::Episode>(&two.episodes()).unwrap()[0].kind, "old_dream");
+    assert!(read_jsonl::<episodes::Episode>(&two.episodes()).unwrap().is_empty());
     assert!(super::export::read_state(&two).unwrap().projects["project-fixture"].cursor.segment.is_none());
     assert!(super::export::export_with(&f.root.join("nowhere"), &f.home(), "老无", T1).unwrap().agents.is_empty());
 }

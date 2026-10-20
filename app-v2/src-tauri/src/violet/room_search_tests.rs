@@ -72,6 +72,19 @@ fn request(query: &str) -> VioletRoomSearchRequest {
 }
 
 #[test]
+fn ember_dream_acknowledgements_stay_out_of_search_when_shown_in_room() {
+    let fixture = RoomFixture::new();
+    fixture.write(vec![
+        event("dream-ack", "<KOTA_DREAM_ENTRY>needle</KOTA_DREAM_ENTRY>"),
+        event("ordinary", "needle in a normal reply"),
+    ]);
+    assert_eq!(ids(&fixture.search("needle", false).hits), ["ordinary"]);
+    assert!(fixture.around("dream-ack", 1, 1).is_err());
+    let request: VioletRoomRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(read_chathistory_messages(&fixture.0, &request).unwrap().len(), 2);
+}
+
+#[test]
 fn temporal_composer_search_and_preview_use_the_saved_user_message() {
     let fixture = RoomFixture::new();
     let prompt = "<KOTA_TEMPORAL_GAP v=\"1\" current_time=\"2026-04-12T10:00:00Z\">\nIt has been over 24 hours since your last completed response in this room.\n</KOTA_TEMPORAL_GAP>\n";

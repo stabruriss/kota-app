@@ -14,10 +14,14 @@ describe('Dance bounded, already-loaded roster', () => {
       row('progress',{role:'assistant',kind:'commentary',text:'not final',timestamp:'2026-10-09T00:04:00Z'}),
       row('tool',{role:'assistant',kind:'tool',text:'not reply'}),row('bus',{role:'assistant',shell:'system',actorIntent:'task',text:'not reply'}),
       {...row('private',{text:'not input'}),private:true},row('child',{role:'assistant',messageOrigin:'subagent',text:'not reply'}),
+      row('fault',{agentId:'agent-b',shell:'kota-local',role:'assistant',messageOrigin:'error',timestamp:'2026-10-09T00:05:00Z',
+        text:'Kota Local runtime error: Local RPC command timed out; queued deliveries abandoned.'}),
+      row('fault-after-reply',{agentId:'agent-a',shell:'kota-local',role:'assistant',messageOrigin:'error',timestamp:'2026-10-09T00:06:00Z',
+        text:'Kota Local error from magpie/claude/claude-opus-5-5: The operation was aborted.'}),
     ];
     const roster=buildDanceRoster(seats,messages);
     expect(roster[0]!.recentUserMessages.map(m=>m.text)).toEqual(['two','😀'.repeat(200)]);
-    expect(roster[0]!.lastReply?.text).toBe('final answer');expect(roster[1]!.lastReply).toBeNull();expect(roster[2]!.recentUserMessages).toEqual([]);
+    expect(roster[0]!.lastReply).toEqual({at:'2026-10-09T00:03:00Z',text:'final answer'});expect(roster[1]!.lastReply).toBeNull();expect(roster[2]!.recentUserMessages).toEqual([]);
   });
   it('includes clean LM and Puppeteer originals, follows actual recipients, and preserves Unicode names', () => {
     const roster=buildDanceRoster([{id:'agent-a',name:'😀'.repeat(70)},...seats.slice(1)], [

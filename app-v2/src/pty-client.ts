@@ -1365,6 +1365,19 @@ export interface EmberDreamConsolidateRequest {
   provider?: string | null;
 }
 
+export interface EmberDreamParticipant {
+  agentId: string;
+  projectRoot: string;
+  deliveredAt: string;
+}
+
+export interface EmberDreamRunStatus {
+  agentId: string;
+  projectRoot: string;
+  submitted: boolean;
+  working: boolean;
+}
+
 export interface EmberDreamConsolidateState {
   accountDreamsPath: string;
   entriesDir: string;
@@ -2435,7 +2448,19 @@ export async function emberConsolidateDreams(
   return invoke<EmberDreamConsolidateState>('ember_consolidate_dreams', { request });
 }
 
-/** Moves new room messages and archived Dreams into each project's episodes.
+export async function emberDreamRunStatus(
+  participants: EmberDreamParticipant[],
+  workingAgentIds: readonly string[],
+): Promise<EmberDreamRunStatus[]> {
+  if (!useTauriRuntime()) {
+    return participants.map(({ agentId, projectRoot }) => ({
+      agentId, projectRoot, submitted: false, working: workingAgentIds.includes(agentId),
+    }));
+  }
+  return invoke<EmberDreamRunStatus[]>('ember_dream_run_status', { request: { participants, workingAgentIds } });
+}
+
+/** Moves new room messages into each project's episodes.
  *  The backend logs its own failures; nothing comes back. */
 export async function emberExportEpisodes(projectRoots: string[]): Promise<void> {
   if (!useTauriRuntime()) return;

@@ -938,6 +938,42 @@ describe('M1 · canvas shell landmarks', () => {
     }
   });
 
+  it('collects a Dream immediately from submitted participants and excludes failed deliveries', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
+    const workspace = hydrationWorkspace('dream-inbox-fixture', []);
+    vi.spyOn(ptyClient, 'agentBusSend').mockImplementation(async (request) => ({
+      eventId: request.eventId || `event-${request.target}`, targetAgentId: request.target,
+      submitted: request.target !== 'unavailable', duplicate: false, skippedReason: 'fixture offline',
+    }));
+    vi.spyOn(ptyClient, 'emberPrepareDreams').mockResolvedValue({
+      accountDreamsPath: '/tmp/Kota/dreams/dreams.md', entriesDir: '/tmp/Kota/dreams/entries',
+      archiveDir: '/tmp/Kota/dreams/archive', projectDreamsPath: `${workspace.localRoot}/project-memory/dreams.md`, projected: false,
+    });
+    const status = vi.spyOn(ptyClient, 'emberDreamRunStatus').mockImplementation(async (participants) => (
+      participants.map(({ agentId, projectRoot }) => ({ agentId, projectRoot, submitted: true, working: true }))
+    ));
+    const consolidate = vi.spyOn(ptyClient, 'emberConsolidateDreams').mockResolvedValue({
+      accountDreamsPath: '/tmp/Kota/dreams/dreams.md', entriesDir: '/tmp/Kota/dreams/entries',
+      oldDreamsPath: '/tmp/Kota/dreams/old_dreams.md', promptPath: '/tmp/dream-fixture.md',
+      processedEntryCount: 1, activeEntryCount: 1, archivedEntryCount: 0, updatedAt: new Date().toISOString(), error: null,
+    });
+    try {
+      render(<RightColumn sceneKey="conversation" workspace={workspace} workingAgents={new Set()}
+        dreamWorkingAgentIds={['alice', 'external']} onOpenHotMem={vi.fn()}
+        dreamProjects={[{ projectId: workspace.projectId, projectRoot: workspace.localRoot,
+          projectName: 'Fixture', agents: [{ id: 'alice', name: 'Alice' }, { id: 'unavailable', name: 'Unavailable' }] }]} />);
+      fireEvent.click(screen.getByRole('switch', { name: 'Good Night' }));
+      fireEvent.click(screen.getByRole('switch', { name: 'Good Night' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+      expect(status).toHaveBeenCalledWith([{ agentId: 'alice', projectRoot: workspace.localRoot,
+        deliveredAt: '2026-06-10T12:00:00.000Z' }], ['alice', 'external']);
+      expect(consolidate).toHaveBeenCalledTimes(1);
+      expect(Date.now()).toBe(Date.parse('2026-06-10T12:00:00.000Z'));
+    } finally { vi.useRealTimers(); }
+  });
+
   it('pauses the Dream deadline and resumes from the same rounded-up remainder', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-06-10T12:00:00Z'));
@@ -3844,6 +3880,54 @@ describe('W3+W5 · composer target picker', () => {
     expect(article.querySelector('.violet-progress-avatar-stack')).toBeNull();
     expect(article.querySelector('.violet-commentary-entry-speaker')).toBeNull();
     expect(screen.queryByText('Beta should be hidden by the filter.')).not.toBeInTheDocument();
+  });
+
+  it('renders whole Dream acknowledgements as collapsed Had dreams bubbles without inspecting their contents', async () => {
+    const projectRoot = '/tmp/kota-dream-bubble-fixture';
+    const texts = [
+      '<KOTA_DREAM_ENTRY>\ndone\n</KOTA_DREAM_ENTRY>',
+      '  <KOTA_DREAM_ENTRY>\n**not parsed**\n<script>literal text</script>\n</KOTA_DREAM_ENTRY>  ',
+      '<KOTA_DREAM_ENTRY></KOTA_DREAM_ENTRY>',
+      'Discuss <KOTA_DREAM_ENTRY>done</KOTA_DREAM_ENTRY> as a format.',
+      '<KOTA_DREAM_ENTRY>done</KOTA_DREAM_ENTRY> and more words',
+      '<KOTA_DREAM_ENTRY>not complete',
+      '<KOTA_DREAM_ENTRY>user-authored example</KOTA_DREAM_ENTRY>',
+    ];
+    vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+      messages: texts.map((text, index) => ({
+        id: `dream-fixture-${index}`, sessionId: 'session-fixture', agentId: 'alice', shell: 'codex',
+        role: index === 6 ? 'user' : 'assistant', kind: 'message',
+        timestamp: `2026-01-02T01:02:0${index}.000Z`, text, sourcePath: null, nativeEventId: `native-fixture-${index}`,
+        agentDisplayName: 'Alice', agentAvatarId: 'codex', agentProvider: 'codex',
+      })),
+      sources: [], workEvents: [], rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+      chathistoryDir: `${projectRoot}/project-memory/chathistory`, syncedAt: '2026-01-02T01:03:00.000Z',
+    });
+    const { container } = render(<VioletRoomPanel projectRoot={projectRoot} agentIds={['alice']}
+      agentMeta={{ alice: { name: 'Alice', emoji: '◇', role: 'Project agent', hue: 'var(--brass-bright)' } }} />);
+    await screen.findAllByText('Had dreams');
+    const bubbles = container.querySelectorAll<HTMLElement>('.had-dreams');
+    expect(bubbles).toHaveLength(3);
+    for (const bubble of bubbles) {
+      expect(bubble).toHaveClass('agent', 'ember-dream');
+      expect(within(bubble).getByText('Alice')).toBeInTheDocument();
+      expect(bubble.querySelector('time')).not.toBeNull();
+      expect(bubble.querySelector('.violet-msg-avatar-host')).not.toBeNull();
+      expect(bubble.querySelector('details')?.open).toBe(false);
+      expect(within(bubble).queryByTitle('Quote message')).not.toBeInTheDocument();
+    }
+    const first = bubbles[0]!;
+    expect(first.querySelector('.violet-had-dreams-text')?.textContent).toBe('done');
+    fireEvent.click(first.querySelector('summary')!);
+    expect(first.querySelector('details')?.open).toBe(true);
+    fireEvent.click(first.querySelector('summary')!);
+    expect(first.querySelector('details')?.open).toBe(false);
+    expect(bubbles[1]!.querySelector('.violet-had-dreams-text')?.textContent).toBe('**not parsed**\n<script>literal text</script>');
+    expect(bubbles[1]!.querySelector('script')).toBeNull();
+    expect(bubbles[2]!.querySelector('.violet-had-dreams-text')?.textContent).toBe('');
+    for (let index = 3; index < texts.length; index += 1) {
+      expect(container.querySelector(`[data-violet-message-id="dream-fixture-${index}"]`)).not.toHaveClass('had-dreams');
+    }
   });
 
   it('renders Bartender conflict prompts as collapsed agent messages with a target badge', async () => {

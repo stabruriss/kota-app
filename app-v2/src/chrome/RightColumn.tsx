@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { BbsPromptProject } from '../bbs-config';
+import { watchDreamSubmissions } from '../lib/ember-dream-run';
 import {
   TAVERN_SYSTEM_CONFIG_CHANGED_EVENT,
   loadBartenderConflictPrompts,
@@ -57,6 +58,8 @@ import {
   bartenderSyncReceipt,
   emberDeliverHumanReminder,
   emberConsolidateDreams,
+  emberDreamRunStatus,
+  type EmberDreamParticipant,
   emberExportEpisodes,
   emberPrepareDreams,
   emberScheduleSave,
@@ -148,7 +151,6 @@ const EMBER_ACTOR_NAME = 'Ember';
 const EMBER_DREAM_TITLE = "It's time to dream.";
 const ROCKER_COVER_CLOSE_MS = 1700;
 const DREAM_AGENT_OVERLAY_TTL_MS = 30 * 60 * 1000;
-const DREAM_MIN_CONSOLIDATE_DELAY_MS = 120_000;
 const DREAM_DIGEST_WAIT_MESSAGE = 'Last dreams is still being digested, waiting...';
 const MONTH_DAY_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
   month: 'short',
@@ -1185,6 +1187,7 @@ export function RightColumn({
   workspace,
   workspaceProjects,
   workingAgents,
+  dreamWorkingAgentIds,
   roomAgents = EMPTY_AGENT_IDS,
   dreamProjects,
   resolveDreamProjects,
@@ -1208,6 +1211,7 @@ export function RightColumn({
   workspace?: WorkspaceProject | null;
   workspaceProjects?: readonly WorkspaceProject[];
   workingAgents?: ReadonlySet<AgentId>;
+  dreamWorkingAgentIds?: readonly AgentId[];
   roomAgents?: readonly AgentId[];
   dreamProjects?: readonly DreamProjectTarget[];
   resolveDreamProjects?: ResolveDreamProjectTargets;
@@ -1272,6 +1276,9 @@ export function RightColumn({
   const dreamRunningRef = useRef(false);
   const dreamConsolidatingRef = useRef(false);
   const dreamStartedAtRef = useRef(0);
+  const dreamParticipantsRef = useRef<EmberDreamParticipant[]>([]);
+  const dreamWorkingAgentIdsRef = useRef<readonly AgentId[]>([]);
+  dreamWorkingAgentIdsRef.current = dreamWorkingAgentIds ?? Array.from(workingAgents ?? []);
   const [bartenderPromptVersion, setBartenderPromptVersion] = useState(0);
   const [bartenderPrompts, setBartenderPrompts] = useState<BartenderConflictPrompts>(() => (
     loadBartenderConflictPrompts()
@@ -1404,6 +1411,7 @@ export function RightColumn({
     dreamRunningRef.current = false;
     dreamConsolidatingRef.current = false;
     dreamStartedAtRef.current = 0;
+    dreamParticipantsRef.current = [];
     if (options?.resetWorkSession) setWorkStartedAt(resetEmberWorkSessionStartedAt());
   }, []);
   const [violetSummary, setVioletSummary] = useState<VioletSummaryState | null>(null);
@@ -2059,6 +2067,7 @@ export function RightColumn({
       const sendTasks: Promise<{
         project: DreamProjectTarget;
         agent: DreamProjectTarget['agents'][number];
+        deliveredAt: string;
       }>[] = [];
       let failedCount = 0;
       for (const [index, result] of prepared.entries()) {
@@ -2068,13 +2077,15 @@ export function RightColumn({
         }
         const { project, body } = result.value;
         for (const agent of project.agents) {
+          // Capture before sending: a fast CLI submission can precede the IPC reply.
+          const deliveredAt = new Date().toISOString();
           sendTasks.push(sendEmberBusMessage(
             project.projectRoot,
             agent.id,
             body,
             'dream',
             emberEventId('dream', `${dreamRunId}-${project.projectId}`, agent.id),
-          ).then(() => ({ project, agent })));
+          ).then(() => ({ project, agent, deliveredAt })));
         }
       }
 
@@ -2082,9 +2093,11 @@ export function RightColumn({
       const deliveredRoots = new Set<string>();
       const deliveredProjects = new Map<string, DreamProjectTarget>();
       let deliveredCount = 0;
+      const participants: EmberDreamParticipant[] = [];
       for (const result of sendResults) {
         if (result.status === 'fulfilled') {
-          const { project, agent } = result.value;
+          const { project, agent, deliveredAt } = result.value;
+          participants.push({ agentId: agent.id, projectRoot: project.projectRoot, deliveredAt });
           const root = project.projectRoot;
           const key = `${project.projectId}:${root}`;
           deliveredRoots.add(root);
@@ -2111,6 +2124,8 @@ export function RightColumn({
       }
 
       const deliveredProjectList = Array.from(deliveredProjects.values());
+      dreamParticipantsRef.current = participants;
+      dreamStartedAtRef.current = Math.min(...participants.map((participant) => Date.parse(participant.deliveredAt)));
       const deliveredNames = deliveredProjectList.flatMap((project) => project.agents.map((agent) => agent.name));
       setDreamingAgents(deliveredNames);
       setDreamScope(dreamScopeLabel(deliveredProjectList));
@@ -2189,15 +2204,15 @@ export function RightColumn({
     }
   }, [dreamConsolidationPending, dreamConsolidationProjectRoots, emberProjectRoot, violetSummaryConfig.provider]);
 
-  // The old shared second tick also woke consolidation. Keep that deadline
-  // anchored to the Dream start rather than adding 120 seconds after delivery.
   useEffect(() => {
     if (!dreamConsolidationPending) return;
-    const dueAt = dreamStartedAtRef.current + DREAM_MIN_CONSOLIDATE_DELAY_MS;
-    const timer = window.setTimeout(() => {
-      void finishDreamConsolidation();
-    }, Math.max(0, dueAt - Date.now()));
-    return () => window.clearTimeout(timer);
+    const participants = dreamParticipantsRef.current;
+    return watchDreamSubmissions({
+      startedAt: dreamStartedAtRef.current,
+      participants,
+      readStatus: () => emberDreamRunStatus(participants, dreamWorkingAgentIdsRef.current),
+      onReady: () => { void finishDreamConsolidation(); },
+    });
   }, [
     dreamConsolidationPending,
     finishDreamConsolidation,

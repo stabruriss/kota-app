@@ -405,7 +405,7 @@ pub(crate) fn neighbour_slice(text: &str) -> String {
 }
 
 /// `you` for the incarnation's own words, the sender's name for a user message, and
-/// `old dream` for an archived Dream.
+/// `old dream` for an archived Dream already in the pool.
 pub(crate) fn who(episode: &Stored) -> String {
     if episode.kind == "old_dream" {
         return "old dream".into();

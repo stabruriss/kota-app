@@ -135,7 +135,7 @@ test('Tauri hooks preserve CLI order and explicit runtime resource mappings', ()
   assert.equal(config.build.beforeDevCommand, 'npm run prepare:pi-runtime && npm run build:sidecars:dev && npm run dev');
   assert.equal(config.build.beforeBuildCommand, 'npm run prepare:pi-runtime && npm run build && npm run build:sidecars');
   assert.equal(config.bundle.resources['pi-runtime/darwin-arm64/'], 'kota-pi/');
-  assert.deepEqual(config.bundle.externalBin, ['bin/kota-bbs', 'bin/kota-agent-bus', 'bin/kota-bartender', 'bin/kota-ember', 'bin/kota-my-soul']);
+  assert.deepEqual(config.bundle.externalBin, ['bin/kota-bbs', 'bin/kota-agent-bus', 'bin/kota-bartender', 'bin/kota-ember', 'bin/kota-my-soul', 'bin/kota-dream']);
   const extensionResources = Object.fromEntries(Object.entries(config.bundle.resources)
     .filter(([source, destination]) => source.startsWith('../kota-ext') || destination.startsWith('kota-ext')));
   assert.deepEqual(extensionResources, {

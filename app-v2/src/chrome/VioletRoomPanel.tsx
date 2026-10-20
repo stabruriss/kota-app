@@ -1393,6 +1393,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
   const isPuppeteer = isUser && message.messageOrigin === 'puppeteer';
   const isBartenderConflict = isBartenderConflictMessage(message);
   const isEmberDream = isEmberDreamMessage(message);
+  const dreamEntryBody = emberDreamEntryBody(message);
   const showAvatar = isPuppeteer || (!isUser && (!isProcess || isCommentary));
   // End-turn only: keep the multi-agent Progress avatar stack and layout unchanged.
   const showProviderBadge = !isUser && message.kind === 'message' && !!providerIconForId(message.shell);
@@ -1537,7 +1538,8 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
         message.kind,
         showRetry ? 'delivery-issue' : '',
         hasLocalPending ? 'local-pending' : '',
-        isEmberDream ? 'ember-dream' : '',
+        isEmberDream || dreamEntryBody !== null ? 'ember-dream' : '',
+        dreamEntryBody !== null ? 'had-dreams' : '',
         isBartenderConflict ? 'bartender-conflict' : '',
         canQuote ? 'quoteable' : '',
         lifecycle ? 'inactive-agent' : '',
@@ -1683,6 +1685,14 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
                   projectRoot={projectRoot}
                 />
               )}
+            </details>
+          ) : dreamEntryBody !== null ? (
+            <details className="violet-ember-dream-details violet-had-dreams-details">
+              <summary>
+                <span>Had dreams</span>
+                <i className="violet-had-dreams-arrow" aria-hidden="true" />
+              </summary>
+              <div className="violet-had-dreams-text">{dreamEntryBody}</div>
             </details>
           ) : isEmberDream ? (
             <details className="violet-ember-dream-details">
@@ -1853,7 +1863,8 @@ function isQuoteableRoomMessage(message: VioletRoomMessage): boolean {
     isTurnInterruptMessage(message) ||
     isBbsThreadPromptMessage(message) ||
     isBartenderConflictMessage(message) ||
-    isEmberDreamMessage(message)
+    isEmberDreamMessage(message) ||
+    emberDreamEntryBody(message) !== null
   ) {
     return false;
   }
@@ -2222,6 +2233,16 @@ function isEmberDreamMessage(message: VioletRoomMessage): boolean {
     message.kind === 'message' &&
     message.text.trimStart().startsWith(EMBER_DREAM_MESSAGE_TITLE)
   );
+}
+
+function emberDreamEntryBody(message: VioletRoomMessage): string | null {
+  if (message.role !== 'assistant' || message.kind !== 'message' || message.agentId === 'ember') return null;
+  const text = message.text.trim();
+  const open = '<KOTA_DREAM_ENTRY>';
+  const close = '</KOTA_DREAM_ENTRY>';
+  // The complete message is the envelope. Empty or unexpected contents still count.
+  if (!text.startsWith(open) || !text.endsWith(close)) return null;
+  return text.slice(open.length, -close.length).trim();
 }
 
 function isTurnInterruptMessage(message: VioletRoomMessage): boolean {

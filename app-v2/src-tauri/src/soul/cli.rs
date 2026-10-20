@@ -13,11 +13,11 @@ use std::{
 pub(crate) const HELP: &str = r#"kota-my-soul — your marks (lessons you keep across projects) and episodes (past room messages).
 
   add-mark "<text>"                 Add a mark. Up to 200 characters. Start with when it applies. At most 20 marks.
-  edit-mark <id> "<text>"           Replace a mark's text. The old text is kept as an episode.
+  edit-mark <id> "<text>"           Replace a mark's text.
   delete-mark <id>                  Remove a mark. Its text is kept as an episode.
   read-mark                         List your marks.
   search-episode "<words>" [--project <slug>]
-                                    Search past room messages and dreams. Returns 5 hits, each with a neighbor line.
+                                    Search past room messages. Returns 5 hits, each with a neighbor line.
   search-episode --id <id>          Show one episode in full.
   clear-heat <id>                   Reset the usage count of an episode or dream after you have handled its reminder."#;
 
@@ -41,7 +41,7 @@ pub(crate) struct Env {
 }
 
 impl Env {
-    fn from_process(flags: &HashMap<String, String>) -> Result<Self> {
+    pub(crate) fn from_process(flags: &HashMap<String, String>) -> Result<Self> {
         let value = |flag: &str, var: &str| {
             flags
                 .get(flag)
@@ -75,7 +75,7 @@ impl Env {
 const GLOBAL_FLAGS: [&str; 5] = ["--agent-cwd", "--kota-home", "--agent-id", "--project-root", "--project-id"];
 
 /// Global flags come out wherever they appear before a `--`; everything else keeps its order.
-fn split_flags(args: &[String]) -> Result<(HashMap<String, String>, Vec<String>)> {
+pub(crate) fn split_flags(args: &[String]) -> Result<(HashMap<String, String>, Vec<String>)> {
     let mut flags = HashMap::new();
     let mut rest = Vec::new();
     let mut literal = false;
@@ -172,7 +172,7 @@ pub(crate) fn run(args: &[String], env: &Env, stdin: &str, ts: &str) -> Result<S
             let text = text_after(args, 2).unwrap_or_else(|| stdin.to_string());
             Ok(match marks::edit(&paths, &id, &text, ts)? {
                 marks::Edited::Updated(marks) => with_list(
-                    format!("Updated {id} (revision {}). The old text is kept as an episode.", marks.revision),
+                    format!("Updated {id} (revision {}).", marks.revision),
                     &marks,
                     env,
                 ),
@@ -351,33 +351,37 @@ fn clear_heat(paths: &SoulPaths, env: &Env, id: &str, ts: &str) -> Result<String
 
 /// `~/Kota/bin/kota-my-soul`, the shim the App installs at start, as for kota-ember.
 pub fn install_cli_shim() -> Result<PathBuf> {
+    install_named_cli_shim("kota-my-soul", "KOTA_MY_SOUL_BIN")
+}
+
+pub(crate) fn install_named_cli_shim(name: &str, override_env: &str) -> Result<PathBuf> {
     let bin_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Kota").join("bin");
     fs::create_dir_all(&bin_dir)?;
-    let shim = bin_dir.join("kota-my-soul");
+    let shim = bin_dir.join(name);
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            candidates.push(parent.join("kota-my-soul"));
-            candidates.push(parent.join("../Resources/kota-my-soul"));
+            candidates.push(parent.join(name));
+            candidates.push(parent.join(format!("../Resources/{name}")));
             if let Some(triple) = current_target_triple_guess() {
-                candidates.push(parent.join(format!("kota-my-soul-{triple}")));
-                candidates.push(parent.join(format!("../Resources/kota-my-soul-{triple}")));
+                candidates.push(parent.join(format!("{name}-{triple}")));
+                candidates.push(parent.join(format!("../Resources/{name}-{triple}")));
             }
         }
     }
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/kota-my-soul"));
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/release/kota-my-soul"));
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("target/debug/{name}")));
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("target/release/{name}")));
     let mut script = String::from("#!/bin/sh\nset -eu\n");
-    script.push_str(
-        "if [ -n \"${KOTA_MY_SOUL_BIN:-}\" ] && [ -x \"$KOTA_MY_SOUL_BIN\" ]; then exec \"$KOTA_MY_SOUL_BIN\" \"$@\"; fi\n",
-    );
+    script.push_str(&format!(
+        "if [ -n \"${{{override_env}:-}}\" ] && [ -x \"${override_env}\" ]; then exec \"${override_env}\" \"$@\"; fi\n",
+    ));
     for candidate in candidates {
         let quoted = shell_quote(&candidate.display().to_string());
         script.push_str(&format!("if [ -x {quoted} ]; then exec {quoted} \"$@\"; fi\n"));
     }
-    script.push_str(
-        "echo 'kota-my-soul binary is not installed. Build it with: cargo build --bin kota-my-soul' >&2\nexit 127\n",
-    );
+    script.push_str(&format!(
+        "echo '{name} binary is not installed. Build it with: cargo build --bin {name}' >&2\nexit 127\n",
+    ));
     fs::write(&shim, script)?;
     make_executable(&shim)?;
     Ok(shim)

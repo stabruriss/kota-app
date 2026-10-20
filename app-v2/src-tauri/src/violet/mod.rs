@@ -89,6 +89,7 @@ const CODEX_INTERNAL_PROGRESS_FORMAT_WARNING: &str =
 const CODEX_SANDBOX_DOWNGRADE_INTENT: &str = "sandbox-downgrade";
 const CODEX_SANDBOX_DOWNGRADE_TEXT: &str =
     "Codex session lost room access after a Codex update — refresh session to restore.";
+const ERROR_MESSAGE_ORIGIN: &str = "error";
 const KIMI_UNKNOWN_EVENT_WARNING: &str =
     "Kimi Code emitted an unrecognized native event. Raw event retained in native logs.";
 const EMBER_DREAM_MAX_ACTIVE_ENTRIES: usize = 10;
@@ -1086,17 +1087,14 @@ pub fn consolidate_ember_dreams(
         sync_room_history(project_root);
     }
     let result = run_ember_dream_consolidation(project_roots, &request);
-    // Again after the run: the Dreams it archived reach old_dreams.md only now.
-    export_ember_episodes(project_roots);
     match result {
         Ok((processed, archived)) => build_ember_dream_state(processed, archived, None),
         Err(err) => build_ember_dream_state(0, 0, Some(err)),
     }
 }
 
-/// Brings each project's room history up to date, then moves what is new there and in
-/// old_dreams.md into its incarnations' episodes. Ember runs this when the Dream
-/// countdown starts and again after consolidation; the cursors make a repeat a no-op.
+/// Brings each project's room history up to date, then moves new messages into its
+/// incarnations' episodes when the Dream countdown starts. Cursors make repeats a no-op.
 /// Failures only reach the debug log.
 pub fn export_ember_episodes(project_roots: &[PathBuf]) {
     for error in sync_and_export_episodes(
@@ -8480,13 +8478,7 @@ fn run_ember_dream_consolidation(
 ) -> Result<(usize, usize), String> {
     ensure_ember_dream_dirs()?;
     let processed_ids = read_processed_dream_entry_ids()?;
-    let mut project_entries = Vec::with_capacity(project_roots.len());
-    for project_root in project_roots {
-        project_entries.push(collect_unprocessed_dream_entries(
-            project_root,
-            &processed_ids,
-        )?);
-    }
+    let project_entries = collect_unprocessed_dream_entries(&crate::kota_home_dir(), &processed_ids)?;
     let collected_entries = project_entries
         .iter()
         .flatten()
@@ -8526,11 +8518,7 @@ fn run_ember_dream_consolidation(
         &decisions,
         EMBER_DREAM_MAX_ACTIVE_ENTRIES,
     )?;
-    append_dream_entry_records(&collected_entries)?;
-    if !result.archived.is_empty() {
-        append_old_dreams(&result.archived)?;
-    }
-    write_active_dreams_markdown(&result.active, &provider, collected_entries.len())?;
+    persist_ember_dream_result(&crate::kota_home_dir(), &result, &provider, &collected_entries)?;
     Ok((collected_entries.len(), result.archived.len()))
 }
 
@@ -8628,28 +8616,27 @@ fn ember_dream_consolidate_prompt_path() -> String {
 }
 
 fn collect_unprocessed_dream_entries(
-    project_root: &Path,
+    kota_home: &Path,
     processed_ids: &HashSet<String>,
-) -> Result<Vec<EmberDreamEntryRecord>, String> {
-    let mut events = read_chathistory_event_segments(project_root)?;
-    events.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.id.cmp(&b.id)));
-    let mut out = Vec::new();
-    for event in events {
-        if processed_ids.contains(&event.id) || !is_ember_dream_entry_event(&event) {
-            continue;
-        }
-        let Some(text) = extract_ember_dream_entry_text(&event.text) else {
-            continue;
-        };
-        out.push(EmberDreamEntryRecord {
-            event_id: event.id,
-            ts: event.ts,
-            agent_id: event.agent_id,
-            agent_display_name: event.agent_display_name,
+) -> Result<Vec<Vec<EmberDreamEntryRecord>>, String> {
+    let entries = crate::dream_entry::read_inbox(kota_home, true)?;
+    let already_processed = entries.iter().filter(|entry| processed_ids.contains(&entry.id))
+        .map(|entry| entry.id.clone()).collect();
+    // Repeated submissions of a consumed id still acknowledge the current run.
+    crate::dream_entry::remove_acknowledged(kota_home, &already_processed)?;
+    let mut projects = std::collections::BTreeMap::<PathBuf, Vec<EmberDreamEntryRecord>>::new();
+    for entry in entries {
+        if processed_ids.contains(&entry.id) { continue; }
+        let text = entry.text();
+        projects.entry(entry.project_root).or_default().push(EmberDreamEntryRecord {
+            event_id: entry.id,
+            ts: entry.ts,
+            agent_id: entry.agent_id,
+            agent_display_name: entry.agent_display_name,
             text,
         });
     }
-    Ok(out)
+    Ok(projects.into_values().collect())
 }
 
 fn is_ember_dream_entry_event(event: &ChathistoryEvent) -> bool {
@@ -8659,26 +8646,16 @@ fn is_ember_dream_entry_event(event: &ChathistoryEvent) -> bool {
         && extract_ember_dream_entry_text(&event.text).is_some()
 }
 
+fn ember_dream_entry_body(text: &str) -> Option<&str> {
+    // The complete message is the envelope; its contents (including empty text)
+    // do not determine whether it is a Dream acknowledgement.
+    text.trim().strip_prefix(EMBER_DREAM_ENTRY_START)?
+        .strip_suffix(EMBER_DREAM_ENTRY_END).map(str::trim)
+}
+
 fn extract_ember_dream_entry_text(text: &str) -> Option<String> {
+    if let Some(body) = ember_dream_entry_body(text) { return Some(body.to_string()); }
     let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    // A real dream entry IS the wrapper: the whole message must START with the
-    // opening tag and END with the closing tag. Messages that merely quote or
-    // discuss the wrapper (e.g. iterating on the dream prompt itself) carry text
-    // around it and must NOT be treated as a dream entry — otherwise they get
-    // silently filtered out of the room.
-    if trimmed.starts_with(EMBER_DREAM_ENTRY_START) && trimmed.ends_with(EMBER_DREAM_ENTRY_END) {
-        let body_start = EMBER_DREAM_ENTRY_START.len();
-        let body_end = trimmed.len() - EMBER_DREAM_ENTRY_END.len();
-        if body_end >= body_start {
-            let body = trimmed[body_start..body_end].trim();
-            if !body.is_empty() {
-                return Some(body.to_string());
-            }
-        }
-    }
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("dream entry")
         || lower.starts_with("**dream entry**")
@@ -8931,22 +8908,29 @@ fn read_processed_dream_entry_ids() -> Result<HashSet<String>, String> {
 }
 
 fn append_dream_entry_records(records: &[EmberDreamEntryRecord]) -> Result<(), String> {
-    if records.is_empty() {
-        return Ok(());
+    append_dream_entry_records_at(&crate::kota_home_dir(), records)
+}
+
+fn append_dream_entry_records_at(kota_home: &Path, records: &[EmberDreamEntryRecord]) -> Result<(), String> {
+    if records.is_empty() { return Ok(()); }
+    let directory = kota_home.join("dreams/entries");
+    fs::create_dir_all(&directory).map_err(|err| format!("create {}: {err}", directory.display()))?;
+    let path = directory.join(format!("{}.jsonl", Utc::now().format("%Y-%m-%d")));
+    {
+        let _lock = crate::soul::lock(&kota_home.join("dreams/.inbox.lock"))?;
+        let mut content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(format!("read {}: {err}", path.display())),
+        };
+        if !content.is_empty() && !content.ends_with('\n') { content.push('\n'); }
+        for record in records {
+            content.push_str(&serde_json::to_string(record).map_err(|err| format!("serialize dream entry record: {err}"))?);
+            content.push('\n');
+        }
+        crate::adapter_sync::atomic_replace(&path, content.as_bytes())?;
     }
-    ensure_ember_dream_dirs()?;
-    let path = ember_dream_entries_dir().join(format!("{}.jsonl", Utc::now().format("%Y-%m-%d")));
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|err| format!("open {}: {err}", path.display()))?;
-    for record in records {
-        let line = serde_json::to_string(record)
-            .map_err(|err| format!("serialize dream entry record: {err}"))?;
-        writeln!(file, "{line}").map_err(|err| format!("write {}: {err}", path.display()))?;
-    }
-    Ok(())
+    crate::dream_entry::remove_acknowledged(kota_home, &records.iter().map(|record| record.event_id.clone()).collect())
 }
 
 fn read_active_dream_entries() -> Result<Vec<String>, String> {
@@ -9010,12 +8994,27 @@ fn read_active_dream_entries_at(path: &Path) -> Result<Vec<String>, String> {
     Ok(entries)
 }
 
+fn persist_ember_dream_result(
+    kota_home: &Path,
+    result: &EmberDreamApplyResult,
+    provider: &str,
+    records: &[EmberDreamEntryRecord],
+) -> Result<(), String> {
+    let root = kota_home.join("dreams");
+    fs::create_dir_all(&root).map_err(|error| format!("create {}: {error}", root.display()))?;
+    append_old_dreams(&root.join("old_dreams.md"), &result.archived)?;
+    write_active_dreams_markdown(&root.join("dreams.md"), &result.active, provider, records.len())?;
+    // A failed output write leaves submissions pending. If the journal write fails
+    // after dreams.md landed, the next run may reconsider these same entries.
+    append_dream_entry_records_at(kota_home, records)
+}
+
 fn write_active_dreams_markdown(
+    path: &Path,
     active: &[String],
     provider: &str,
     processed_count: usize,
 ) -> Result<(), String> {
-    ensure_ember_dream_dirs()?;
     let now = Utc::now().to_rfc3339();
     let mut out = String::new();
     out.push_str("# Dreams\n\n");
@@ -9034,15 +9033,13 @@ fn write_active_dreams_markdown(
     out.push_str(&format!(
         "- {now}, provider: {provider}, processed entries: {processed_count}\n"
     ));
-    write_if_changed(&ember_dreams_path(), out.as_bytes())
+    write_if_changed(path, out.as_bytes())
 }
 
-fn append_old_dreams(entries: &[String]) -> Result<(), String> {
+fn append_old_dreams(path: &Path, entries: &[String]) -> Result<(), String> {
     if entries.is_empty() {
         return Ok(());
     }
-    ensure_ember_dream_dirs()?;
-    let path = ember_old_dreams_path();
     let existed = path.is_file();
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -9184,7 +9181,9 @@ fn chathistory_events_to_room_messages(
         .filter(|event| !is_project_agent_lifecycle_notification(event))
         .filter(|event| is_composer_original(&event.role, &event.agent_id, &event.shell, &event.source.session_id)
             || !is_harness_envelope_text(&event.text))
-        .filter(|event| !is_ember_dream_entry_event(event))
+        // Wrapped acknowledgements now render as Had dreams. Keep legacy entry
+        // headings hidden; summary/search/export exclusions remain independent.
+        .filter(|event| !is_ember_dream_entry_event(event) || ember_dream_entry_body(&event.text).is_some())
         .filter(|event| !is_ignorable_codex_internal_context_event(event))
         .map(message_from_chathistory_event)
         .filter(|message| {
@@ -9862,22 +9861,29 @@ fn looks_like_legacy_tool_block(content: &str, metadata: &str) -> bool {
 }
 
 fn event_to_message(event: NativeEvent) -> VioletChatMessage {
+    let id = if let Some(id) = event.native_event_id.as_ref().filter(|_| {
+        event.actor_intent.as_deref() == Some(CODEX_SANDBOX_DOWNGRADE_INTENT)
+    }) {
+        id.clone()
+    } else if event.message_origin.as_deref() == Some("shell_handoff") {
+        stable_message_id("shell-handoff", &event.agent_id, "", event.native_event_id.as_deref().unwrap_or_default())
+    } else if let Some(identity) = event.text_identity.as_ref() {
+        identity.message_id.clone()
+    } else {
+        stable_message_id(&event.session_id, &event.agent_id, &event.timestamp, &event.text)
+    };
+    let message_origin = event.message_origin.or_else(|| {
+        (event.role == "assistant"
+            && event.kind == "message"
+            && event.work_signal.as_deref() == Some("failed"))
+        .then(|| ERROR_MESSAGE_ORIGIN.into())
+    });
     VioletChatMessage {
         overflow_path: event.overflow_path,
         legacy_dedupe_hash: event.text_identity.as_ref().map(|identity| identity.room_dedupe_hash.clone()),
         route: event.route.clone(),
         temporal_gap: None,
-        id: if let Some(id) = event.native_event_id.as_ref().filter(|_| {
-            event.actor_intent.as_deref() == Some(CODEX_SANDBOX_DOWNGRADE_INTENT)
-        }) {
-            id.clone()
-        } else if event.message_origin.as_deref() == Some("shell_handoff") {
-            stable_message_id("shell-handoff", &event.agent_id, "", event.native_event_id.as_deref().unwrap_or_default())
-        } else if let Some(identity) = event.text_identity.as_ref() {
-            identity.message_id.clone()
-        } else {
-            stable_message_id(&event.session_id, &event.agent_id, &event.timestamp, &event.text)
-        },
+        id,
         session_id: event.session_id,
         agent_id: event.agent_id,
         shell: event.shell,
@@ -9889,7 +9895,7 @@ fn event_to_message(event: NativeEvent) -> VioletChatMessage {
         native_event_id: event.native_event_id,
         violet_seq: None,
         actor_intent: event.actor_intent,
-        message_origin: event.message_origin,
+        message_origin,
         model: event.model,
         effort: event.effort,
         target_agent_ids: Vec::new(),

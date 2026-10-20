@@ -1,7 +1,7 @@
 {
   "name": "kota-v2",
   "private": true,
-  "version": "0.1.24",
+  "version": "0.1.25",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,8 +9,8 @@
     "prepare:pi-runtime": "node scripts/prepare-pi-runtime.mjs",
     "sign:pi-runtime:local": "node scripts/sign-pi-runtime-local.mjs",
     "test:pi-runtime": "node --test scripts/test/*.test.mjs",
-    "build:sidecars": "cd src-tauri && triple=$(rustc -vV | awk '/host:/ {print $2}') && mkdir -p bin && for sidecar in kota-bbs kota-agent-bus kota-bartender kota-ember kota-my-soul; do : > \"bin/$sidecar-$triple\"; done && cargo build --release --bin kota-bbs --bin kota-agent-bus --bin kota-bartender --bin kota-ember --bin kota-my-soul && for sidecar in kota-bbs kota-agent-bus kota-bartender kota-ember kota-my-soul; do cp \"target/release/$sidecar\" \"bin/$sidecar-$triple\" && chmod +x \"bin/$sidecar-$triple\" && test -s \"bin/$sidecar-$triple\"; done",
-    "build:sidecars:dev": "cd src-tauri && triple=$(rustc -vV | awk '/host:/ {print $2}') && mkdir -p bin && for sidecar in kota-bbs kota-agent-bus kota-bartender kota-ember kota-my-soul; do : > \"bin/$sidecar-$triple\"; done && cargo build --bin kota-bbs --bin kota-agent-bus --bin kota-bartender --bin kota-ember --bin kota-my-soul && for sidecar in kota-bbs kota-agent-bus kota-bartender kota-ember kota-my-soul; do cp \"target/debug/$sidecar\" \"bin/$sidecar-$triple\" && chmod +x \"bin/$sidecar-$triple\" && test -s \"bin/$sidecar-$triple\"; done",
+    "build:sidecars": "cd src-tauri && triple=$(rustc -vV | awk '/host:/ {print $2}') && mkdir -p bin && for sidecar in kota-bbs kota-agent-bus kota-bartender kota-ember kota-my-soul kota-dream; do : > \"bin/$sidecar-$triple\"; done && cargo build --release --bin kota-bbs --bin kota-agent-bus --bin kota-bartender --bin kota-ember --bin kota-my-soul --bin kota-dream && for sidecar in kota-bbs kota-agent-bus kota-bartender kota-ember kota-my-soul kota-dream; do cp \"target/release/$sidecar\" \"bin/$sidecar-$triple\" && chmod +x \"bin/$sidecar-$triple\" && test -s \"bin/$sidecar-$triple\"; done",
+    "build:sidecars:dev": "cd src-tauri && triple=$(rustc -vV | awk '/host:/ {print $2}') && mkdir -p bin && for sidecar in kota-bbs kota-agent-bus kota-bartender kota-ember kota-my-soul kota-dream; do : > \"bin/$sidecar-$triple\"; done && cargo build --bin kota-bbs --bin kota-agent-bus --bin kota-bartender --bin kota-ember --bin kota-my-soul --bin kota-dream && for sidecar in kota-bbs kota-agent-bus kota-bartender kota-ember kota-my-soul kota-dream; do cp \"target/debug/$sidecar\" \"bin/$sidecar-$triple\" && chmod +x \"bin/$sidecar-$triple\" && test -s \"bin/$sidecar-$triple\"; done",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

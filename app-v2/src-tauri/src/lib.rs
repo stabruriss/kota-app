@@ -27,6 +27,16 @@ mod project_settings;
 mod tavern_invite;
 mod tavern_local;
 mod shell_switch;
+const CLI_SHIMS: &[(&str, fn() -> anyhow::Result<std::path::PathBuf>)] = &[
+    ("kota-bbs", bbs::install_cli_shim),
+    ("kota-agent-bus", agent_bus::install_cli_shim),
+    ("kota-bartender", bartender::install_cli_shim),
+    ("kota-ember", ember::install_cli_shim),
+    ("kota-my-soul", soul::install_cli_shim),
+    ("kota-dream", dream_entry::install_cli_shim),
+];
+
+pub mod dream_entry;
 pub mod soul;
 mod soul_push;
 mod string_templates;
@@ -2106,6 +2116,29 @@ async fn violet_summary_auto_run(
     tauri::async_runtime::spawn_blocking(move || violet::summarize_auto(&project_root, request))
         .await
         .map_err(|err| format!("join Violet auto-summary task: {err}"))?
+}
+
+#[tauri::command]
+async fn ember_dream_run_status(
+    manager: State<'_, PtyManager>,
+    request: dream_entry::RunStatusRequest,
+) -> Result<Vec<dream_entry::RunStatus>, String> {
+    let working = request.participants.iter().map(|participant| {
+        if manager.agent_is_local(&participant.agent_id) {
+            manager.agent_local_snapshot(&participant.agent_id)
+                .is_ok_and(|snapshot| dream_entry::local_is_working(&snapshot, &participant.project_root))
+        } else {
+            request.working_agent_ids.contains(&participant.agent_id)
+        }
+    }).collect::<Vec<_>>();
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = kota_home_dir();
+        let entries = dream_entry::read_inbox(&home, false)?;
+        Ok(request.participants.into_iter().zip(working).map(|(participant, working)| {
+            let submitted = dream_entry::has_submitted(&home, &participant, &entries);
+            dream_entry::RunStatus { agent_id: participant.agent_id, project_root: participant.project_root, submitted, working }
+        }).collect())
+    }).await.map_err(|error| format!("join Ember Dream status task: {error}"))?
 }
 
 #[tauri::command]
@@ -13958,20 +13991,10 @@ pub fn run() {
             app.state::<bbs::notify::Service>().start(
                 app.handle().clone(), app.state::<bbs_sync::manager::Manager>().inner().clone(),
             );
-            if let Err(err) = bbs::install_cli_shim() {
-                eprintln!("Kota BBS CLI shim setup failed: {err}");
-            }
-            if let Err(err) = agent_bus::install_cli_shim() {
-                eprintln!("Kota agent bus CLI shim setup failed: {err}");
-            }
-            if let Err(err) = ember::install_cli_shim() {
-                eprintln!("Kota Ember CLI shim setup failed: {err}");
-            }
-            if let Err(err) = bartender::install_cli_shim() {
-                eprintln!("Kota Bartender CLI shim setup failed: {err}");
-            }
-            if let Err(err) = soul::install_cli_shim() {
-                eprintln!("Kota My Soul CLI shim setup failed: {err}");
+            for (name, install) in CLI_SHIMS {
+                if let Err(err) = install() {
+                    eprintln!("Kota {name} CLI shim setup failed: {err}");
+                }
             }
             if let Ok(workspaces) = app.state::<IntegrationManager>().list_workspaces() {
                 for workspace in workspaces {
@@ -14169,6 +14192,7 @@ pub fn run() {
             ember_deliver_human_reminder,
             ember_prepare_dreams,
             ember_consolidate_dreams,
+            ember_dream_run_status,
             ember_export_episodes,
             project_agent_save_detail,
             project_agent_archive,
