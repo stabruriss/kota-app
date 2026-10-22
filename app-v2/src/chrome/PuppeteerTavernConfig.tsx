@@ -99,9 +99,9 @@ export function PuppeteerTavernConfig({ jevFocusRequest = 0 }: { jevFocusRequest
       <p>{tab === 'string' ? 'Auto select model for agent' : 'Auto select agent for task'}</p>
       {loading ? <p role="status">Loading projects…</p> : failed ? <p role="status">Projects unavailable. <button type="button" onClick={() => setRevision(value => value + 1)}>Retry</button></p> : <>
         {tab === 'string' && !rows.some(row => row.agents.length) && <p>No Local agents are using Auto String.</p>}
-        <div className={tab === 'dance' ? 'puppeteer-dance-projects' : ''}>{rows.filter(row => row.error || tab === 'dance' || row.agents.length).map(row => <section key={row.project.localRoot} className="puppeteer-project"><header><h3>{row.project.repoFullName || row.project.projectId}</h3></header>
+        <div className={tab === 'dance' ? 'puppeteer-dance-projects' : ''}>{rows.filter(row => row.error || tab === 'dance' || row.agents.length).map(row => <section key={row.project.localRoot} className="puppeteer-project"><header><h3>{row.project.displayName || row.project.repoFullName || row.project.projectId}</h3></header>
           {row.error ? <p role="status">Agent roster unavailable. <button type="button" onClick={() => setRevision(value => value + 1)}>Retry</button></p>
-            : tab === 'dance' ? <ProjectDance row={row} /> : <div className="puppeteer-string-agents">{row.agents.map(agent => <button type="button" className="puppeteer-string-agent" key={agent.agentId} aria-label={`Edit Auto String for ${agent.displayName} in ${row.project.repoFullName || row.project.projectId}`}
+            : tab === 'dance' ? <ProjectDance row={row} /> : <div className="puppeteer-string-agents">{row.agents.map(agent => <button type="button" className="puppeteer-string-agent" key={agent.agentId} aria-label={`Edit Auto String for ${agent.displayName} in ${row.project.displayName || row.project.repoFullName || row.project.projectId}`}
               onClick={() => void openEditor(row, agent)}><HeroAvatarArt avatarId={agent.avatarId} className="dance-agent-avatar" />
               <span><b>{agent.displayName}</b><small>{agent.autoRoute?.models.length ?? 0} models · Threshold {(agent.autoRoute?.threshold ?? .5).toFixed(2)}</small></span><i>Edit ›</i></button>)}</div>}
         </section>)}</div>
@@ -122,5 +122,5 @@ export function PuppeteerTavernConfig({ jevFocusRequest = 0 }: { jevFocusRequest
 }
 function ProjectDance({ row }: { row: ProjectRow }) {
   const controller = useDanceSettings(row.project.localRoot);
-  return <PuppeteerDanceCard controller={controller} agents={row.seats} owner={row.project.repoFullName || row.project.projectId} />;
+  return <PuppeteerDanceCard controller={controller} agents={row.seats} owner={row.project.displayName || row.project.repoFullName || row.project.projectId} />;
 }

@@ -13,7 +13,10 @@ import tabMoveLeftIcon from '../assets/tavern/icons/tab-move-left.svg';
 import tabMoveRightIcon from '../assets/tavern/icons/tab-move-right.svg';
 import tavernEntryIcon from '../assets/tavern/icons/tavern-entry.svg';
 import type { Project, ProjectId } from '../types/project';
-import type { GhAuthInfo } from '../pty-client';
+import type { GhAuthInfo, WorkspaceProject } from '../pty-client';
+import '../styles/project-github.css';
+import { openGithubAccounts } from '../lib/github-account-flow';
+import { useProjectConnectionStatus } from '../lib/project-connection-status';
 
 interface TopBarProps {
   projects: readonly Project[];
@@ -30,6 +33,7 @@ interface TopBarProps {
   /** M6.B Step 1 — `gh auth status` snapshot. `null` while the
    *  initial probe is in flight. */
   ghAuth?: GhAuthInfo | null;
+  workspace?: WorkspaceProject | null;
   /** Called when the user clicks the auth indicator pill — typically
    *  routes to a SmartTerminal tab running `gh auth login` (M6.B §B2). */
   onGhAuthClick?: () => void;
@@ -48,6 +52,7 @@ export function TopBar({
   tavernPreparing = false,
   hideProjectTabs = false,
   ghAuth,
+  workspace,
   onGhAuthClick,
 }: TopBarProps) {
   const tavernButtonLabel = tavernPreparing
@@ -89,7 +94,7 @@ export function TopBar({
             const active = p.id === activeProjectId;
             const unreadCount = projectUnreadCounts?.[p.id] ?? 0;
             const title = projectTabTitle(p);
-            const displayName = projectDisplayName(p.name);
+            const displayName = p.displayName || projectDisplayName(p.name);
             const canMoveLeft = active && canReorderProjects && index > 0;
             const canMoveRight = active && canReorderProjects && index < projects.length - 1;
             return (
@@ -175,7 +180,7 @@ export function TopBar({
 
       <div className="tb-spacer" data-tauri-drag-region />
 
-      {ghAuth !== undefined && <GhAuthPill ghAuth={ghAuth} onClick={onGhAuthClick} />}
+      {workspace ? <ProjectConnectionPill workspace={workspace} /> : ghAuth !== undefined && <GhAuthPill ghAuth={ghAuth} onClick={onGhAuthClick} />}
 
       <button
         className={[
@@ -217,6 +222,18 @@ function projectTabTitle(project: Project): string {
     project.accountPath ? `Account: ${project.accountPath}` : null,
   ].filter((item): item is string => item != null);
   return details.length > 0 ? `${project.name}\n${details.join('\n')}` : project.name;
+}
+
+function ProjectConnectionPill({ workspace }: { workspace: WorkspaceProject }) {
+  const local = workspace.connection?.kind === 'local';
+  const view = useProjectConnectionStatus(workspace);
+  const login = view.status?.kind === 'github' ? view.status.accountLogin : workspace.connection?.kind === 'github' ? workspace.connection.accountLogin : undefined;
+  const state = view.status?.kind === 'github' ? view.status.accountState : view.error ? 'unavailable' : 'checking';
+  return <button type="button" onClick={openGithubAccounts} className={`gh-pill project-connection-pill ${local ? 'local' : state === 'ok' ? 'ok' : 'setup'}`} data-testid="gh-auth-pill"
+    data-state={local ? 'local' : !login || state === 'missing' || state === 'unbound' ? 'unassigned' : state} data-tauri-drag-region="false"
+    title={local ? 'This project is local only.' : state === 'needs_login' ? 'Sign in required' : !login || state === 'missing' || state === 'unbound' ? 'No account assigned' : `Project account: ${login}`}>
+    <span className="gh-pill-dot" aria-hidden /><span className="project-connection-label">{local ? 'Local' : `GitHub · ${login || 'No account'}`}</span>
+  </button>;
 }
 
 function GhAuthPill({

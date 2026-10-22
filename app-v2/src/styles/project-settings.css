@@ -158,3 +158,7 @@
   .project-settings-panel { left: -42px; width: calc(100vw - 32px); }
   .project-settings-head, .project-settings-body { padding: 18px; }
 }
+
+.project-settings-connection { margin-bottom:22px; }
+.project-commit-email.unavailable { opacity:.55; }
+.project-settings-connection .project-github-link { border-top:0; padding-top:0; }

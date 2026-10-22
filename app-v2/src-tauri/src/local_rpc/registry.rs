@@ -941,9 +941,9 @@ fn local_environment(command: &mut Command, req: &AgentSpawnRequest, home: &Path
         .env("KOTA_AGENT_ID", &req.agent_id).env("KOTA_BBS_ROOT", home.join("Kota/Workspaces/bbs"));
     if let Some(path) = &req.adapter_path { command.env("KOTA_AGENT_ADAPTER", path); }
     if let Some(id) = &req.project_id {
-        command.env("KOTA_PROJECT_ID", id).env("KOTA_PROJECT_DISPLAY_NAME", crate::bbs::display_project_name_with_fallback(id, None));
+        command.env("KOTA_PROJECT_ID", id).envs(crate::integrations::agent_project_env(root, id));
     }
-    if let Some(remote) = &req.project_remote { command.env("KOTA_PROJECT_REMOTE", remote); }
+    if let Some(remote) = req.project_remote.as_deref().filter(|remote| !remote.is_empty()) { command.env("KOTA_PROJECT_REMOTE", remote); }
     if let Some(base) = &req.project_base_ref { command.env("KOTA_PROJECT_BASE_REF", base); }
     let mut identity = CommandBuilder::new("pi");
     apply_agent_git_identity(&mut identity, root, &req.agent_id);

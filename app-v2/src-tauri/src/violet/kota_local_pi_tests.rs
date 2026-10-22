@@ -154,6 +154,7 @@ fn injection(message_id: &str, custom_type: &str, content: &str, actor: Option<(
             private: false,
             source_actor_id: actor.map(|(id, _)| id.to_string()),
             source_intent: actor.map(|(_, intent)| intent.to_string()),
+            route_model: None,
         },
     }
 }

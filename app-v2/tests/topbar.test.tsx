@@ -2,6 +2,11 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { TopBar } from '../src/chrome/TopBar';
+import type { WorkspaceProject } from '../src/pty-client';
+vi.mock('../src/pty-client', async original => ({...await original<typeof import('../src/pty-client')>(),
+ githubAccountsRead:vi.fn().mockResolvedValue({defaultLogin:null,accounts:[]}),
+ projectConnectionStatus:vi.fn().mockResolvedValue({kind:'github',accountLogin:null,accountState:'unbound'}),
+}));
 
 describe('TopBar project metadata', () => {
   it('exposes real GitHub workspace paths and repo URL on the active tab', () => {
@@ -81,4 +86,27 @@ describe('TopBar project metadata', () => {
     await userEvent.click(button);
     expect(onOpenTavern).toHaveBeenCalledTimes(1);
   });
+});
+
+const localProject: WorkspaceProject = { projectId:'local_fixture', displayName:'Copper / Notes', connection:{kind:'local'},
+  repoFullName:'', remoteUrl:'', githubHtmlUrl:'', sourceDir:'/fixture/local', localRoot:'/fixture/state',
+  sourceDirBytes:0, localRootBytes:0, sharedDir:'/fixture/shared', rulesDir:'/fixture/rules', agents:[], defaultBranch:'main', baseRef:'main' };
+const topProps={projects:[{id:'local_fixture',name:'Copper / Notes',displayName:'Copper / Notes'}],activeProjectId:'local_fixture',onSelectProject:vi.fn(),onNewProject:vi.fn(),onCloseProject:vi.fn(),onOpenTavern:vi.fn()};
+it('shows Local for a local project and preserves its explicit display name', () => {
+  render(<TopBar {...topProps} workspace={localProject} ghAuth={{authenticated:true,username:'unrelated',scopes:[],cliMissing:false,error:null}}/>);
+  expect(screen.getByTestId('gh-auth-pill')).toHaveTextContent(/^Local$/);
+  expect(screen.getByTestId('tab-local_fixture').querySelector('.tab-name')).toHaveTextContent(/^Copper \/ Notes$/);
+});
+it('labels the project account, never the unrelated global login; a legacy registration is not Local', () => {
+  const {rerender}=render(<TopBar {...topProps} workspace={{...localProject,connection:{kind:'github',accountLogin:'project-login'}}} ghAuth={{authenticated:true,username:'unrelated',scopes:[],cliMissing:false,error:null}}/>);
+  expect(screen.getByTestId('gh-auth-pill')).toHaveTextContent('GitHub · project-login');
+  expect(screen.getByTestId('gh-auth-pill')).toHaveAttribute('title', 'Project account: project-login');
+  rerender(<TopBar {...topProps} workspace={{...localProject,connection:undefined}}/>);
+  expect(screen.getByTestId('gh-auth-pill')).toHaveTextContent('GitHub · No account');
+  expect(screen.getByTestId('gh-auth-pill')).not.toHaveTextContent('unrelated');
+});
+
+it('opens Link from an unbound project label', async()=>{
+ const open=vi.fn();window.addEventListener('kota:github-link',open);
+ try {render(<TopBar {...topProps} workspace={{...localProject,connection:{kind:'github'}}}/>);await userEvent.click(screen.getByTestId('gh-auth-pill'));expect(open).toHaveBeenCalledTimes(1);}finally{window.removeEventListener('kota:github-link',open);}
 });

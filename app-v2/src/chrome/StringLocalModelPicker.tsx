@@ -21,12 +21,13 @@ export function StringRoutingSummary({ group, catalog, surface }: { group: AutoR
 
 /** Each owner retains its own editor. Only complete groups leave this component. */
 export function StringLocalModelPicker({ ownerKey, owner, surface, model, group, catalog, jev, disabled, busy,
-  onSelect, onAutoRouteChange, onValidityChange, onSavingChange, onOpen, onJevSettings, ruleFile, ruleFileDirty, applySource }: {
+  onSelect, onAutoRouteChange, onValidityChange, onSavingChange, onOpen, onJevSettings, ruleFile, ruleFileDirty, applySource, triggerLabel }: {
   ownerKey: string; owner: string; surface: 'workbench' | 'hero' | 'profile'; model: string;
   group?: AutoRouteGroup | null; catalog: LocalModelCatalog | null;
   jev: { settings: JevSettings | null; loading: boolean; failed: boolean };
   ruleFile?: RuleFileTarget; ruleFileDirty?: boolean;
   applySource?: StringSource;
+  triggerLabel?: string;
   disabled?: boolean; busy?: boolean; onSelect: (choice: LocalModelChoice) => void;
   onAutoRouteChange: (group: AutoRouteGroup) => AutoRouteGroup | void | Promise<AutoRouteGroup | void>;
   onValidityChange?: (valid: boolean) => void; onSavingChange?: (saving: boolean) => void; onOpen: () => void; onJevSettings: () => void;
@@ -151,7 +152,7 @@ export function StringLocalModelPicker({ ownerKey, owner, surface, model, group,
     return <span className="string-picker-summary-line" key={item.id}>{localModelName(item.providerId, m?.name || item.modelId, item.modelId)} · {item.thinkingLevel}</span>;
   });
   return <>
-    <LocalModelPicker triggerRef={modelTrigger} value={model} selectedName={selectedName} choices={choices} disabled={disabled || saving} onOpen={onOpen}
+    <LocalModelPicker triggerRef={modelTrigger} triggerLabel={triggerLabel} value={model} selectedName={selectedName} choices={choices} disabled={disabled || saving} onOpen={onOpen}
       onSelect={choice => { setDraft(stringGroupToDraft(latest.current.group)); onValidityChange?.(true); setError(null); onSelect(choice); }}
       autoRoute={{ ready, rejected, checking: jev.loading, unavailable: jev.failed, summary: summary?.length ? <>{summary}</> : undefined,
         onEdit: openEditor, onSettings: onJevSettings }} />

@@ -42,19 +42,59 @@ pub(crate) struct Env {
 
 impl Env {
     pub(crate) fn from_process(flags: &HashMap<String, String>) -> Result<Self> {
-        let value = |flag: &str, var: &str| {
+        Self::from_process_with(flags, std::env::current_dir().ok().as_deref(), |key| {
+            std::env::var(key).ok()
+        })
+    }
+
+    pub(crate) fn from_process_with(
+        flags: &HashMap<String, String>,
+        cwd: Option<&Path>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
+        let flag = |name: &str| {
             flags
-                .get(flag)
-                .cloned()
-                .or_else(|| std::env::var(var).ok())
-                .filter(|value| !value.trim().is_empty())
+                .get(name)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
         };
+        let value = |flag_name: &str, var: &str| {
+            flag(flag_name).or_else(|| {
+                env(var)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+        };
+        let kota_home = value("--kota-home", "KOTA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("Kota")
+            });
+        if let Some(dir) = crate::cli_identity::resolve(cwd, &env)? {
+            let agent_cwd = flag("--agent-cwd")
+                .map(PathBuf::from)
+                .unwrap_or(dir.agent_cwd);
+            let agent_id = flag("--agent-id").unwrap_or(dir.agent_id);
+            let project_root = flag("--project-root")
+                .map(PathBuf::from)
+                .unwrap_or(dir.project_root);
+            let project = project_slug(
+                flag("--project-id").as_deref().or(Some(&dir.project_id)),
+                Some(&project_root),
+            );
+            return Ok(Self {
+                agent_cwd,
+                kota_home,
+                agent_id,
+                project,
+                jev_ready: None,
+            });
+        }
         let agent_cwd = value("--agent-cwd", "KOTA_AGENT_CWD")
             .map(PathBuf::from)
             .ok_or_else(|| anyhow!("kota-my-soul requires KOTA_AGENT_CWD or --agent-cwd"))?;
-        let kota_home = value("--kota-home", "KOTA_HOME").map(PathBuf::from).unwrap_or_else(|| {
-            dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Kota")
-        });
         let agent_id = value("--agent-id", "KOTA_AGENT_ID")
             .or_else(|| agent_cwd.file_name().map(|name| name.to_string_lossy().to_string()))
             .ok_or_else(|| anyhow!("kota-my-soul requires KOTA_AGENT_ID or --agent-id"))?;

@@ -11,6 +11,8 @@ export type ProjectId = string;
 export interface Project {
   id: ProjectId;
   name: string;
+  /** Explicit local project title, preserved even when it contains a slash. */
+  displayName?: string;
   /** Optional absolute path to the repo root. */
   path?: string;
   /** Browser URL for the connected GitHub repo. */

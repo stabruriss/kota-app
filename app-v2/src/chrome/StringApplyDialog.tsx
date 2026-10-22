@@ -40,7 +40,7 @@ export function StringApplyDialog({ group, sourceName, exclude, ready, onClose, 
       {loading && <p role="status">Loading projects…</p>}
       {failed && <p role="status">Agent roster unavailable. <button className="local-model-text" disabled={busy || loading} onClick={reload}>Retry</button></p>}
       {!loading && !failed && !targets.length && <p>No other Local agents are using Auto String.</p>}
-      {projects.map(project => <fieldset key={project.localRoot} disabled={busy || loading}><legend>{project.repoFullName || project.projectId}</legend>
+      {projects.map(project => <fieldset key={project.localRoot} disabled={busy || loading}><legend>{project.displayName || project.repoFullName || project.projectId}</legend>
         {targets.filter(target => target.project.localRoot === project.localRoot).map(target => <label key={target.key}>
           <input type="checkbox" checked={selected.has(target.key)} onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(target.key); else next.delete(target.key); return next; })} />
           <HeroAvatarArt avatarId={target.agent.avatarId} className="string-apply-avatar" /><span>{target.agent.displayName}</span>

@@ -48,6 +48,8 @@ mod auth_pi_tests;
 #[cfg(test)]
 mod model_tests;
 #[cfg(test)]
+mod configuration_tests;
+#[cfg(test)]
 mod auth_pin_tests;
 #[cfg(test)]
 mod command_route_tests;

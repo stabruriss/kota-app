@@ -128,6 +128,18 @@ export function registerAutoRoute(pi: ExtensionAPI, dependencies: AutoRouteDepen
     return dispatch(ctx, { v: 3, switchId: context.boundary, selectedModel, routeModel: selectedModel, fallback: false, snapshot,
       thinkingLevel, inputIds: inputs.map(input => input.id) });
   }
+  /** The composer named a model of this group: no Jev, and it becomes the current model like a Jev choice. */
+  function manual(ctx: ExtensionContext, context: ReturnType<typeof routingHistory>, inputs: Array<{ id: string }>,
+    snapshot: Group, id: string) {
+    const selected = snapshot.models.find(model => model.id === id)!;
+    const physical = ctx.modelRegistry.find(selected.providerId, selected.modelId);
+    const thinkingLevel = physical ? clampThinkingLevel(physical, selected.thinkingLevel as never) : selected.thinkingLevel;
+    // Same event shape as a Jev selection; the candidate is the composer's choice, with no Jev probability behind it.
+    notify(ctx, { event: 'selection', outcome: 'manual', selected: { provider: selected.providerId, model: selected.modelId, thinkingLevel },
+      candidate: { routeModel: id, provider: selected.providerId, model: selected.modelId, probability: 1 }, threshold: snapshot.threshold });
+    return dispatch(ctx, { v: 3, switchId: context.boundary, selectedModel: id, routeModel: id, fallback: false, snapshot,
+      thinkingLevel, inputIds: inputs.map(input => input.id) });
+  }
   function retry(request: { failed?: { model: Physical; thinkingLevel?: string } }, ctx: ExtensionContext) {
     // Missing failed means routing itself failed. Never reinterpret it as a fresh input.
     if (!request.failed) return fail(ctx, 'route_exhausted', ROUTE_ERROR_TEXT.route_exhausted);
@@ -162,7 +174,13 @@ export function registerAutoRoute(pi: ExtensionAPI, dependencies: AutoRouteDepen
       if (request.reason === 'retry') return retry(request as never, ctx);
       const context = history(ctx);
       const fresh = context.inputs.filter(input => !context.choiceFor(input.id));
-      if (fresh.length) return decide(request as never, ctx, context, fresh);
+      if (fresh.length) {
+        // A batch follows its latest input: an override there wins, otherwise Jev decides for the whole batch.
+        const override = fresh.at(-1)!.routeModel;
+        const snapshot = currentGroup();
+        if (override && snapshot?.models.some(model => model.id === override)) return manual(ctx, context, fresh, snapshot, override);
+        return decide(request as never, ctx, context, fresh);
+      }
       // A repeated delivery retains its original selection, even if another input or group edit
       // came between. Text is never used as identity; batched new inputs share one choice.
       const replay = context.inputs.length ? context.choiceFor(context.inputs.at(-1)!.id) : undefined;

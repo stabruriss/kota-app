@@ -330,48 +330,13 @@ pub(crate) fn has_submitted(
 
 pub fn run_cli() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let result = (|| {
-        let (flags, rest) = soul::cli::split_flags(&args).map_err(|e| e.to_string())?;
-        if matches!(
-            rest.first().map(String::as_str),
-            None | Some("--help" | "-h" | "help")
-        ) {
-            return Ok(HELP.to_string());
-        }
-        let (items, none) = parse_items(&rest)?;
-        let env = Env::from_process(&flags).map_err(|e| {
-            e.to_string()
-                .trim_start_matches("kota-my-soul ")
-                .to_string()
-        })?;
-        let root = flags
-            .get("--project-root")
-            .cloned()
-            .or_else(|| std::env::var("KOTA_PROJECT_ROOT").ok())
-            .map(PathBuf::from)
-            .or_else(|| env.agent_cwd.parent()?.parent().map(Path::to_path_buf))
-            .ok_or_else(|| "requires KOTA_AGENT_CWD or --agent-cwd".to_string())?;
-        let display_name = fs::read_to_string(env.agent_cwd.join("agent.yaml"))
-            .ok()
-            .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok())
-            .and_then(|value| {
-                value
-                    .get("display-name")
-                    .or_else(|| value.get("displayName"))
-                    .and_then(|value| value.as_str())
-                    .map(crate::agent_aka_from_display_name)
-            });
-        let entry = Entry::new(
-            &env,
-            &root,
-            display_name,
-            &items,
-            none,
-            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        )?;
-        submit(&env.kota_home, &entry)?;
-        Ok(success_reply(entry.items.len()))
-    })();
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let result = run_cli_with(
+        &args,
+        std::env::current_dir().ok().as_deref(),
+        |key| std::env::var(key).ok(),
+        &now,
+    );
     match result {
         Ok(output) => {
             println!("{output}");
@@ -380,6 +345,51 @@ pub fn run_cli() -> Result<(), String> {
         Err(error) if error == HELP => Err(error),
         Err(error) => Err(format!("{error}\n\n{HELP}")),
     }
+}
+
+fn run_cli_with(
+    args: &[String],
+    cwd: Option<&Path>,
+    env_fn: impl Fn(&str) -> Option<String>,
+    now: &str,
+) -> Result<String, String> {
+    let (flags, rest) = soul::cli::split_flags(args).map_err(|e| e.to_string())?;
+    if matches!(
+        rest.first().map(String::as_str),
+        None | Some("--help" | "-h" | "help")
+    ) {
+        return Ok(HELP.to_string());
+    }
+    let (items, none) = parse_items(&rest)?;
+    let dir = crate::cli_identity::resolve(cwd, &env_fn).map_err(|e| e.to_string())?;
+    let env = Env::from_process_with(&flags, cwd, &env_fn).map_err(|e| {
+        e.to_string()
+            .trim_start_matches("kota-my-soul ")
+            .to_string()
+    })?;
+    let root = flags
+        .get("--project-root")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dir.as_ref().map(|d| d.project_root.clone()))
+        .or_else(|| {
+            env_fn("KOTA_PROJECT_ROOT")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| env.agent_cwd.parent()?.parent().map(Path::to_path_buf))
+        .ok_or_else(|| "requires KOTA_AGENT_CWD or --agent-cwd".to_string())?;
+    let display_name = dir
+        .and_then(|d| d.agent_display_name)
+        .or_else(|| {
+            crate::cli_identity::agent_display_name_from_yaml(&env.agent_cwd.join("agent.yaml"))
+        })
+        .map(|name| crate::agent_aka_from_display_name(&name));
+    let entry = Entry::new(&env, &root, display_name, &items, none, now)?;
+    submit(&env.kota_home, &entry)?;
+    Ok(success_reply(entry.items.len()))
 }
 
 fn parse_items(args: &[String]) -> Result<(Vec<String>, bool), String> {

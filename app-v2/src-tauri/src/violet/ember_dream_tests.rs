@@ -32,6 +32,393 @@ fn inbox_entry(home: &Path, root: &Path, agent: &str, text: Option<&str>) -> cra
     entry
 }
 
+fn pending_consolidation(
+    fixture: &DreamFixture,
+    current: &[String],
+    candidate: &str,
+) -> (PathBuf, Vec<EmberDreamEntryRecord>) {
+    let home = fixture.0.join("account");
+    inbox_entry(
+        &home,
+        &fixture.0.join("project"),
+        "agent-fixture",
+        Some(candidate),
+    );
+    write_active_dreams_markdown(&home.join("dreams/dreams.md"), current, "fixture", 0).unwrap();
+    let records = collect_unprocessed_dream_entries(&home, &HashSet::new())
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect();
+    (home, records)
+}
+
+#[test]
+fn ember_dream_full_list_keeps_active_and_discards_unselected_candidates() {
+    let fixture = DreamFixture::new();
+    let current = (0..10)
+        .map(|index| format!("Durable observation {index}."))
+        .collect::<Vec<_>>();
+    let (home, records) = pending_consolidation(&fixture, &current, "Unselected candidate.");
+    let rows = current
+        .iter()
+        .enumerate()
+        .map(
+            |(index, text)| serde_json::json!({"from": ember_active_dream_id(index), "text": text}),
+        )
+        .collect::<Vec<_>>();
+    let output = serde_json::json!({"dreams": rows}).to_string();
+    assert_eq!(
+        finish_ember_dream_consolidation(&home, &current, &output, "fixture", &records).unwrap(),
+        0
+    );
+    assert_eq!(
+        read_active_dream_entries_at(&home.join("dreams/dreams.md")).unwrap(),
+        current
+    );
+    assert!(!home.join("dreams/old_dreams.md").exists());
+    assert!(crate::dream_entry::read_inbox(&home, false)
+        .unwrap()
+        .is_empty());
+    let ledger = fs::read_dir(home.join("dreams/entries"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(fs::read_to_string(ledger)
+        .unwrap()
+        .contains(&records[0].event_id));
+}
+
+#[test]
+fn ember_dream_final_list_replaces_an_active_and_persists_model_order() {
+    let fixture = DreamFixture::new();
+    let current = vec![
+        "Keep this.".into(),
+        "Retire this.".into(),
+        "Keep that.".into(),
+    ];
+    let (home, records) = pending_consolidation(&fixture, &current, "New insight.");
+    let output = r#"{"dreams":[
+        {"from":"active-3","text":"Keep that."},
+        {"from":null,"text":"New insight."},
+        {"from":"active-1","text":"Keep this."}
+    ]}"#;
+    assert_eq!(
+        finish_ember_dream_consolidation(&home, &current, output, "fixture", &records).unwrap(),
+        1
+    );
+    let active = read_active_dreams_at(&home.join("dreams/dreams.md")).unwrap();
+    assert_eq!(
+        active
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Keep that.", "New insight.", "Keep this."]
+    );
+    assert_eq!(
+        active.iter().map(|item| item.position).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    let archive = fs::read_to_string(home.join("dreams/old_dreams.md")).unwrap();
+    assert!(archive.starts_with("# Old Dreams\n\n## "));
+    assert_eq!(
+        archive
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect::<Vec<_>>(),
+        ["- Retire this."]
+    );
+}
+
+#[test]
+fn ember_dream_rewrite_archives_old_identity_without_migrating_usage() {
+    use crate::soul::dream_usage;
+    let fixture = DreamFixture::new();
+    let current = vec!["Original insight.".into(), "Keep this.".into()];
+    let (home, records) = pending_consolidation(&fixture, &current, "Additional evidence.");
+    let old_id = dream_id(&current[0]);
+    let keep_id = dream_id(&current[1]);
+    dream_usage::append_pushes(
+        &home,
+        "agent-fixture",
+        "fixture-message",
+        "2026-01-02T00:00:00Z",
+        &[(&old_id, 0.95), (&keep_id, 0.95)],
+    )
+    .unwrap();
+    let ledger = home.join("dreams/usage.jsonl");
+    let usage_before = fs::read(&ledger).unwrap();
+    let output = r#"{"dreams":[
+        {"from":"active-1","text":"A more durable insight."},
+        {"from":"active-2","text":"* KEEP  this!"}
+    ]}"#;
+    assert_eq!(
+        finish_ember_dream_consolidation(&home, &current, output, "fixture", &records).unwrap(),
+        1
+    );
+    let active = read_active_dreams_at(&home.join("dreams/dreams.md")).unwrap();
+    assert_ne!(active[0].id, old_id);
+    assert_eq!(active[0].id, dream_id("A more durable insight."));
+    assert_eq!(
+        active[1].id, keep_id,
+        "formatting changes preserve identity"
+    );
+    assert_eq!(fs::read(&ledger).unwrap(), usage_before);
+    let usage = dream_usage::summaries(&home).unwrap();
+    assert_eq!(usage[&old_id].pushed, 1);
+    let items = build_ember_dream_consolidation_items(
+        &active
+            .iter()
+            .map(|item| item.text.clone())
+            .collect::<Vec<_>>(),
+        &[],
+        Some(&usage),
+    );
+    assert_eq!(items[0].usage.as_ref().unwrap().pushed, 0);
+    assert_eq!(items[1].usage.as_ref().unwrap().pushed, 1);
+    let archive = fs::read_to_string(home.join("dreams/old_dreams.md")).unwrap();
+    assert_eq!(
+        archive
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect::<Vec<_>>(),
+        ["- Original insight."]
+    );
+}
+
+#[test]
+fn ember_dream_duplicates_keep_the_first_text_before_applying_capacity() {
+    let current = vec!["Keep this.".into(), "Merge this.".into()];
+    let rows = parse_ember_dream_cli_output(
+        r#"{"dreams":[
+        {"from":"active-1","text":"Keep this."},
+        {"from":"active-2","text":"KEEP this!"},
+        {"from":null,"text":"Fresh insight."},
+        {"from":null,"text":" fresh insight! "},
+        {"from":null,"text":"Another insight."}
+    ]}"#,
+    )
+    .unwrap();
+    let result = apply_ember_dream_final_list(&current, rows, 3).unwrap();
+    assert_eq!(
+        result.active,
+        ["Keep this.", "Fresh insight.", "Another insight."]
+    );
+    assert_eq!(result.archived, ["Merge this."]);
+}
+
+#[test]
+fn ember_dream_capacity_trims_the_model_tail_and_archives_each_text_once() {
+    assert_eq!(EMBER_DREAM_MAX_ACTIVE_ENTRIES, 10);
+    let fixture = DreamFixture::new();
+    let current = (0..15)
+        .map(|index| format!("Observation {index}."))
+        .collect::<Vec<_>>();
+    let (home, records) = pending_consolidation(&fixture, &current, "Overflow proposal.");
+    let mut rows = current
+        .iter()
+        .enumerate()
+        .rev()
+        .map(
+            |(index, text)| serde_json::json!({"from": ember_active_dream_id(index), "text": text}),
+        )
+        .collect::<Vec<_>>();
+    rows.push(serde_json::json!({"from": null, "text": "Overflow proposal."}));
+    let output = serde_json::json!({"dreams": rows}).to_string();
+    assert_eq!(
+        finish_ember_dream_consolidation(&home, &current, &output, "fixture", &records).unwrap(),
+        6
+    );
+    let active = read_active_dream_entries_at(&home.join("dreams/dreams.md")).unwrap();
+    assert_eq!(
+        active,
+        current.iter().rev().take(10).cloned().collect::<Vec<_>>()
+    );
+    let archive = fs::read_to_string(home.join("dreams/old_dreams.md")).unwrap();
+    let expected = current[..5]
+        .iter()
+        .map(|text| format!("- {text}"))
+        .chain(std::iter::once("- Overflow proposal.".into()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        archive
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn ember_dream_cli_output_ignores_other_json_events() {
+    let output = r#"{"type":"status","message":"running"}
+{"dreams":[{"from":"active-1","text":"Keep this."},{"from":null,"text":"New insight."}]}
+done"#;
+    let dreams = parse_ember_dream_cli_output(output).unwrap();
+    assert_eq!(dreams.len(), 2);
+    assert_eq!(dreams[0].from.as_deref(), Some("active-1"));
+    assert_eq!(dreams[0].text, "Keep this.");
+    assert_eq!(dreams[1].from, None);
+    assert_eq!(dreams[1].text, "New insight.");
+}
+
+#[test]
+fn ember_dream_null_from_preserves_unreferenced_active_identity() {
+    let fixture = DreamFixture::new();
+    let current = vec![
+        "Keep this.".into(),
+        "Keep that.".into(),
+        "Retire this.".into(),
+    ];
+    let (home, records) = pending_consolidation(&fixture, &current, "New insight.");
+    let output = r#"{"dreams":[
+        {"from":null,"text":"Keep this."},
+        {"from":null,"text":"* KEEP  that!"},
+        {"from":null,"text":"New insight."}
+    ]}"#;
+    assert_eq!(
+        finish_ember_dream_consolidation(&home, &current, output, "fixture", &records).unwrap(),
+        1
+    );
+    let active = read_active_dreams_at(&home.join("dreams/dreams.md")).unwrap();
+    assert_eq!(active.len(), 3);
+    assert_eq!(active[0].id, dream_id(&current[0]));
+    assert_eq!(active[1].id, dream_id(&current[1]));
+    assert_eq!(active[2].text, "New insight.");
+    let archive = fs::read_to_string(home.join("dreams/old_dreams.md")).unwrap();
+    assert_eq!(
+        archive
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect::<Vec<_>>(),
+        ["- Retire this."]
+    );
+}
+
+#[test]
+fn ember_dream_invalid_final_lists_preserve_outputs_and_unconsumed_inbox() {
+    let mut cases = vec![
+        "{bad json".to_string(),
+        r#"{"decisions":[]}"#.into(),
+        r#"{"dreams":[{"from":null,"text":"Incomplete."}"#.into(),
+        r#"{"dreams":[{"from":"candidate-1","text":"Insight."}]}"#.into(),
+        r#"{"dreams":[{"from":"active-2","text":"Insight."}]}"#.into(),
+        r#"{"dreams":[{"from":"active-01","text":"Insight."}]}"#.into(),
+        r#"{"dreams":[{"from":" active-1 ","text":"Insight."}]}"#.into(),
+        r#"{"dreams":[{"from":4,"text":"Insight."}]}"#.into(),
+        r#"{"dreams":[{"text":"Insight."}]}"#.into(),
+        r#"{"dreams":[{"from":null}]}"#.into(),
+        r#"{"dreams":[{"from":null,"text":" - \n "}]}"#.into(),
+        r#"{"dreams":[{"from":null,"text":"__KOTA_DREAM_NONE__"}]}"#.into(),
+        r#"{"dreams":[{"from":"active-1","text":"Keep."},{"from":"active-1","text":"KEEP!"}]}"#
+            .into(),
+        serde_json::json!({"dreams":[{"from":null,"text":"界".repeat(241)}]}).to_string(),
+    ];
+    // Neither deduplication nor truncation may hide an invalid trailing row.
+    for bad in [
+        serde_json::json!({"from":"active-1","text":"Keep."}),
+        serde_json::json!({"from":"unknown","text":"Keep."}),
+        serde_json::json!({"from":null,"text":"x".repeat(241)}),
+    ] {
+        let mut rows = vec![serde_json::json!({"from":"active-1","text":"Keep."})];
+        rows.extend(
+            (0..10).map(|index| serde_json::json!({"from":null,"text":format!("New {index}.")})),
+        );
+        rows.push(bad);
+        cases.push(serde_json::json!({"dreams":rows}).to_string());
+    }
+    for output in cases {
+        let fixture = DreamFixture::new();
+        let current = vec!["Keep.".into()];
+        let (home, records) = pending_consolidation(&fixture, &current, "Candidate insight.");
+        let active_path = home.join("dreams/dreams.md");
+        let old_path = home.join("dreams/old_dreams.md");
+        fs::write(
+            &old_path,
+            "# Old Dreams\n\n## 2026-01-01T00:00:00Z\n- Previous archive.\n",
+        )
+        .unwrap();
+        let inbox_path = home
+            .join("dreams/inbox")
+            .join(format!("{}.json", records[0].event_id));
+        let before = [&active_path, &old_path, &inbox_path].map(|path| fs::read(path).unwrap());
+        assert!(
+            finish_ember_dream_consolidation(&home, &current, &output, "fixture", &records)
+                .is_err(),
+            "{output}"
+        );
+        assert_eq!(
+            [&active_path, &old_path, &inbox_path].map(|path| fs::read(path).unwrap()),
+            before,
+            "{output}"
+        );
+        assert!(!home.join("dreams/entries").exists(), "{output}");
+    }
+}
+
+#[test]
+fn ember_dream_final_text_is_cleaned_and_measured_in_unicode_characters() {
+    let text = "界".repeat(240);
+    let output = serde_json::json!({"dreams":[
+        {"from":null,"text":format!("  - \"{text}\"\n")},
+        {"from":null,"text":"First\n second\tthird."}
+    ]})
+    .to_string();
+    let result =
+        apply_ember_dream_final_list(&[], parse_ember_dream_cli_output(&output).unwrap(), 10)
+            .unwrap();
+    assert_eq!(result.active, [text, "First second third.".into()]);
+    assert!(result.archived.is_empty());
+}
+
+#[test]
+fn ember_dream_empty_final_list_archives_active_and_consumes_the_batch() {
+    let fixture = DreamFixture::new();
+    let current = vec!["Outdated observation.".into()];
+    let (home, records) = pending_consolidation(&fixture, &current, "Rejected candidate.");
+    assert_eq!(
+        finish_ember_dream_consolidation(&home, &current, r#"{"dreams":[]}"#, "fixture", &records)
+            .unwrap(),
+        1
+    );
+    assert!(read_active_dream_entries_at(&home.join("dreams/dreams.md"))
+        .unwrap()
+        .is_empty());
+    assert!(crate::dream_entry::read_inbox(&home, false)
+        .unwrap()
+        .is_empty());
+    let archive = fs::read_to_string(home.join("dreams/old_dreams.md")).unwrap();
+    assert!(archive.contains("- Outdated observation."));
+    assert!(!archive.contains("Rejected candidate"));
+}
+
+#[test]
+fn ember_dream_prompt_exposes_active_count_and_capacity_without_replacing_item_text() {
+    let current = vec![
+        "Current observation.".into(),
+        "Literal {{capacity}}.".into(),
+    ];
+    let projects = vec![vec![EmberDreamEntryRecord {
+        event_id: "event-fixture".into(),
+        ts: "2026-01-02T00:00:00Z".into(),
+        agent_id: "agent-fixture".into(),
+        agent_display_name: None,
+        text: "- Candidate observation.".into(),
+    }]];
+    let items = build_ember_dream_consolidation_items(&current, &projects, None);
+    let prompt =
+        render_ember_dream_consolidation_prompt(&items, EMBER_DREAM_CONSOLIDATE_PROMPT_TEMPLATE)
+            .unwrap();
+    assert!(prompt.contains("Current Dreams (2 of at most 10)"));
+    assert!(prompt.contains("Return the new list of Dreams, at most 10 entries."));
+    assert!(prompt.contains("\"text\": \"Literal {{capacity}}.\""));
+    assert!(prompt.contains("\"id\": \"candidate-1\""));
+    assert!(!prompt.contains("{{items_json}}"));
+    assert!(!prompt.contains("{{active_count}}"));
+}
+
 #[test]
 fn ember_dream_collection_reads_all_inbox_projects_and_never_chat_envelopes() {
     let f = DreamFixture::new();
@@ -108,8 +495,8 @@ fn ember_dream_none_is_journaled_and_consumed_without_model_or_output_changes() 
     let home = f.0.join("home");
     inbox_entry(&home, &f.0.join("project"), "agent-fixture", None);
     let records = collect_unprocessed_dream_entries(&home, &HashSet::new()).unwrap().pop().unwrap();
-    let (_, candidates) = build_ember_dream_consolidation_items(&[], &[records.clone()], None);
-    assert!(candidates.is_empty());
+    let items = build_ember_dream_consolidation_items(&[], &[records.clone()], None);
+    assert!(items.is_empty());
     append_dream_entry_records_at(&home, &records).unwrap();
     assert!(crate::dream_entry::read_inbox(&home, false).unwrap().is_empty());
     assert!(!home.join("dreams/dreams.md").exists());
@@ -209,21 +596,6 @@ fn ember_dream_empty_active_section_never_reads_last_dream_metadata() {
 }
 
 #[test]
-fn ember_dream_capacity_is_ten_and_overflow_still_archives_from_the_front() {
-    let current = (0..15)
-        .map(|n| format!("Observation {n}."))
-        .collect::<Vec<_>>();
-    let decisions = (0..current.len())
-        .map(|index| (ember_active_dream_id(index), EmberDreamDecisionAction::Keep))
-        .collect();
-    let result =
-        apply_ember_dream_decisions(&current, &[], &decisions, EMBER_DREAM_MAX_ACTIVE_ENTRIES)
-            .unwrap();
-    assert_eq!(result.active, current[5..]);
-    assert_eq!(result.archived, current[..5]);
-}
-
-#[test]
 fn ember_dream_reader_leaves_capacity_changes_to_consolidation() {
     let fixture = DreamFixture::new();
     let content = format!(
@@ -271,7 +643,7 @@ fn ember_dream_usage_follows_the_active_text_identity_and_stays_off_candidates()
         text: "- Review first.".into(),
     }]];
 
-    let (items, _) = build_ember_dream_consolidation_items(&current, &projects, Some(&usage));
+    let items = build_ember_dream_consolidation_items(&current, &projects, Some(&usage));
     let value = serde_json::to_value(&items).unwrap();
     assert_eq!(value[0]["id"], "active-1");
     assert_eq!(
@@ -297,7 +669,7 @@ fn ember_dream_usage_follows_the_active_text_identity_and_stays_off_candidates()
 fn ember_dream_missing_usage_ledger_reports_zero_usage_for_active_items() {
     let fixture = DreamFixture::new();
     let usage = crate::soul::dream_usage::summaries(&fixture.0).unwrap();
-    let (items, _) =
+    let items =
         build_ember_dream_consolidation_items(&["Review first.".into()], &[], Some(&usage));
     let value = serde_json::to_value(&items).unwrap();
     assert_eq!(
@@ -309,7 +681,7 @@ fn ember_dream_missing_usage_ledger_reports_zero_usage_for_active_items() {
 
 #[test]
 fn ember_dream_unavailable_usage_is_omitted_rather_than_reported_as_zero() {
-    let (items, _) = build_ember_dream_consolidation_items(&["Review first.".into()], &[], None);
+    let items = build_ember_dream_consolidation_items(&["Review first.".into()], &[], None);
     let value = serde_json::to_value(&items).unwrap();
     assert_eq!(value[0]["kind"], "active");
     assert!(value[0].get("usage").is_none());

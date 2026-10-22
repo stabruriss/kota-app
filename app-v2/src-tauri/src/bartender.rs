@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock, TryLockError};
+use std::sync::{Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -560,13 +560,15 @@ impl BartenderManager {
             .lock()
             .map_err(|_| anyhow!("bartender status compute lock poisoned"))?;
         self.invalidate_status_cache()?;
-        let source = PathBuf::from(&workspace.source_dir);
-        fetch_origin_branch(&source, &workspace.default_branch)?;
+        // The room refreshes upstream every minute; a local project has none to ask.
+        if !workspace.is_local() {
+            fetch_origin_branch(workspace, &workspace.default_branch)?;
+        }
         let status = compute_status(workspace)?;
         self.store_status(status_cache_key(workspace), status.clone())?;
         Ok(BartenderFetchResult {
             ok: true,
-            message: "Fetched GitHub.".into(),
+            message: if workspace.is_local() { LOCAL_ONLY_MESSAGE } else { "Fetched GitHub." }.into(),
             status,
         })
     }
@@ -582,8 +584,18 @@ impl BartenderManager {
             .map_err(|_| anyhow!("bartender status compute lock poisoned"))?;
         self.invalidate_status_cache()?;
 
+        if workspace.is_local() {
+            return Ok(BartenderPullResult {
+                ok: false,
+                message: LOCAL_ONLY_MESSAGE.into(),
+                pulled_commit_count: 0,
+                needs_human_pick: false,
+                conflict: None,
+                status: compute_status(workspace)?,
+            });
+        }
         let source = PathBuf::from(&workspace.source_dir);
-        fetch_origin_branch(&source, &workspace.default_branch)?;
+        fetch_origin_branch(workspace, &workspace.default_branch)?;
         let before = compute_status(workspace)?;
         if before.room_change_count > 0 {
             return Ok(BartenderPullResult {
@@ -649,12 +661,18 @@ impl BartenderManager {
             Path::new(&workspace.local_root),
             "bartender@kota.local",
         );
-        match git_with_commit_email(
-            &source,
-            &["merge", "--no-ff", "--no-edit", &upstream],
-            email.as_deref(),
-            false,
-        ) {
+        let merge = ["merge", "--no-ff", "--no-edit", upstream.as_str()];
+        // Same rule as publishing: with no project email and no Git email on this
+        // machine, the merge commit is Bartender's own, as its snapshots are.
+        let merged = if email.is_none() && !git_email_configured(&source) {
+            git_with_env(&source, &merge, &[
+                ("GIT_AUTHOR_NAME", "Kota Bartender"), ("GIT_AUTHOR_EMAIL", "bartender@kota.local"),
+                ("GIT_COMMITTER_NAME", "Kota Bartender"), ("GIT_COMMITTER_EMAIL", "bartender@kota.local"),
+            ])
+        } else {
+            git_with_commit_email(&source, &merge, email.as_deref(), false)
+        };
+        match merged {
             Ok(_) => {
                 let new_head = source_head(&source)?;
                 for target in agent_targets(workspace) {
@@ -711,6 +729,15 @@ impl BartenderManager {
         self.invalidate_status_cache()?;
 
         let before = compute_status(workspace)?;
+        // Even with a remote added by hand, a local project never pushes as the default gh account.
+        if workspace.is_local() {
+            return Ok(BartenderPushResult {
+                ok: false,
+                message: LOCAL_ONLY_MESSAGE.into(),
+                pushed_commit_count: 0,
+                status: before,
+            });
+        }
         if before.room_change_count > 0 {
             return Ok(BartenderPushResult {
                 ok: false,
@@ -731,17 +758,13 @@ impl BartenderManager {
             });
         }
         if before.github_needs_initial_push {
-            let source = PathBuf::from(&workspace.source_dir);
             let branch = before
                 .github_push_branch
                 .clone()
                 .unwrap_or_else(|| workspace.default_branch.clone());
-            let push_result = git(
-                &source,
-                &["push", "-u", "origin", &format!("HEAD:{branch}")],
-            );
+            let push_result = git_remote(workspace, &["push", "-u", "origin", &format!("HEAD:{branch}")]);
             if let Err(err) = push_result {
-                let _ = fetch_origin_branch(&source, &branch);
+                let _ = fetch_origin_branch(workspace, &branch);
                 let status = compute_status(workspace)?;
                 return Ok(BartenderPushResult {
                     ok: false,
@@ -751,7 +774,7 @@ impl BartenderManager {
                 });
             }
 
-            let _ = fetch_origin_branch(&source, &branch);
+            let _ = fetch_origin_branch(workspace, &branch);
             let status = compute_status(workspace)?;
             return Ok(BartenderPushResult {
                 ok: true,
@@ -773,20 +796,13 @@ impl BartenderManager {
         let upstream =
             upstream_ref(&source).unwrap_or_else(|| format!("origin/{}", workspace.default_branch));
         let push_result = if upstream.starts_with("origin/") {
-            git(
-                &source,
-                &[
-                    "push",
-                    "origin",
-                    &format!("HEAD:{}", workspace.default_branch),
-                ],
-            )
+            git_remote(workspace, &["push", "origin", &format!("HEAD:{}", workspace.default_branch)])
         } else {
-            git(&source, &["push"])
+            git_remote(workspace, &["push"])
         };
 
         if let Err(err) = push_result {
-            let _ = fetch_origin_branch(&source, &workspace.default_branch);
+            let _ = fetch_origin_branch(workspace, &workspace.default_branch);
             let status = compute_status(workspace)?;
             if status.github_behind_count > 0 {
                 return Ok(BartenderPushResult {
@@ -807,7 +823,7 @@ impl BartenderManager {
             });
         }
 
-        let _ = fetch_origin_branch(&source, &workspace.default_branch);
+        let _ = fetch_origin_branch(workspace, &workspace.default_branch);
         let status = compute_status(workspace)?;
         Ok(BartenderPushResult {
             ok: true,
@@ -1187,15 +1203,25 @@ fn publish_agent(
 ) -> Result<PublishOutcome> {
     let commits = pending_commits(source, &target.path)?;
     let mut published_commits = 0usize;
+    // With no project email and no Git email on this machine, cherry-pick has no committer
+    // and fails. Commit as the agent's placeholder then, like the agent's own commits;
+    // a machine with an identity keeps it.
+    let mut placeholder = None;
 
     for commit in commits {
         let email = crate::project_settings::runtime_commit_email(project_root, "bartender@kota.local");
-        match git_with_commit_email(
-            source,
-            &["cherry-pick", &commit],
-            email.as_deref(),
-            true,
-        ) {
+        if email.is_none() && placeholder.is_none() && !git_email_configured(source) {
+            placeholder = Some(crate::pty::agent::agent_placeholder_identity(&target.agent_id));
+        }
+        let picked = match (&email, &placeholder) {
+            (None, Some((name, address))) => git_with_env(
+                source,
+                &["cherry-pick", &commit],
+                &[("GIT_COMMITTER_NAME", name.as_str()), ("GIT_COMMITTER_EMAIL", address.as_str())],
+            ),
+            _ => git_with_commit_email(source, &["cherry-pick", &commit], email.as_deref(), true),
+        };
+        match picked {
             Ok(_) => {
                 published_commits += 1;
             }
@@ -1379,12 +1405,24 @@ fn current_branch(source: &Path) -> Option<String> {
         .filter(|value| !value.is_empty() && value != "HEAD")
 }
 
+const LOCAL_ONLY_MESSAGE: &str = "This project is local only. Bartender does not pull from or push to GitHub.";
+
 fn origin_remote_exists(source: &Path) -> bool {
     git(source, &["remote", "get-url", "origin"]).is_ok()
 }
 
-fn fetch_origin_branch(source: &Path, default_branch: &str) -> Result<()> {
-    git(source, &["fetch", "--no-tags", "origin", default_branch]).map(|_| ())
+fn fetch_origin_branch(workspace: &WorkspaceProject, default_branch: &str) -> Result<()> {
+    git_remote(workspace, &["fetch", "--no-tags", "origin", default_branch]).map(|_| ())
+}
+
+/// Fetch and push name the project's own GitHub account through Kota's helper
+/// (local-project PLAN §2.3). The empty value first drops every inherited helper,
+/// so gh's global helper, which answers with gh's active account, never runs.
+fn git_remote(workspace: &WorkspaceProject, args: &[&str]) -> Result<String> {
+    let helper = crate::github_accounts::credential_helper(&crate::github_accounts::kota_home(), &workspace.project_id);
+    let named = format!("credential.https://github.com.helper={helper}");
+    let command = [&["-c", "credential.https://github.com.helper=", "-c", named.as_str()][..], args].concat();
+    git(Path::new(&workspace.source_dir), &command)
 }
 
 fn active_git_operation(path: &Path) -> Option<&'static str> {
@@ -1486,6 +1524,10 @@ fn git(path: &Path, args: &[&str]) -> Result<String> {
     git_with_env(path, args, &[])
 }
 
+fn git_email_configured(path: &Path) -> bool {
+    git(path, &["config", "--get", "user.email"]).is_ok_and(|email| !email.trim().is_empty())
+}
+
 fn git_with_commit_email(
     path: &Path,
     args: &[&str],
@@ -1506,9 +1548,7 @@ fn git_with_commit_email(
 }
 
 fn git_with_env(path: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
-    let mut command = Command::new("git");
-    configure_github_cli_credential_helper(&mut command);
-    let output = command
+    let output = Command::new("git")
         .arg("-C")
         .arg(path)
         .args(args)
@@ -1529,37 +1569,6 @@ fn git_with_env(path: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<Stri
         args.join(" "),
         detail
     ))
-}
-
-fn configure_github_cli_credential_helper(command: &mut Command) {
-    if let Some(helper) = github_cli_credential_helper() {
-        command
-            .arg("-c")
-            .arg("credential.https://github.com.helper=")
-            .arg("-c")
-            .arg(format!("credential.https://github.com.helper={helper}"));
-    }
-}
-
-fn github_cli_credential_helper() -> Option<&'static str> {
-    static HELPER: OnceLock<Option<String>> = OnceLock::new();
-    HELPER
-        .get_or_init(resolve_github_cli_credential_helper)
-        .as_deref()
-}
-
-fn resolve_github_cli_credential_helper() -> Option<String> {
-    for candidate in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "gh"] {
-        let ok = Command::new(candidate)
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(format!("!{candidate} auth git-credential"));
-        }
-    }
-    None
 }
 
 fn agent_targets(workspace: &WorkspaceProject) -> Vec<AgentSyncTarget> {
@@ -1793,6 +1802,8 @@ pub fn run_cli() -> Result<()> {
     match command.as_str() {
         "status" => cli_status(args),
         "sync" => cli_sync(args),
+        // git runs this as the project's credential helper (local-project PLAN §2.3).
+        "git-credential" => crate::github_accounts::run_credential_cli(&args),
         _ => {
             print_cli_usage();
             bail!("unknown kota-bartender command: {command}");
@@ -2119,6 +2130,83 @@ mod tests {
         fs::write(source.join("after-remove"), "removed").unwrap();
         snapshot_worktree(&source, "after remove", &root).unwrap();
         assert_eq!(git(&source, &["log", "-1", "--format=%ae|%ce"]).unwrap().trim(), "bartender@kota.local|bartender@kota.local");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn identity_fixture(label: &str, email: &str) -> (PathBuf, PathBuf, WorkspaceProject) {
+        let root = temp_dir(label);
+        let source = root.join("source");
+        let agent = root.join("agent");
+        fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-b", "main"]).unwrap();
+        git(&source, &["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(source.join("initial"), "initial").unwrap();
+        snapshot_worktree(&source, "initial", &root).unwrap();
+        git(&source, &["worktree", "add", "-b", "fable-agent", agent.to_str().unwrap()]).unwrap();
+        fs::write(agent.join("agent-change"), "hello").unwrap();
+        git(&agent, &["add", "-A"]).unwrap();
+        git_with_env(&agent, &["commit", "-m", "agent work"], &[
+            ("GIT_AUTHOR_NAME", "Fable Agent"), ("GIT_COMMITTER_NAME", "Fable Agent"),
+            ("GIT_AUTHOR_EMAIL", "original@fable.example"), ("GIT_COMMITTER_EMAIL", "original@fable.example"),
+        ]).unwrap();
+        // Repository config overrides the machine's, so this stands for its Git identity.
+        git(&source, &["config", "user.email", email]).unwrap();
+        let mut workspace = workspace_without_agents(&root, &source);
+        workspace.agents = workspace_with_agent(&root, &source, &root.join("agent-cwd"), &agent).agents;
+        (root, source, workspace)
+    }
+
+    #[test]
+    fn a_machine_without_a_git_email_syncs_agent_commits_as_the_agent_placeholder() {
+        let (root, source, workspace) = identity_fixture("identity-missing", "");
+        git(&source, &["config", "user.name", ""]).unwrap();
+        let outcome = sync_local_inner(&workspace, None).unwrap();
+        assert!(outcome.ok, "{}", outcome.message);
+        let agent_id = &workspace.agents[0].agent_id;
+        assert_eq!(git(&source, &["log", "-1", "--format=%an|%ae|%cn|%ce"]).unwrap().trim(),
+            format!("Fable Agent|original@fable.example|{agent_id} (Agent)|{agent_id}@kota.local"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_machine_with_a_git_email_keeps_its_own_committer() {
+        let (root, source, workspace) = identity_fixture("identity-present", "me@fable.example");
+        let outcome = sync_local_inner(&workspace, None).unwrap();
+        assert!(outcome.ok, "{}", outcome.message);
+        let agent_id = &workspace.agents[0].agent_id;
+        let committer = git(&source, &["log", "-1", "--format=%ae|%ce"]).unwrap();
+        assert!(committer.starts_with("original@fable.example|"), "{committer}");
+        assert!(!committer.contains(&format!("{agent_id}@kota.local")), "{committer}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_machine_without_a_git_email_merges_upstream_as_bartender() {
+        let root = temp_dir("identity-merge");
+        let source = root.join("source");
+        let remote = root.join("remote.git");
+        let peer = root.join("peer");
+        fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-b", "main"]).unwrap();
+        git(&source, &["config", "commit.gpgsign", "false"]).unwrap();
+        git(&root, &["init", "--bare", "-b", "main", remote.to_str().unwrap()]).unwrap();
+        fs::write(source.join("initial"), "initial").unwrap();
+        snapshot_worktree(&source, "initial", &root).unwrap();
+        git(&source, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        git(&source, &["push", "-u", "origin", "main"]).unwrap();
+        git(&root, &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()]).unwrap();
+        fs::write(peer.join("peer-change"), "peer").unwrap();
+        snapshot_worktree(&peer, "peer change", &root).unwrap();
+        git(&peer, &["push", "origin", "main"]).unwrap();
+        fs::write(source.join("local-change"), "local").unwrap();
+        snapshot_worktree(&source, "local change", &root).unwrap();
+        git(&source, &["config", "user.email", ""]).unwrap();
+        git(&source, &["config", "user.name", ""]).unwrap();
+        let result = BartenderManager::default().pull_from_github(&workspace_without_agents(&root, &source)).unwrap();
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(git(&source, &["log", "-1", "--format=%an|%ae|%cn|%ce|%p"]).unwrap().split('|').take(4).collect::<Vec<_>>(),
+            ["Kota Bartender", "bartender@kota.local", "Kota Bartender", "bartender@kota.local"]);
+        assert_eq!(git(&source, &["log", "-1", "--format=%p"]).unwrap().split_whitespace().count(), 2, "a real merge commit");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2581,6 +2669,8 @@ mod tests {
             }],
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         let manager = BartenderManager::default();
@@ -2749,6 +2839,8 @@ mod tests {
             ],
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         let status = compute_status(&workspace).unwrap();
@@ -2799,6 +2891,8 @@ mod tests {
             agents: Vec::new(),
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         let status = compute_status(&workspace).unwrap();
@@ -2931,6 +3025,35 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn a_local_project_never_fetches_pulls_or_pushes_even_with_a_hand_added_remote() {
+        let root = temp_dir("bartender-local-only");
+        let source = root.join("source");
+        let remote = root.join("remote.git");
+        fs::create_dir_all(&source).unwrap();
+        git(&root, &["init", "--bare", "-b", "main", remote.to_str().unwrap()]).unwrap();
+        git(&source, &["init", "-b", "main"]).unwrap();
+        git(&source, &["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(source.join("notes"), "local").unwrap();
+        snapshot_worktree(&source, "local work", &root).unwrap();
+        git(&source, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        let mut workspace = workspace_without_agents(&root, &source);
+        workspace.connection = Some(crate::integrations::ProjectConnection::Local);
+        let manager = BartenderManager::default();
+        let fetched = manager.fetch_github(&workspace).unwrap();
+        assert!(fetched.ok);
+        assert_eq!(fetched.message, LOCAL_ONLY_MESSAGE);
+        let pulled = manager.pull_from_github(&workspace).unwrap();
+        assert!(!pulled.ok);
+        assert_eq!(pulled.message, LOCAL_ONLY_MESSAGE);
+        let pushed = manager.push_to_github(&workspace).unwrap();
+        assert!(!pushed.ok);
+        assert_eq!(pushed.message, LOCAL_ONLY_MESSAGE);
+        assert!(git(&remote, &["rev-parse", "--verify", "main"]).is_err(), "nothing reached the remote");
+        assert!(git(&source, &["rev-parse", "--verify", "origin/main"]).is_err(), "nothing was fetched");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2956,6 +3079,8 @@ mod tests {
             agents: Vec::new(),
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         }
     }
 
@@ -2993,6 +3118,8 @@ mod tests {
             }],
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         }
     }
 }

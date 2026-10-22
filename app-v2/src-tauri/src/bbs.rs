@@ -889,7 +889,7 @@ fn reply_at(
 }
 
 pub fn create_thread(project_tags: Vec<String>, broadcast: bool, body: String) -> Result<String> {
-    create_thread_as(&identity_from_env(), project_tags, broadcast, body)
+    create_thread_as(&identity_from_env()?, project_tags, broadcast, body)
 }
 
 pub fn create_thread_as(
@@ -1011,7 +1011,7 @@ fn create_thread_mentions_scoped(
 }
 
 pub fn reply(thread_id: &str, body: String) -> Result<String> {
-    reply_as(&identity_from_env(), thread_id, body)
+    reply_as(&identity_from_env()?, thread_id, body)
 }
 
 pub fn reply_as(identity: &Identity, thread_id: &str, body: String) -> Result<String> {
@@ -1242,9 +1242,10 @@ pub fn run_cli() -> Result<()> {
             attachments,
             at,
         } => {
+            let identity = identity_from_env()?;
             let body = read_stdin_body(!attachments.is_empty())?;
             let thread_id = create_thread_with_mentions_as(
-                &identity_from_env(),
+                &identity,
                 projects,
                 broadcast,
                 body,
@@ -1258,9 +1259,10 @@ pub fn run_cli() -> Result<()> {
             attachments,
             at,
         } => {
+            let identity = identity_from_env()?;
             let body = read_stdin_body(!attachments.is_empty())?;
             let post_id =
-                reply_with_mentions_as(&identity_from_env(), &thread_id, body, attachments, at.into_iter().collect())?;
+                reply_with_mentions_as(&identity, &thread_id, body, attachments, at.into_iter().collect())?;
             println!("{post_id}");
         }
         BbsCliCommand::Show(thread_id) => {
@@ -1676,39 +1678,50 @@ fn parse_project_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn identity_from_env() -> Identity {
-    let project_id = std::env::var("KOTA_PROJECT_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "unknown-project".into());
-    let agent_id = std::env::var("KOTA_AGENT_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "unknown-agent".into());
-    let agent_yaml = std::env::var("KOTA_AGENT_CWD")
-        .ok()
+fn identity_from_env() -> Result<Identity> {
+    identity_from(std::env::current_dir().ok().as_deref(), |key| {
+        std::env::var(key).ok()
+    })
+}
+
+fn identity_from(
+    cwd: Option<&Path>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Identity> {
+    if let Some(dir) = crate::cli_identity::resolve(cwd, &env)? {
+        let agent_display_name = dir.display_name_or_id();
+        return Ok(Identity {
+            project_id: dir.project_id,
+            project_display_name: dir.project_display_name,
+            agent_id: dir.agent_id,
+            agent_display_name,
+            agent_avatar: dir.agent_avatar,
+        });
+    }
+    let var = |key: &str| {
+        env(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let project_id = var("KOTA_PROJECT_ID").unwrap_or_else(|| "unknown-project".into());
+    let agent_id = var("KOTA_AGENT_ID").unwrap_or_else(|| "unknown-agent".into());
+    let agent_yaml = var("KOTA_AGENT_CWD")
         .map(PathBuf::from)
         .map(|cwd| cwd.join("agent.yaml"));
-    let agent_display_name = std::env::var("KOTA_AGENT_DISPLAY_NAME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    let agent_display_name = var("KOTA_AGENT_DISPLAY_NAME")
         .or_else(|| agent_yaml.as_deref().and_then(agent_display_name_from_yaml))
         .unwrap_or_else(|| agent_id.clone());
-    let project_display_name = std::env::var("KOTA_PROJECT_DISPLAY_NAME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    let project_display_name = var("KOTA_PROJECT_DISPLAY_NAME")
         .unwrap_or_else(|| display_project_name_with_fallback(&project_id, None));
-    let agent_avatar = std::env::var("KOTA_AGENT_AVATAR")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    let agent_avatar = var("KOTA_AGENT_AVATAR")
         .or_else(|| agent_yaml.as_deref().and_then(agent_avatar_from_yaml));
-    Identity {
+    Ok(Identity {
         project_id,
         project_display_name,
         agent_id,
         agent_display_name,
         agent_avatar,
-    }
+    })
 }
 
 pub fn agent_display_name_from_yaml(path: &Path) -> Option<String> {
@@ -2406,5 +2419,70 @@ mod tests {
         );
 
         fs::remove_dir_all(workspaces).unwrap();
+    }
+
+    #[test]
+    fn cli_identity_reads_working_directory_rejects_env_mismatch_and_falls_back_outside_workspace() {
+        let root = temp_dir("bbs-cli-identity");
+        let project = root.join("cedar-project");
+        let agent_cwd = project.join(".agent-workspaces/agent-birch");
+        let worktree = agent_cwd.join("project-files/src");
+        let plain_dir = root.join("outside");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&plain_dir).unwrap();
+        fs::write(
+            project.join("workspace.json"),
+            r#"{"projectId":"cedar-project","displayName":"Cedar Notes"}"#,
+        )
+        .unwrap();
+        fs::write(
+            agent_cwd.join("agent.yaml"),
+            "id: agent-birch\ndisplay-name: Birch\navatar-id: user:avatar-birch\n",
+        )
+        .unwrap();
+
+        // 1) Directory matches environment (running from project-files/src): stamps from agent.yaml + workspace.json.
+        let matching = std::collections::HashMap::from([
+            ("KOTA_AGENT_ID", "agent-birch".to_string()),
+            ("KOTA_PROJECT_ID", "cedar-project".to_string()),
+            ("KOTA_AGENT_CWD", agent_cwd.display().to_string()),
+            ("KOTA_AGENT_DISPLAY_NAME", "Stale Env Name".to_string()),
+            ("KOTA_PROJECT_DISPLAY_NAME", "Stale Project".to_string()),
+        ]);
+        let identity =
+            identity_from(Some(&worktree), |k| matching.get(k).cloned()).unwrap();
+        assert_eq!(identity.agent_id, "agent-birch");
+        assert_eq!(identity.agent_display_name, "Birch");
+        assert_eq!(identity.agent_avatar.as_deref(), Some("user:avatar-birch"));
+        assert_eq!(identity.project_id, "cedar-project");
+        assert_eq!(identity.project_display_name, "Cedar Notes");
+
+        let board = TestBoard::new();
+        let thread = create_thread_at(&board.0, &identity, Vec::new(), true, "hello".into(), &[])
+            .unwrap();
+        let (_, posts) = load_thread(&board.0, &thread).unwrap();
+        assert_eq!(posts[0].meta.agent_id, "agent-birch");
+        assert_eq!(posts[0].meta.project_id, "cedar-project");
+
+        // 2) Directory vs environment mismatch -> rejected with exact copy, nothing published.
+        let mismatched = std::collections::HashMap::from([
+            ("KOTA_AGENT_ID", "agent-maple".to_string()),
+            ("KOTA_PROJECT_ID", "maple-project".to_string()),
+        ]);
+        let err = identity_from(Some(&worktree), |k| mismatched.get(k).cloned())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "identity mismatch: environment says agent-maple@maple-project, working directory says agent-birch@cedar-project"
+        );
+
+        // 3) No directory evidence -> falls back to environment variables.
+        let fallback =
+            identity_from(Some(&plain_dir), |k| mismatched.get(k).cloned()).unwrap();
+        assert_eq!(fallback.agent_id, "agent-maple");
+        assert_eq!(fallback.project_id, "maple-project");
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

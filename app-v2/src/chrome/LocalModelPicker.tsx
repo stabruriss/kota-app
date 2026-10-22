@@ -86,10 +86,11 @@ export function LocalModelList({ choices, value, onSelect, label = 'Available mo
   </div>;
 }
 
-export function LocalModelPicker({ value, selectedName, choices, disabled, label = 'Local model', onSelect, onOpen, autoRoute, triggerRef }: {
+export function LocalModelPicker({ value, selectedName, choices, disabled, label = 'Local model', onSelect, onOpen, autoRoute, triggerRef, triggerLabel }: {
   value: string; selectedName?: string; choices: LocalModelChoice[]; disabled?: boolean; label?: string;
   onSelect: (choice: LocalModelChoice) => void; onOpen?: () => void;
   triggerRef?: RefObject<HTMLButtonElement>;
+  triggerLabel?: string;
   autoRoute?: { ready: boolean; rejected?: boolean; checking?: boolean; unavailable?: boolean; summary?: ReactNode; note?: string; onEdit: () => void; onSettings: () => void };
 }) {
   const [open, setOpen] = useState(false);
@@ -101,7 +102,7 @@ export function LocalModelPicker({ value, selectedName, choices, disabled, label
     <button ref={triggerRef} type="button" className="local-model-trigger" aria-label={label} aria-haspopup="dialog" disabled={disabled}
       onClick={() => { setOpen(true); onOpen?.(); }}>
       {automatic ? <StringIcon /> : selectedProvider ? <LocalProviderIcon providerId={selectedProvider} /> : null}
-      <span>{automatic ? 'Auto String' : selectedName || choice?.name || value || 'Choose a model'}{!automatic && <LocalModelCredit providerId={selectedProvider} />}</span><i aria-hidden="true">⌄</i>
+      <span>{triggerLabel ?? (automatic ? 'Auto String' : selectedName || choice?.name || value || 'Choose a model')}{!automatic && <LocalModelCredit providerId={selectedProvider} />}</span><i aria-hidden="true">⌄</i>
     </button>
     {open && <LocalModelDialog title="Choose a Local model" subtitle="Choose Auto String or a linked model." onClose={() => setOpen(false)}
       footer={autoRoute ? <><p className={!autoRoute.ready && !autoRoute.checking && !autoRoute.unavailable ? 'local-model-warning' : ''}>{autoRoute.checking ? 'Checking Jev…' : autoRoute.unavailable ? 'Jev settings unavailable. Retry in Puppeteer.' : autoRoute.ready ? autoRoute.note ?? 'For this agent only.' : autoRoute.rejected ? 'Jev key rejected. Update it in Puppeteer.' : 'Set up Jev to use Auto String'}</p><button type="button" className="local-model-text" onClick={() => { setOpen(false); autoRoute.onSettings(); }}>Jev settings</button></> : undefined}>

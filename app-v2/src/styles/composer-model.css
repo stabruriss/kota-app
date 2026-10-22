@@ -1,0 +1,41 @@
+.ib-model-footer { display:contents; }
+.ib-model-footer.with-models { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; width:100%; min-width:0; }
+.ib-model-footer.with-models>.ib-toolbar { flex:0 0 auto; }
+.composer-model-controls { display:flex; flex:0 1 auto; align-items:center; gap:13px; min-width:0; flex-wrap:wrap; }
+.composer-model-big { min-width:0; flex:0 1 auto; }
+.composer-model-big .string-edit-routing { display:none; }
+.composer-model-big .local-model-trigger { width:auto; min-height:24px; padding:0; border:0; border-radius:0; background:none; box-shadow:none; color:var(--text-3); gap:0; }
+.composer-model-big .local-model-trigger>span { font:9.5px/1.6 var(--font-mono); overflow-wrap:anywhere; }
+.composer-model-big .local-model-trigger>.local-route-engine,
+.composer-model-big .local-model-trigger>.local-model-provider-icon,
+.composer-model-big .local-model-trigger>.local-model-monogram,
+.composer-model-big .local-model-trigger>i { display:none; }
+.composer-model-big .local-model-trigger:hover { color:var(--text-2); }
+.composer-model-small { display:inline-flex; align-items:center; min-width:0; min-height:24px; padding:0; border:0; border-radius:0; background:none; box-shadow:none; color:var(--text-3); font:9.5px/1.6 var(--font-mono); text-align:left; }
+.composer-model-small>span { white-space:normal; overflow-wrap:anywhere; }
+.composer-model-small:hover,.composer-model-small[aria-expanded=true] { color:var(--text-2); }
+.composer-model-small:disabled { opacity:.45; }
+.composer-auto-on { color:#a8c5a7; font:600 9px/1.6 var(--font-mono); letter-spacing:.4px; text-shadow:0 0 4px #a7d0a766,0 0 10px #78af6644; }
+.composer-model-error,.composer-model-big .local-model-warning { font:10px/1.5 var(--font-mono); color:var(--text-3); overflow-wrap:anywhere; }
+.composer-model-error { flex-basis:100%; }
+.composer-route-fan { position:fixed; z-index:7000; pointer-events:none; overflow:visible; }
+.composer-fan-position { position:absolute; transform:rotate(var(--fan-angle)); transform-origin:calc(100% - 20px) 50%; pointer-events:auto; animation:composer-fan-in 130ms ease-out both; }
+.composer-fan-position.hovered { z-index:2; }
+.composer-fan-item { display:flex; align-items:center; justify-content:flex-end; gap:10px; padding:0; background:none; border:0; color:var(--text); min-height:44px; white-space:nowrap; }
+.composer-fan-short,.composer-fan-full { background:linear-gradient(170deg,#292b2dee,#17191bed); border:1px solid #6d706f9c; border-radius:20px; box-shadow:0 3px 10px #0005; padding:6px 12px; font:12px/1.4 var(--font-sans); color:var(--text); }
+.composer-fan-short { max-width:var(--fan-text-width,350px); white-space:normal; overflow-wrap:anywhere; }
+.composer-fan-item[aria-checked=true] .composer-fan-short { border-color:var(--copper-hi); background:linear-gradient(170deg,#26342e,#171e1b); }
+.composer-fan-provider { width:40px; height:40px; flex-shrink:0; display:grid; place-items:center; border-radius:9px; background:#1d2022; box-shadow:0 5px 13px #0008; border:1px solid var(--border-hi); }
+.composer-fan-provider .local-model-provider-icon,.composer-fan-provider .local-model-monogram { width:27px; height:27px; }
+.composer-fan-full { position:absolute; right:50px; top:50%; transform:translateY(-50%); width:max-content; white-space:normal; overflow-wrap:anywhere; pointer-events:none; background:linear-gradient(170deg,#35383a,#222527); border-color:var(--brass-hi); padding:7px 12px; }
+.composer-fan-full .local-model-credit { margin-left:7px; font-size:10px; }
+.composer-fan-position.hovered .composer-fan-short { opacity:0; }
+.composer-fan-item:focus-visible { outline:0; }
+.composer-fan-item:focus-visible .composer-fan-provider { outline:2px solid var(--brass-hi); outline-offset:2px; }
+.composer-fan-bridge { position:absolute; inset:0; pointer-events:auto; z-index:-1; }
+.composer-route-fan.opens-right .composer-fan-position { transform-origin:20px 50%; }
+.composer-route-fan.opens-right .composer-fan-item { flex-direction:row-reverse; }
+.composer-route-fan.opens-right .composer-fan-full { right:auto; left:50px; }
+@keyframes composer-fan-in { from { opacity:0; transform:translateY(7px) rotate(var(--fan-angle)); } to { opacity:1; transform:translateY(0) rotate(var(--fan-angle)); } }
+@media(max-width:600px) { .composer-model-controls { gap:6px; } .composer-fan-short,.composer-fan-full { font-size:11px; } }
+@media(prefers-reduced-motion:reduce) { .composer-fan-position { animation:none; } }

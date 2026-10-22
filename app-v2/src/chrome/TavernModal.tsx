@@ -1,4 +1,6 @@
 import '../styles/tavern-source.css';
+import { GithubAccountsCard } from './GithubAccountsCard';
+import { GITHUB_LINK_EVENT } from '../lib/github-account-flow';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { LocalModelCredit, localModelProvider, localModelOptionCredit } from './LocalModelCredit';
 import type { ReactNode } from 'react';
@@ -50,15 +52,12 @@ import {
   loadEmberDreamConsolidatePromptTemplate,
 } from '../ember-config';
 import {
-  GITHUB_CLI_INSTALL_URL,
-  GITHUB_CLI_LOGIN_COMMAND,
   authConfigStatus,
   deleteAccountSkill,
   deleteTavernHero,
   deleteAccountRule,
   accountDreamsOpen,
   accountDreamsStatus,
-  ghAuthStatus,
   hasTauriRuntime,
   importAccountSkillFromPicker,
   inspectWorkspaceProject,
@@ -69,7 +68,6 @@ import {
   loadTavernHeroProfiles,
   openAccountSkillFolder,
   openAccountSkillsFolder,
-  openExternalUrl,
   revealTavernHeroFile,
   refreshProviderModelOptions,
   resetDefaultAccountRules,
@@ -88,7 +86,6 @@ import {
   type AccountUserIdentity,
   type AccountRuleDraft,
   type AccountRuleSaveRequest,
-  type GhAuthInfo,
   type OAuthConfigStatus,
   type StorageMeasurementStatus,
   type SupportedShellStatus,
@@ -163,12 +160,12 @@ import { LaughingManSettings } from './LaughingManSettings';
 interface TavernModalProps {
   open: boolean;
   onClose: () => void;
-  initialGhAuth?: GhAuthInfo | null;
   ghosttyTerminalEnhancement?: boolean;
   onGhosttyTerminalEnhancementChange?: (enabled: boolean) => void;
   initialTab?: TavernTab;
   localLinkIntent?: { target: KotaLocalLinkTarget; request: number } | null;
   onWorkspaceResumed?: (workspace: WorkspaceProject) => void;
+  onConfirmProjectRemoval?: (title: string, body: string) => Promise<boolean>;
 }
 
 export type TavernTab = 'heroes' | 'rules' | 'skills' | 'link' | 'archived';
@@ -759,18 +756,23 @@ function skillImportErrorText(err: unknown): string {
 export function TavernModal({
   open,
   onClose,
-  initialGhAuth = null,
   ghosttyTerminalEnhancement = false,
   onGhosttyTerminalEnhancementChange,
   initialTab = 'heroes',
   localLinkIntent,
   onWorkspaceResumed,
+  onConfirmProjectRemoval,
 }: TavernModalProps) {
   const [tab, setTab] = useState<TavernTab>(initialTab);
+  useEffect(() => {
+    if (!open) return;
+    const goToLink = () => { setTab('link'); setProfileTarget(null); };
+    window.addEventListener(GITHUB_LINK_EVENT, goToLink);
+    return () => window.removeEventListener(GITHUB_LINK_EVENT, goToLink);
+  }, [open]);
   const local = useTavernLocal(KOTA_LOCAL_ENABLED && open && tab === 'heroes');
   const [config, setConfig] = useState<OAuthConfigStatus | null>(null);
   const [storageMeasurement, setStorageMeasurement] = useState<StorageMeasurementStatus | null>(null);
-  const [ghAuth, setGhAuth] = useState<GhAuthInfo | null>(initialGhAuth);
   const [archivedWorkspaces, setArchivedWorkspaces] = useState<WorkspaceProject[]>([]);
   const [shells, setShells] = useState<SupportedShellStatus[]>([]);
   const [modelRefreshBusy, setModelRefreshBusy] = useState<ProviderId | null>(null);
@@ -852,10 +854,6 @@ export function TavernModal({
       mountedRef.current = false;
     };
   }, []);
-
-  useEffect(() => {
-    setGhAuth(initialGhAuth);
-  }, [initialGhAuth]);
 
   useEffect(() => {
     profilePersistenceHeroesRef.current = [...HERO_TEMPLATES, ...customHeroes];
@@ -1143,6 +1141,8 @@ export function TavernModal({
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      // The App confirmation owns Escape while removal is awaiting a decision.
+      if (busy === 'remove project') return;
       event.preventDefault();
       event.stopPropagation();
       if (resetHeroesOpen) {
@@ -1165,7 +1165,7 @@ export function TavernModal({
     };
     document.addEventListener('keydown', onKeyDown, true);
     return () => document.removeEventListener('keydown', onKeyDown, true);
-  }, [deleteRuleTarget, deleteSkillTarget, onClose, open, profileTarget, promptResetTarget, resetHeroesOpen, skillImportDialog]);
+  }, [busy, deleteRuleTarget, deleteSkillTarget, onClose, open, profileTarget, promptResetTarget, resetHeroesOpen, skillImportDialog]);
 
   const openLocalSettings = useCallback((target: KotaLocalLinkTarget) => {
     if (target === 'kota-local') {
@@ -1383,18 +1383,6 @@ export function TavernModal({
       cancelled = true;
     };
   }, [open, refreshTerminalEnhancement, tab]);
-
-  const beginGithubCliLogin = useCallback(async () => {
-    const status = await ghAuthStatus();
-    setGhAuth(status);
-    if (status.cliMissing) {
-      void openExternalUrl(GITHUB_CLI_INSTALL_URL).catch(() => {});
-      return;
-    }
-    window.dispatchEvent(new CustomEvent('kota:smart-run', {
-      detail: { command: GITHUB_CLI_LOGIN_COMMAND },
-    }));
-  }, []);
 
   const heroes = useMemo(() => [...HERO_TEMPLATES, ...customHeroes], [customHeroes]);
   const selectedHero = heroes.find((hero) => hero.id === selectedHeroId) ?? heroes[0];
@@ -1623,10 +1611,11 @@ export function TavernModal({
           dirtySummary: `Could not verify Git sync status: ${String(err)}`,
         };
       }
-      const confirmed = window.confirm(
+      const confirmed = await onConfirmProjectRemoval?.(
+        `Remove ${workspace.displayName || workspace.repoFullName || workspace.projectId} from Kota?`,
         status.dirty
-          ? `Remove ${workspace.repoFullName} from Kota?\n\nThis deletes Kota account state for the project but leaves local project files on disk.\n\nUnsynced or dirty Git state was detected:\n\n${status.dirtySummary}`
-          : `Remove ${workspace.repoFullName} from Kota?\n\nThis deletes Kota account state for the project but leaves local project files on disk.`,
+          ? `This deletes Kota account state for the project but leaves local project files on disk.\n\nUnsynced or dirty Git state was detected:\n\n${status.dirtySummary}`
+          : 'This deletes Kota account state for the project but leaves local project files on disk.',
       );
       if (!confirmed) return;
       const result = await removeWorkspaceProject({
@@ -1850,20 +1839,6 @@ export function TavernModal({
     }
   };
 
-  const githubCliState = ghAuth == null ? 'checking' : ghAuth.authenticated ? 'ok' : ghAuth.cliMissing ? 'missing' : 'setup';
-  const githubCliPrimary = ghAuth?.authenticated
-    ? (
-      <span className="github-cli-account">
-        <span aria-hidden>{githubInitial(ghAuth.username)}</span>
-        <b>{ghAuth.username ?? 'GitHub CLI ready'}</b>
-      </span>
-    )
-    : ghAuth == null
-      ? 'Checking GitHub CLI'
-      : ghAuth.cliMissing
-      ? 'GitHub CLI missing'
-      : 'GitHub CLI not logged in';
-  const githubCliAction = ghAuth?.cliMissing ? 'Install GitHub CLI' : 'Login GitHub';
   const accountUserName = accountUser.name.trim() || DEFAULT_ACCOUNT_USER_IDENTITY.name;
 
   return (
@@ -2207,24 +2182,7 @@ export function TavernModal({
             />
           )}
 
-          <ConnectionCard
-            icon="github"
-            title="GitHub CLI"
-            connected={!!ghAuth?.authenticated}
-            fullWidth={!SHOW_GOOGLE_DRIVE_CARD}
-            status={githubCliState}
-            primary={githubCliPrimary}
-            description={
-              ghAuth?.authenticated
-                ? undefined
-                : 'Connect your projects'
-            }
-            details={[]}
-            actionLabel={ghAuth?.authenticated || ghAuth == null ? undefined : githubCliAction}
-            actionTone={ghAuth?.cliMissing ? 'danger' : undefined}
-            disabled={busy != null}
-            onAction={ghAuth?.authenticated || ghAuth == null ? undefined : () => run('github cli', beginGithubCliLogin)}
-          />
+          <GithubAccountsCard />
 
           {KOTA_LOCAL_ENABLED && (
             <KotaLocalLinkCard focusTarget={linkFocus} onFocusHandled={clearLinkFocus} />
@@ -2305,7 +2263,7 @@ export function TavernModal({
           ) : archivedWorkspaces.map((workspace) => (
             <section key={workspace.projectId} className="tavern-list-card archived-project-card">
               <div>
-                <div className="tavern-section-title">{workspace.repoFullName}</div>
+                <div className="tavern-section-title">{workspace.displayName || workspace.repoFullName || workspace.projectId}</div>
                 <div className="tavern-identity">{workspace.sourceDir}</div>
               </div>
               <span className="archived-project-actions">
@@ -2319,7 +2277,7 @@ export function TavernModal({
                 <button
                   type="button"
                   className="danger"
-                  disabled={busy != null}
+                  disabled={busy != null || !onConfirmProjectRemoval}
                   onClick={() => { void removeArchivedWorkspace(workspace); }}
                 >
                   Remove
@@ -3680,11 +3638,6 @@ export function formatStorageMeasurementAge(measuredAt: number, now = Date.now()
   if (elapsedHours < 24) return `${elapsedHours}h ago`;
   const elapsedDays = Math.floor(elapsedHours / 24);
   return `${elapsedDays} ${elapsedDays === 1 ? 'day' : 'days'} ago`;
-}
-
-function githubInitial(username: string | null | undefined): string {
-  const trimmed = username?.trim();
-  return trimmed ? trimmed.slice(0, 1).toUpperCase() : 'G';
 }
 
 function ConnectionCard({

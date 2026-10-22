@@ -142,6 +142,13 @@ test('delivery identity survives requeue and differs for identical text with a d
   assert.equal(history.choiceFor(history.inputs[1].id), undefined);
   assert.deepEqual(history.inputs.map(i => i.text), ['identical text', 'identical text']);
 });
+test('fresh Kota inputs carry the composer routeModel; inputs without one and Pi user messages carry none', () => {
+  const routed = { ...delivery('entry-2', 'second#agent'), details: { kotaId: 'second#agent', routeModel: 'model-2' } };
+  const h = routingHistory([switchEntry, delivery('entry-1', 'first#agent'), routed,
+    { type: 'message', id: 'pi-entry', message: user('typed in Pi') }]);
+  assert.deepEqual(h.inputs.map(i => [i.id, i.routeModel]),
+    [['kota:first#agent', undefined], ['kota:second#agent', 'model-2'], ['pi:pi-entry', undefined]]);
+});
 test('a restarted direct call finds the frozen branch choice despite older replies, summaries or later group edits', () => {
   const state = selection();
   const h = routingHistory([switchEntry, delivery('entry-1', 'first#agent'), { type: 'message', message: reply('previous A') },

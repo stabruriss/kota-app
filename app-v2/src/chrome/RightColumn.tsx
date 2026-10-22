@@ -6,6 +6,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { BbsPromptProject } from '../bbs-config';
 import { watchDreamSubmissions } from '../lib/ember-dream-run';
+import { openGithubAccounts } from '../lib/github-account-flow';
+import { useProjectConnectionStatus } from '../lib/project-connection-status';
+import { requestProjectConnection } from '../lib/project-connection-ui';
 import {
   TAVERN_SYSTEM_CONFIG_CHANGED_EVENT,
   loadBartenderConflictPrompts,
@@ -637,6 +640,7 @@ interface BbsDeleteSelection {
 }
 
 function workspaceProjectDisplayName(workspace: WorkspaceProject): string {
+  if (workspace.displayName?.trim()) return workspace.displayName.trim();
   const parts = workspace.repoFullName.trim().split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? workspace.projectId;
 }
@@ -1302,6 +1306,12 @@ export function RightColumn({
   const activeSyncProgress = activeExternalSync?.progress
     ?? (localBusyAction === 'sync' ? syncProgress : null);
   const canUseBartender = !!workspace;
+  const localOnly = workspace?.connection?.kind === 'local';
+  const githubConnection = useProjectConnectionStatus(workspace);
+  const githubState = githubConnection.status?.kind === 'github' ? githubConnection.status.accountState : null;
+  const githubLogin = githubConnection.status?.kind === 'github' ? githubConnection.status.accountLogin : null;
+  const githubMissing = githubState === 'missing' || githubState === 'unbound';
+  const canUseGithub = canUseBartender && !localOnly && githubState === 'ok';
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(() => (
     loadBartenderAutoSync(bartenderProjectId)
   ));
@@ -2878,7 +2888,7 @@ export function RightColumn({
   }, [externalSyncReceiptKey]);
 
   useEffect(() => {
-    if (!canUseBartender) return;
+    if (!canUseGithub) return;
     const timer = window.setInterval(() => {
       if (activeBusyAction !== null) return;
       void bartenderFetch(bartenderRequest)
@@ -2891,7 +2901,7 @@ export function RightColumn({
         });
     }, 60000);
     return () => window.clearInterval(timer);
-  }, [activeBusyAction, bartenderProjectRoot, bartenderRequest, canUseBartender]);
+  }, [activeBusyAction, bartenderProjectRoot, bartenderRequest, canUseGithub]);
 
   useEffect(() => {
     const update = () => setLastPromptAt(lastVioletComposerSentAt(projectRoot ?? null));
@@ -2961,7 +2971,7 @@ export function RightColumn({
   }, [agentMeta, bartenderProjectRoot, bartenderRequest, busyAction, canUseBartender, conflictBlocker, finishLocalSync, onBartenderSynced, startLocalSync, workingAgents]);
 
   const runPull = useCallback(async () => {
-    if (!canUseBartender || busyAction || conflictBlocker) return;
+    if (!canUseGithub || busyAction || conflictBlocker) return;
     setBusyAction('pull');
     setActionMessage(null);
     try {
@@ -2975,10 +2985,10 @@ export function RightColumn({
     } finally {
       setBusyAction(null);
     }
-  }, [bartenderRequest, busyAction, canUseBartender, conflictBlocker, onBartenderSynced]);
+  }, [bartenderRequest, busyAction, canUseGithub, conflictBlocker, onBartenderSynced]);
 
   const runPush = useCallback(async () => {
-    if (!canUseBartender || busyAction || conflictBlocker) return;
+    if (!canUseGithub || busyAction || conflictBlocker) return;
     setBusyAction('push');
     setActionMessage(null);
     try {
@@ -2990,10 +3000,10 @@ export function RightColumn({
     } finally {
       setBusyAction(null);
     }
-  }, [bartenderRequest, busyAction, canUseBartender, conflictBlocker]);
+  }, [bartenderRequest, busyAction, canUseGithub, conflictBlocker]);
 
   const routePullConflict = useCallback(async (agentId: AgentId) => {
-    if (!canUseBartender || busyAction || !pullConflict) return;
+    if (!canUseGithub || busyAction || !pullConflict) return;
     setBusyAction('routePull');
     try {
       const result = await bartenderRoutePullConflict({
@@ -3013,7 +3023,7 @@ export function RightColumn({
     bartenderProjectRoot,
     bartenderPrompts.pullConflictPrompt,
     busyAction,
-    canUseBartender,
+    canUseGithub,
     pullConflict,
   ]);
 
@@ -3061,9 +3071,11 @@ export function RightColumn({
     return () => window.clearInterval(timer);
   }, [autoSyncEnabled, canUseBartender]);
 
-  const bartenderBubble = actionMessage
-    ?? status?.message
-    ?? (workspace ? 'Checking the room.' : 'Open a GitHub room to sync.');
+  const bartenderBubble = (githubState === 'needs_login' ? `Sign in to ${githubLogin} to resume GitHub Pull and Push.`
+      : githubMissing ? 'No GitHub account is assigned to this project. Pull and Push are paused.' : null)
+    ?? actionMessage
+    ?? (localOnly && (!status || ['idle', 'roomDiff', 'sourceDiff', 'githubDiff'].includes(status.state)) ? 'This project syncs on this computer only.' : status?.message)
+    ?? (workspace ? 'Checking the room.' : 'Open a project to sync.');
   const roomChangeCount = status?.roomChangeCount ?? 0;
   const githubChangeCount = status?.githubChangeCount ?? 0;
   const githubBehindCount = status?.githubBehindCount ?? 0;
@@ -3073,7 +3085,7 @@ export function RightColumn({
     ? bartenderSyncButtonLabel(activeSyncProgress)
     : `Sync ${roomChangeLabel} in room`;
   const githubBehindLabel = githubBehindCount === 1 ? '1 change' : `${githubBehindCount} changes`;
-  const hasUpstreamBehind = githubBehindCount > 0;
+  const hasUpstreamBehind = canUseGithub && githubBehindCount > 0;
   const conflictBlockerText = conflictBlocker
     ? `${conflictBlocker.agentName} resolving`
     : '';
@@ -3642,6 +3654,9 @@ export function RightColumn({
                 </div>
                 <div className="bartender-bubble" aria-live="polite">
                   {bartenderBubble}
+                  {githubState === 'needs_login' && <button type="button" className="local-model-text" onClick={openGithubAccounts}>Sign in</button>}
+                  {githubMissing && workspace && <button type="button" className="local-model-text" onClick={() => requestProjectConnection(workspace.projectId)}>Choose account</button>}
+                  {githubConnection.error && <button type="button" className="local-model-text" onClick={githubConnection.retry} title={githubConnection.error}>Retry</button>}
                 </div>
               </div>
               <button
@@ -3715,7 +3730,7 @@ export function RightColumn({
                     )}
                   </motion.div>
                 )}
-                {!conflictBlocker && roomChangeCount === 0 && githubBehindCount > 0 && (
+                {canUseGithub && !conflictBlocker && roomChangeCount === 0 && githubBehindCount > 0 && (
                   <motion.button
                     key="pull"
                     type="button"
@@ -3731,7 +3746,7 @@ export function RightColumn({
                     {activeBusyAction === 'pull' ? 'Pulling GitHub' : `Pull ${githubBehindLabel} from GitHub`}
                   </motion.button>
                 )}
-                {!conflictBlocker && (githubChangeCount > 0 || githubNeedsInitialPush) && (
+                {canUseGithub && !conflictBlocker && (githubChangeCount > 0 || githubNeedsInitialPush) && (
                   <motion.button
                     key="push"
                     type="button"
@@ -3753,7 +3768,7 @@ export function RightColumn({
                   </motion.button>
                 )}
               </AnimatePresence>
-              {pullConflict && (
+              {canUseGithub && pullConflict && (
                 <div className="bartender-pull-conflict-picker">
                   <div className="bartender-pull-conflict-copy">
                     <b>Pick an agent</b>
@@ -3843,7 +3858,7 @@ export function RightColumn({
             </div>
             {emberMessage && <div className="ember-status">{emberMessage}</div>}
           </section>
-          {danceController && <PuppeteerDanceCard controller={danceController} owner={workspace?.repoFullName || workspace?.projectId || 'This project'} seedTarget={danceSeedTarget}
+          {danceController && <PuppeteerDanceCard controller={danceController} owner={workspace?.displayName || workspace?.repoFullName || workspace?.projectId || 'This project'} seedTarget={danceSeedTarget}
             agents={roomAgents.map(id => ({ id, name: agentMeta?.[id]?.name ?? id, avatarId: agentMeta?.[id]?.avatarId }))} />}
           <div
             className={`lm-card ${lm?.lastError ? 'error' : ''} ${lm?.selected?.muted ? 'muted' : ''}`}

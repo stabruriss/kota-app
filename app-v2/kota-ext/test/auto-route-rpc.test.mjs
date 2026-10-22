@@ -41,8 +41,9 @@ async function routed(t,{steps,jev=[],group=groupOf(),settings={retry:{enabled:t
   await writeFile(promptPath,typeof prompts==='string'?prompts:JSON.stringify(prompts));
   client=session.client;
   const facts=(after=0)=>client.records.slice(after).filter(r=>r.type==='extension_ui_request'&&r.method==='notify'&&r.message?.startsWith(ROUTE_CODEC)).map(r=>JSON.parse(r.message.slice(ROUTE_CODEC.length)));
-  const inject=async(id,content=`MARKER_${id}`)=>{
-    const {id:request}=client.send('prompt',injectCommand(envelope(id,'kota.user',content)));
+  const inject=async(id,content=`MARKER_${id}`,details={})=>{
+    const input=envelope(id,'kota.user',content);Object.assign(input.details,details);
+    const {id:request}=client.send('prompt',injectCommand(input));
     assert.equal((await client.waitFor(r=>r.type==='response'&&r.id===request,{timeoutMs:20_000})).success,true);
   };
   const settle=async after=>{
@@ -50,7 +51,7 @@ async function routed(t,{steps,jev=[],group=groupOf(),settings={retry:{enabled:t
     const assistants=client.records.slice(after).filter(r=>r.type==='message_end'&&r.message.role==='assistant').map(r=>r.message);
     return{assistants,last:assistants.at(-1),facts:facts(after),events:client.records.slice(after)};
   };
-  const send=async(id,content)=>{const after=client.records.length;await inject(id,content);return settle(after);};
+  const send=async(id,content,details)=>{const after=client.records.length;await inject(id,content,details);return settle(after);};
   const restart=async()=>{
     await client.close();client=new TestRpcClient('pi',session.args,{cwd:session.cwd,env:session.env});
     assert.equal((await client.command('get_state')).success,true);
@@ -92,6 +93,36 @@ test('several fresh messages merge in order before the Unicode 4000-character ca
   const r=await routed(t,{steps:[{type:'text',text:'first',holdBeforeHeaders:true},{type:'text',text:'batched'}],jev:[{serious:0.9,casual:0.1},{serious:0.9,casual:0.1}]});
   const after=r.client.records.length;await r.inject('one');await r.provider.waitForRequest(1);await r.inject('two','😀'.repeat(3000));await r.inject('three','b'.repeat(3000));r.provider.release(1);await r.settle(after);
   assert.equal(r.fakeJev.requests[1].body.state.new_message,`${'😀'.repeat(3000)}\n\n${'b'.repeat(998)}`);
+});
+test('a composer routeModel skips Jev, becomes current, and the next plain input asks Jev from it',{timeout:40_000},async t=>{
+  const r=await routed(t,{steps:[{type:'text',text:'manual'},{type:'text',text:'after'}],jev:[{serious:0.1,casual:0.9}]});
+  const first=await r.send('one','Manual input.',{routeModel:'model-2'});
+  assert.equal(first.last.stopReason,'stop');assert.equal(r.fakeJev.requests.length,0);
+  assert.deepEqual(byEvent(first.facts,'selection'),[{schema:1,event:'selection',outcome:'manual',selected:{provider:PROVIDER,model:ALTERNATE,thinkingLevel:'off'},
+    candidate:{routeModel:'model-2',provider:PROVIDER,model:ALTERNATE,probability:1},threshold:.85}]);
+  assert.equal(byEvent(first.facts,'decision')[0].selectedModel,'model-2');
+  await r.send('two','Plain input.');
+  assert.equal(r.fakeJev.requests.length,1);assert.equal(r.fakeJev.requests[0].body.state.current_model,'model-2');
+  assert.deepEqual(models(r.provider),[ALTERNATE,ALTERNATE]);assert.deepEqual(byEvent(r.facts(),'selection').map(e=>e.outcome),['manual','retained']);
+});
+test('a routeModel outside the current group is ignored and Jev decides',{timeout:40_000},async t=>{
+  const r=await routed(t,{steps:[{type:'text',text:'jev'}],jev:[{serious:0.9,casual:0.1}]});
+  await r.send('one','Stale override.',{routeModel:'model-6'});
+  assert.equal(r.fakeJev.requests.length,1);assert.deepEqual(models(r.provider),[MODEL]);
+  assert.deepEqual(byEvent(r.facts(),'selection').map(e=>e.outcome),['selected']);
+});
+test('a batch of fresh inputs follows its latest input: its override wins, otherwise Jev decides',{timeout:60_000},async t=>{
+  const r=await routed(t,{steps:[{type:'text',text:'first',holdBeforeHeaders:true},{type:'text',text:'manual batch'}],jev:[{serious:0.9,casual:0.1}]});
+  const after=r.client.records.length;await r.inject('one');await r.provider.waitForRequest(1);
+  await r.inject('two','Earlier override.',{routeModel:'model-1'});await r.inject('three','Latest override.',{routeModel:'model-2'});
+  r.provider.release(1);await r.settle(after);
+  assert.equal(r.fakeJev.requests.length,1);assert.deepEqual(models(r.provider),[MODEL,ALTERNATE]);
+  const s=await routed(t,{steps:[{type:'text',text:'first',holdBeforeHeaders:true},{type:'text',text:'jev batch'}],jev:[{serious:0.9,casual:0.1},{serious:0.05,casual:0.95}]});
+  const later=s.client.records.length;await s.inject('one');await s.provider.waitForRequest(1);
+  await s.inject('two','Earlier override.',{routeModel:'model-2'});await s.inject('three','Latest plain input.');
+  s.provider.release(1);await s.settle(later);
+  assert.equal(s.fakeJev.requests.length,2);assert.equal(s.fakeJev.requests[1].body.state.new_message,'Earlier override.\n\nLatest plain input.');
+  assert.deepEqual(models(s.provider),[MODEL,ALTERNATE]);
 });
 test('compaction uses the latest physical reply and its summary is not classified as new input',{timeout:40_000},async t=>{
   const r=await routed(t,{steps:[{type:'text',text:'first '.repeat(400)},{type:'text',text:'second '.repeat(400)},

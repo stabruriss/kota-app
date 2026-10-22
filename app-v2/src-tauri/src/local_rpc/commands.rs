@@ -52,6 +52,9 @@ pub(crate) struct ComposerInput {
     pub text: String,
     #[serde(default)]
     pub soul_input: Option<crate::soul_push::input::Input>,
+    /// A RouteModel id while the composer overrides the target's Auto String; absent means Auto.
+    #[serde(default)]
+    pub route_model: Option<String>,
 }
 
 #[tauri::command]
@@ -65,8 +68,9 @@ pub(crate) async fn local_rpc_targets(app: AppHandle, project_root: String, agen
 pub(crate) async fn local_rpc_submit(app: AppHandle, request: ComposerInput) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let pty = app.state::<PtyManager>();
-        let input = Injection::text(&request.message_id, &request.agent_id, request.created_at,
+        let mut input = Injection::text(&request.message_id, &request.agent_id, request.created_at,
             request.private, "kota.user", request.text, None);
+        input.details.route_model = request.route_model;
         input.validate(&request.agent_id).map_err(|e| e.to_string())?;
         let fallback = if pty.agent_is_local(&request.agent_id) {
             let scope = pty.agent_local_snapshot(&request.agent_id).map_err(|e| e.to_string())?.scope;
@@ -98,15 +102,19 @@ pub(crate) enum ControlError { Local(LocalError), Existing(String) }
 #[tauri::command]
 pub(crate) async fn local_rpc_control(app: AppHandle, agent_id: String, request: Value) -> Result<Value, ControlError> {
     let offline_model = request["type"] == "set_model" && request.get("projectRoot").is_some();
+    let configures = matches!(request["type"].as_str(), Some("set_model" | "set_thinking_level"));
     tauri::async_runtime::spawn_blocking(move || {
-        let root = request["projectRoot"].as_str().map(str::to_owned);
-        let result = app.state::<PtyManager>().agent_local_control(&app, &agent_id, request).map_err(|e| {
+        let root = request["projectRoot"].as_str().map(std::path::PathBuf::from);
+        let pty = app.state::<PtyManager>();
+        let result = pty.agent_local_control(&app, &agent_id, request).map_err(|e| {
             if offline_model { ControlError::Local(e.downcast_ref::<LocalError>().cloned().unwrap_or_else(|| LocalError::new("local_model_update_failed"))) }
             else { ControlError::Existing(e.to_string()) }
         })?;
-        if offline_model {
+        // Online switches change SHELL.yaml too; detail and launch views follow this event.
+        if configures {
+            let root = root.or_else(|| pty.agent_local_snapshot(&agent_id).ok().map(|snapshot| snapshot.scope.project_root));
             if let (Some(root), Some(revision)) = (root, result["shellRevision"].as_str()) {
-                super::configuration::emit_change(&app, Path::new(&root), &agent_id, revision);
+                super::configuration::emit_change(&app, &root, &agent_id, revision);
             }
         }
         Ok(result)
@@ -357,3 +365,22 @@ pub(crate) async fn local_rpc_jev_key_save(app: AppHandle, request: JevKeySave) 
 
 #[tauri::command]
 pub(crate) fn local_rpc_jev_key_cancel(request_id: String) -> LocalResult<()> { super::jev::cancel(&request_id) }
+
+#[cfg(test)]
+mod tests {
+    use super::ComposerInput;
+    use serde_json::json;
+
+    #[test]
+    fn composer_input_takes_an_optional_route_model_and_still_rejects_unknown_fields() {
+        let base = json!({"projectRoot":"/fixture","agentId":"agent-fable-copper","messageId":"msg-1",
+            "createdAt":"2026-10-21T00:00:00Z","private":false,"text":"hello"});
+        assert_eq!(serde_json::from_value::<ComposerInput>(base.clone()).unwrap().route_model, None);
+        let mut routed = base.clone();
+        routed["routeModel"] = json!("model-2");
+        assert_eq!(serde_json::from_value::<ComposerInput>(routed).unwrap().route_model.as_deref(), Some("model-2"));
+        let mut unknown = base;
+        unknown["routeModels"] = json!("model-2");
+        assert!(serde_json::from_value::<ComposerInput>(unknown).is_err());
+    }
+}

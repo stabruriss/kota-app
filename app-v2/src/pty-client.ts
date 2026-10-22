@@ -1074,7 +1074,88 @@ export interface GithubCreateRepoRequest {
   name: string;
   private: boolean;
   autoInit: boolean;
+  /** The account to create it under; the default account when absent. */
+  accountLogin?: string;
 }
+
+/** Tavern Link accounts. gh holds the tokens; Kota names an account on every call. */
+export interface GithubAccount { login: string; default: boolean; state: 'ok' | 'needs_login'; source: 'gh-cli' }
+export interface GithubAccounts { defaultLogin: string | null; accounts: GithubAccount[] }
+export interface GithubAccountAddResult {
+  added: string[];
+  /** gh's own active login afterwards; Kota switches it back to the previous one. */
+  active: string | null;
+  restoreFailed: boolean;
+  view: GithubAccounts;
+}
+export const githubAccountsRead = () => invoke<GithubAccounts>('github_accounts_read');
+/** Call before running `gh auth login`; pass the result to githubAccountAddFinish. */
+export const githubAccountAddBegin = () => invoke<string | null>('github_account_add_begin');
+export const githubAccountAddFinish = (previousActive: string | null) =>
+  invoke<GithubAccountAddResult>('github_account_add_finish', { previousActive });
+export const githubAccountSetDefault = (login: string) => invoke<GithubAccounts>('github_account_set_default', { login });
+export const githubAccountRemove = (login: string) => invoke<GithubAccounts>('github_account_remove', { login });
+
+/** Connect dialog and gear (local-project PLAN §3 D/E, §5). */
+export interface ConnectionLargeFile { path: string; bytes: number }
+export interface ConnectionCandidate { fullName: string; private: boolean; defaultBranch: string; previous: boolean }
+export interface ConnectionCandidates {
+  accountLogin: string;
+  /** The previous origin comes first. */
+  candidates: ConnectionCandidate[];
+  /** The previous origin, else a repository of this account named like the project. */
+  selected: string | null;
+  /** History files over 100 MB; a new repository cannot take them. */
+  largeFiles: ConnectionLargeFile[];
+}
+export type ConnectionState =
+  | 'empty' | 'in_sync' | 'local_ahead' | 'remote_ahead' | 'diverged'
+  | 'unrelated' | 'no_access' | 'already_open' | 'blocked_large_file' | 'check_failed';
+export const CONNECTABLE_STATES: readonly ConnectionState[] = ['empty', 'in_sync', 'local_ahead', 'remote_ahead', 'diverged'];
+export interface ConnectionCheck {
+  /** Echoes the request, so a late answer for an older choice can be dropped. */
+  accountLogin: string;
+  repoFullName: string;
+  state: ConnectionState;
+  defaultBranch?: string;
+  private?: boolean;
+  largeFiles?: ConnectionLargeFile[];
+  /** check_failed only: what failed, never repository content. */
+  message?: string;
+}
+export type ConnectionTarget = { kind: 'existing'; repoFullName: string } | { kind: 'new'; name: string; private: boolean };
+export interface ConnectionApplied {
+  /** The project as saved; it also replaces the active workspace. */
+  workspace: WorkspaceProject;
+  /** false for in_sync, remote_ahead and diverged: Bartender pulls or merges next. */
+  pushed: boolean;
+  createdRepo?: string;
+}
+/** Rejected value of projectConnection* calls. The project keeps its previous connection. */
+export interface ConnectionError {
+  code: 'github_account_required' | 'github_account_unknown' | 'github_account_needs_login' | 'project_not_found'
+    | 'check_failed' | 'not_connectable' | 'blocked_large_file' | 'repo_create_failed' | 'push_failed'
+    | 'fetch_failed' | 'save_failed' | 'internal';
+  message: string;
+  state?: ConnectionState;
+  largeFiles?: ConnectionLargeFile[];
+  /** A repository created for this attempt; it stays on GitHub, empty. */
+  createdRepo?: string;
+}
+export type ConnectionStatus =
+  | { kind: 'local' }
+  | { kind: 'github'; accountLogin: string | null; accountState: 'ok' | 'needs_login' | 'missing' | 'unbound' };
+export const projectConnectionCandidates = (projectId: string, accountLogin: string) =>
+  invoke<ConnectionCandidates>('project_connection_candidates', { projectId, accountLogin });
+/** Read-only; it never changes the project or the remote. */
+export const projectConnectionCheck = (projectId: string, accountLogin: string, repoFullName: string) =>
+  invoke<ConnectionCheck>('project_connection_check', { projectId, accountLogin, repoFullName });
+/** Local→Connected and changing account or repository. Writes only after every remote step succeeded. */
+export const projectConnectionApply = (request: { projectId: string; accountLogin: string; target: ConnectionTarget }) =>
+  invoke<ConnectionApplied>('project_connection_apply', { request });
+/** Connected→Local. origin stays in Git for reconnecting. */
+export const projectConnectionSetLocal = (projectId: string) => invoke<WorkspaceProject>('project_connection_set_local', { projectId });
+export const projectConnectionStatus = (projectId: string) => invoke<ConnectionStatus>('project_connection_status', { projectId });
 
 export interface WorkspaceAgentSpec extends Omit<AgentSpawnRequest, 'cli'> {
   /** Raw persisted provider. Future Kota versions may write values this build cannot launch. */
@@ -1099,7 +1180,14 @@ export interface WorkspaceProject {
   agents: WorkspaceAgentSpec[];
   archived?: boolean;
   archivedAt?: string | null;
+  /** A local project's chosen name; GitHub projects use the repository name. */
+  displayName?: string;
+  /** Absent on registrations from before local projects, which are GitHub projects. */
+  connection?: { kind: 'local' } | { kind: 'github'; accountLogin?: string };
 }
+
+/** Git is the only requirement of a local project. */
+export interface GitAvailability { available: boolean; version?: string }
 
 export interface WorkspaceStatus {
   active: WorkspaceProject | null;
@@ -2161,9 +2249,9 @@ export async function disconnectGoogleDrive(): Promise<GoogleDriveStatus> {
   return invoke<GoogleDriveStatus>('google_drive_disconnect');
 }
 
-export async function githubListRepos(): Promise<GithubRepo[]> {
+export async function githubListRepos(accountLogin?: string): Promise<GithubRepo[]> {
   if (!useTauriRuntime()) return [];
-  return invoke<GithubRepo[]>('github_list_repos');
+  return accountLogin ? invoke<GithubRepo[]>('github_list_repos', { accountLogin }) : invoke<GithubRepo[]>('github_list_repos');
 }
 
 export async function githubCreateRepo(request: GithubCreateRepoRequest): Promise<GithubRepo> {
@@ -2181,12 +2269,17 @@ export async function githubCreateRepo(request: GithubCreateRepoRequest): Promis
   return invoke<GithubRepo>('github_create_repo', { request });
 }
 
-export async function prepareGithubProject(repoFullName: string): Promise<WorkspaceProject> {
+export const createLocalProject = (name: string) => invoke<WorkspaceProject>('workspace_create_local_project', { name });
+export const gitAvailability = () => invoke<GitAvailability>('git_availability');
+/** Opens Apple's Command Line Tools installer. */
+export const installGitCommandLineTools = () => invoke<void>('git_install_command_line_tools');
+
+export async function prepareGithubProject(repoFullName: string, accountLogin?: string): Promise<WorkspaceProject> {
   if (!useTauriRuntime()) {
     throw new Error('browser-dev mode has no git workspace materializer');
   }
   return invoke<WorkspaceProject>('workspace_prepare_github_project', {
-    request: { repoFullName },
+    request: { repoFullName, ...(accountLogin ? { accountLogin } : {}) },
   });
 }
 

@@ -112,10 +112,11 @@ export function routingHistory(branch: readonly Record<string, unknown>[]) {
   const inputs = branch.slice(after + 1).flatMap(entry => {
     if (entry.type === 'custom_message' && (CUSTOM_TYPES as readonly unknown[]).includes(entry.customType)
       && isObject(entry.details) && typeof entry.details.kotaId === 'string') {
-      return [{ id: `kota:${entry.details.kotaId}`, text: messageText({ role: 'user', content: entry.content }) }];
+      const routeModel = typeof entry.details.routeModel === 'string' ? entry.details.routeModel : undefined;
+      return [{ id: `kota:${entry.details.kotaId}`, text: messageText({ role: 'user', content: entry.content }), routeModel }];
     }
     if (entry.type === 'message' && isObject(entry.message) && entry.message.role === 'user' && typeof entry.id === 'string') {
-      return [{ id: `pi:${entry.id}`, text: messageText(entry.message as Message) }];
+      return [{ id: `pi:${entry.id}`, text: messageText(entry.message as Message), routeModel: undefined }];
     }
     return [];
   });

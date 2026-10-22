@@ -241,7 +241,7 @@ fn route_text(value: &Value, key: &str, limit: usize) -> Option<String> {
 fn route_selection(fact: &Value) -> Option<RouteEventData> {
     let selected = &fact["selected"];
     let candidate = &fact["candidate"];
-    let outcome = fact["outcome"].as_str().filter(|s| matches!(*s, "selected" | "retained" | "default"))?.to_owned();
+    let outcome = fact["outcome"].as_str().filter(|s| matches!(*s, "selected" | "retained" | "default" | "manual"))?.to_owned();
     let threshold = fact["threshold"].as_f64().filter(|n| n.is_finite() && (0.0..=1.0).contains(n))?;
     let probability = candidate["probability"].as_f64().filter(|n| n.is_finite() && (0.0..=1.0).contains(n))?;
     let route_model = route_text(candidate, "routeModel", 16).filter(|m| matches!(m.as_str(), "model-1"|"model-2"|"model-3"|"model-4"|"model-5"|"model-6"))?;

@@ -35,6 +35,7 @@ import {
   emberStorageKey,
   HUMAN_TELEGRAM_TARGET_ID,
 } from '../src/ember-config';
+import { refreshGithubAccounts } from '../src/lib/github-account-flow';
 import { emitFileTreeAgentHover } from '../src/lib/file-tree-agent-hover';
 import {
   __clearVioletComposerSentHistoryForTests,
@@ -54,8 +55,11 @@ import {
   type RoomQuoteReference,
 } from '../src/lib/room-quote';
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.restoreAllMocks();
+  vi.spyOn(ptyClient, 'githubAccountsRead').mockResolvedValue({defaultLogin:'mock',accounts:[{login:'mock',default:true,state:'ok',source:'gh-cli'}]});
+  vi.spyOn(ptyClient, 'projectConnectionStatus').mockResolvedValue({kind:'github',accountLogin:'mock',accountState:'ok'});
+  await refreshGithubAccounts();
   try {
     window.localStorage.setItem('kota-v2.dev.project-root', '/tmp/kota-test');
     window.localStorage.removeItem('kota-v2.tavern.hero-profiles');
@@ -1550,6 +1554,53 @@ describe('M1 · canvas shell landmarks', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('keeps Local-only Bartender sync and AUTO but skips all upstream controls and fetch ticks', async () => {
+    vi.useFakeTimers();
+    const localStorage=withMockLocalStorage();
+    const workspace={...hydrationWorkspace('local-fixture',[]),displayName:'Local Notes',connection:{kind:'local' as const},repoFullName:'',remoteUrl:'',githubHtmlUrl:''};
+    const status: ptyClient.BartenderStatus = {projectId:workspace.projectId,sourceDir:workspace.sourceDir,defaultBranch:'main',roomChangeCount:2,sourceChangeCount:0,githubChangeCount:3,githubBehindCount:4,githubNeedsInitialPush:true,githubPushBranch:null,githubInitialPushCommitCount:0,dirtyAgents:[],checkedAt:new Date().toISOString(),state:'roomDiff',message:'2 files waiting.'};
+    vi.spyOn(ptyClient,'bartenderStatus').mockResolvedValue(status);
+    const fetch=vi.spyOn(ptyClient,'bartenderFetch').mockResolvedValue({ok:true,message:'Fetched',status});
+    const sync=vi.spyOn(ptyClient,'bartenderSyncLocal').mockResolvedValue({ok:true,message:'Local sync complete.',status:{...status,roomChangeCount:0,state:'idle'},conflicts:[],snapshotCount:1,publishedCommitCount:0,publishedAgents:[]});
+    try {
+      const view=render(<RightColumn sceneKey="conversation" workspace={workspace} workingAgents={new Set()} onOpenHotMem={vi.fn()}/>);
+      await act(async()=>{});
+      expect(screen.getByText('This project syncs on this computer only.')).toBeInTheDocument();
+      expect(screen.getByRole('switch',{name:'Auto sync'})).toBeEnabled();
+      expect(screen.getByRole('button',{name:'Sync 2 changed files in room'})).toBeEnabled();
+      expect(screen.queryByRole('button',{name:/Push|Pull/})).not.toBeInTheDocument();
+      expect(document.querySelector('.bartender-upstream-dot')).toBeNull();
+      await act(async()=>{await vi.advanceTimersByTimeAsync(65000);});
+      expect(fetch).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button',{name:'Sync 2 changed files in room'}));
+      await act(async()=>{});expect(sync).toHaveBeenCalledTimes(1);
+      // An old registration without connection remains a GitHub project.
+      view.rerender(<RightColumn sceneKey="conversation" workspace={{...workspace,connection:undefined,repoFullName:'owner/fixture'}} workingAgents={new Set()} onOpenHotMem={vi.fn()}/>);
+      await act(async()=>{}); // The account status must settle before its fetch clock starts.
+      await act(async()=>{await vi.advanceTimersByTimeAsync(60000);});
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { localStorage.restore();vi.useRealTimers(); }
+  });
+
+  it.each(['missing', 'needs_login'] as const)('pauses Bartender upstream operations for a %s project account without falling back', async accountState => {
+    const workspace = {...hydrationWorkspace('account-fixture', []), connection:{kind:'github' as const,accountLogin:'bound-account'}};
+    vi.mocked(ptyClient.projectConnectionStatus).mockResolvedValue({kind:'github',accountLogin:'bound-account',accountState});
+    const status:ptyClient.BartenderStatus = {projectId:workspace.projectId,sourceDir:workspace.sourceDir,defaultBranch:'main',roomChangeCount:2,sourceChangeCount:0,githubChangeCount:3,githubBehindCount:4,githubNeedsInitialPush:false,githubPushBranch:null,githubInitialPushCommitCount:0,dirtyAgents:[],checkedAt:new Date().toISOString(),state:'roomDiff',message:'Pending changes.'};
+    vi.spyOn(ptyClient,'bartenderStatus').mockResolvedValue(status);
+    const fetch=vi.spyOn(ptyClient,'bartenderFetch');
+    const target=accountState==='missing'?'kota:project-connection':'kota:github-link';
+    const open=vi.fn();window.addEventListener(target,open);
+    try {
+      render(<RightColumn sceneKey="conversation" workspace={workspace} workingAgents={new Set()} onOpenHotMem={vi.fn()}/>);
+      const action=await screen.findByRole('button',{name:accountState==='missing'?'Choose account':'Sign in'});
+      expect(screen.queryByRole('button',{name:/Push|Pull/})).not.toBeInTheDocument();
+      expect(screen.getByRole('button',{name:'Sync 2 changed files in room'})).toBeInTheDocument();
+      expect(document.querySelector('.bartender-upstream-dot')).toBeNull();
+      fireEvent.click(action);expect(open).toHaveBeenCalledTimes(1);expect(fetch).not.toHaveBeenCalled();
+      if(accountState==='missing')expect(open.mock.calls[0][0].detail.projectId).toBe(workspace.projectId);
+    }finally{window.removeEventListener(target,open);}
   });
 
   it('shows Bartender action buttons only when sync or push changes exist', async () => {

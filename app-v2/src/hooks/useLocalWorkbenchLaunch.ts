@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { setOfflineLocalModel, type LocalLaunchCheck } from '../lib/local-rpc';
 import type { AutoRouteGroup } from '../lib/string-routing';
-import { onLocalConfiguration } from '../lib/local-configuration';
+import { useLocalModelConfiguration, type LocalModelConfiguration } from '../lib/local-model-configuration';
 import { catalogModel, localThinkingForModel } from '../lib/local-auth';
 import { useTavernLocal } from '../lib/tavern-local';
 import { localLaunchAction, onLocalStartup, localStartErrorText,
   type LocalStartError, type LocalStartStep, type LocalStartView, type LocalStartupOptions } from '../lib/local-startup';
 
-type Saved = { provider: string; id: string; thinking: string; autoRoute?: AutoRouteGroup };
+type Saved = LocalModelConfiguration;
 interface Options {
   projectRoot: string; agentId: string; connected: boolean; loaded: boolean;
   resumeOnOpen?: boolean; focusRequest: number; linkReturnRequest?: number;
@@ -22,8 +22,9 @@ const controlled = (error: unknown, stage: string): LocalStartError => error && 
  * and the final outcome; slow metadata never locks the whole panel. */
 export function useLocalWorkbenchLaunch(options: Options) {
   const { projectRoot, agentId, connected, loaded, resumeOnOpen, focusRequest, linkReturnRequest = 0 } = options;
-  const [configuration, setConfiguration] = useState<Saved | null>(null);
-  const [configurationLoaded, setConfigurationLoaded] = useState(false);
+  const shared = useLocalModelConfiguration(projectRoot, agentId);
+  const configuration = shared.value, configurationLoaded = shared.loaded;
+  const setConfiguration = shared.accept;
   const [draft, setDraft] = useState<Saved | null>(null);
   const local = useTavernLocal(loaded);
   const catalog = local.catalog.data, availability = local.auth.data;
@@ -45,7 +46,10 @@ export function useLocalWorkbenchLaunch(options: Options) {
     if (previous && previous.attemptId !== view.attemptId && previous.steps[0]?.startedAt > view.steps[0]?.startedAt) return;
     state.current.startup = view;
     setStartup(view);
-    if (view.saved && view.selection) {
+    // A historical startup snapshot is not the current saved configuration.
+    // Publish our own save once; later phase events must not undo a composer edit.
+    if (view.saved && view.selection && pendingAttempt.current === view.attemptId
+      && (previous?.attemptId !== view.attemptId || !previous.saved)) {
       ++configurationSerial.current;
       const selection = { provider: view.selection.providerId, id: view.selection.modelId, thinking: view.selection.thinkingLevel,
         autoRoute: view.selection.autoRoute ?? state.current.configuration?.autoRoute };
@@ -55,11 +59,10 @@ export function useLocalWorkbenchLaunch(options: Options) {
     if (view.state !== 'running' && pendingAttempt.current === view.attemptId) {
       operating.current = false; setBeginning(false);
     }
-  }, [projectRoot, agentId]);
+  }, [projectRoot, agentId, setConfiguration]);
   useEffect(() => {
     alive.current = true;
-    setConfiguration(null); setDraft(null); setConfigurationLoaded(false);
-    state.current.configuration = null; state.current.draft = null;
+    setDraft(null); state.current.draft = null;
     let disposed = false;
     let off: (() => void) | undefined;
     void onLocalStartup(agentId, view => { ++eventSerial.current; accept(view); }).then(async unsubscribe => {
@@ -72,37 +75,21 @@ export function useLocalWorkbenchLaunch(options: Options) {
     return () => { disposed = true; alive.current = false; cold.current = false; ++readSerial.current; ++configurationSerial.current; off?.(); };
   }, [projectRoot, agentId, accept]);
 
-  // This reads owned SHELL, including a retained group while using a concrete
-  // model. It does not query Pi and is also valid for an online session.
-  const readConfiguration = useCallback(async (adoptSaved = false) => {
-    const serial = ++configurationSerial.current;
-    // A completed external save wins over the previous offline dropdown draft.
-    // Clear it before awaiting IO, so Start cannot write that old draft back.
-    if (adoptSaved) { state.current.draft = null; setDraft(null); }
-    const value = await localLaunchAction<{ model: string | null; thinkingLevel: string; autoRoute?: AutoRouteGroup }>(projectRoot, agentId, 'configuration');
-    const at = value.model?.indexOf('/') ?? -1;
-    const selected = at > 0 ? { provider: value.model!.slice(0, at), id: value.model!.slice(at + 1),
-      thinking: value.thinkingLevel, autoRoute: value.autoRoute } : null;
-    if (alive.current && serial === configurationSerial.current) {
-      state.current.configuration = selected; setConfiguration(selected); setConfigurationLoaded(true);
-    }
-    return selected;
-  }, [projectRoot, agentId]);
-
+  // A completed external save wins over the previous offline dropdown draft.
+  useLayoutEffect(() => {
+    ++configurationSerial.current;
+    state.current.draft = null; setDraft(null);
+    setStartError(error => error?.stage === 'configuration_read' ? null : error);
+  }, [shared.change]);
   useEffect(() => {
-    let disposed = false;
-    let off: (() => void) | undefined;
-    void onLocalConfiguration(projectRoot, agentId, () => {
-      if (disposed) return;
-      const read = readConfiguration(true), serial = configurationSerial.current;
-      void read.then(() => {
-        if (!disposed && serial === configurationSerial.current) setStartError(current => current?.stage === 'configuration_read' ? null : current);
-      }).catch(error => {
-        if (!disposed && serial === configurationSerial.current) setStartError(controlled(error, 'configuration_read'));
-      });
-    }).then(unsubscribe => { if (disposed) unsubscribe(); else off = unsubscribe; }).catch(() => {});
-    return () => { disposed = true; off?.(); };
-  }, [projectRoot, agentId, readConfiguration]);
+    if (shared.error) setStartError(controlled(shared.error, 'configuration_read'));
+  }, [shared.error]);
+  const readConfiguration = useCallback(async (reload = false) => {
+    const serial = ++configurationSerial.current;
+    const selected = await shared.read(reload);
+    if (alive.current && serial === configurationSerial.current) state.current.configuration = selected;
+    return selected;
+  }, [shared.read]);
 
   const refresh = useCallback(async (reloadLocal = true) => {
     const serial = ++readSerial.current;
@@ -117,7 +104,7 @@ export function useLocalWorkbenchLaunch(options: Options) {
         elapsedMs: Date.now() - Date.parse(at), error: failure } : row));
     };
     // Each result updates immediately. Neither metadata query can hold up SHELL.
-    const configurationRead = read('configuration_read', readConfiguration, () => {});
+    const configurationRead = read('configuration_read', () => readConfiguration(reloadLocal), () => {});
     if (reloadLocal) { void local.auth.refresh(); void local.catalog.refresh(); }
     await configurationRead;
   }, [readConfiguration, local.auth.refresh, local.catalog.refresh]);
@@ -189,9 +176,9 @@ export function useLocalWorkbenchLaunch(options: Options) {
     ++configurationSerial.current;
     const selected: Saved = { provider: 'kota', id: 'auto', thinking: 'off', autoRoute };
     state.current.configuration = selected; state.current.draft = selected;
-    setConfiguration(selected); setDraft(selected); setConfigurationLoaded(true); setStartError(null);
+    setConfiguration(selected); setDraft(selected); setStartError(null);
     setDismissedAttempt(state.current.startup?.attemptId ?? null);
-  }, []);
+  }, [setConfiguration]);
   const saveAutoRoute = useCallback(async (autoRoute: AutoRouteGroup) => {
     if (operating.current || state.current.startup?.state === 'running') throw { code: 'local_busy' };
     const serial = configurationSerial.current;

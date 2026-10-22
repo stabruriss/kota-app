@@ -37,6 +37,8 @@ export interface LocalComposerInput {
   private: boolean;
   text: string;
   soulInput?: SoulInput;
+  /** A RouteModel id while the composer overrides the target's Auto String; omitted means Auto. */
+  routeModel?: string;
 }
 export interface LocalDiscovery {
   installed: boolean;

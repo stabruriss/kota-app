@@ -427,7 +427,7 @@ fn clear_heat_clears_an_episode_ledger_and_reports_nothing_to_clear() {
 #[test]
 fn project_slug_prefers_the_registered_id_and_hashes_the_root_otherwise() {
     let f = Fixture::new();
-    assert_eq!(project_slug(Some("stabruriss-kota"), Some(&f.root)).as_deref(), Some("stabruriss-kota"));
+    assert_eq!(project_slug(Some("cedar-project"), Some(&f.root)).as_deref(), Some("cedar-project"));
     assert_eq!(project_slug(Some("  "), None), None);
     let slug = project_slug(None, Some(&f.root)).unwrap();
     let name = f.root.file_name().unwrap().to_string_lossy().to_string();
@@ -735,4 +735,58 @@ fn concurrent_exports_of_one_incarnation_take_turns_and_pool_each_message_once()
     assert_eq!(moved, [0, 2]);
     let pool = read_jsonl::<episodes::Episode>(&paths.episodes()).unwrap();
     assert_eq!(pool.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["violet-u1", "violet-a1"]);
+}
+
+#[test]
+fn cli_env_reads_working_directory_identity_rejects_mismatch_and_falls_back() {
+    let f = Fixture::new();
+    let root = project(&f, "cedar-project");
+    let agent_cwd = root.join(".agent-workspaces/agent-one");
+    let worktree = agent_cwd.join("project-files");
+    let plain_dir = f.root.join("outside");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&plain_dir).unwrap();
+    let flags = std::collections::HashMap::from([
+        ("--kota-home".to_string(), f.home().display().to_string()),
+    ]);
+
+    // 1) Directory matches environment -> resolves agent-one in project-fixture from agent.yaml + workspace.json.
+    let matching = std::collections::HashMap::from([
+        ("KOTA_AGENT_ID", "agent-one".to_string()),
+        ("KOTA_PROJECT_ID", "project-fixture".to_string()),
+        ("KOTA_AGENT_CWD", agent_cwd.display().to_string()),
+    ]);
+    let mut env = Env::from_process_with(&flags, Some(&worktree), |k| matching.get(k).cloned()).unwrap();
+    env.jev_ready = Some(false);
+    assert_eq!(env.agent_id, "agent-one");
+    assert_eq!(env.agent_cwd, agent_cwd);
+    assert_eq!(env.project.as_deref(), Some("project-fixture"));
+    let out = cli::run(&["add-mark".into(), "Verify directory identity.".into()], &env, "", T1).unwrap();
+    assert!(out.starts_with("Added m-20261014-"), "{out}");
+    assert_eq!(marks::read(&SoulPaths::new(&agent_cwd)).unwrap().marks.len(), 1);
+
+    // 2) Directory vs environment mismatch -> rejected with exact copy.
+    let mismatched = std::collections::HashMap::from([
+        ("KOTA_AGENT_ID", "agent-maple".to_string()),
+        ("KOTA_PROJECT_ID", "maple-project".to_string()),
+    ]);
+    let err = Env::from_process_with(&flags, Some(&worktree), |k| mismatched.get(k).cloned())
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        err,
+        "identity mismatch: environment says agent-maple@maple-project, working directory says agent-one@project-fixture"
+    );
+
+    // 3) No directory evidence -> falls back to environment variables.
+    let fallback_map = std::collections::HashMap::from([
+        ("KOTA_AGENT_CWD", f.agent().display().to_string()),
+        ("KOTA_AGENT_ID", "agent-maple".to_string()),
+        ("KOTA_PROJECT_ID", "maple-project".to_string()),
+    ]);
+    let fallback = Env::from_process_with(&flags, Some(&plain_dir), |k| fallback_map.get(k).cloned()).unwrap();
+    assert_eq!(fallback.agent_id, "agent-maple");
+    assert_eq!(fallback.agent_cwd, f.agent());
+    assert_eq!(fallback.project.as_deref(), Some("maple-project"));
 }

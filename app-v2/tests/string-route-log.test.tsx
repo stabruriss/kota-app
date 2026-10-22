@@ -21,6 +21,13 @@ it.each(['retained','default'] as const)('keeps the %s model distinct from the u
   event.outcome=outcome; event.candidate={routeModel:'model-2',provider:'google',model:'gemini-pro',probability:.72};
   expect(stringEventText(event)).toBe(`openai/gpt-6-astra[high] ${outcome} • Candidate google/gemini-pro 0.72 ≤ 0.85`);
 });
+it('renders user overwrite without manufacturing a Jev probability', () => {
+  const event = selection(); if (event.kind !== 'selection') throw Error('fixture');
+  event.outcome='manual'; event.candidate={routeModel:'model-1',provider:'openai',model:'gpt-6-astra',probability:1};
+  render(<StringRouteLog events={[event]} jevStatus="Configured" />);
+  expect(screen.getByText('openai/gpt-6-astra[high] overwrite by user')).toBeVisible();
+  expect(screen.queryByText(/Certainty|Candidate|1.00|≤/)).not.toBeInTheDocument();
+});
 it('preserves server newest-first order, duplicate real failures, complete error text and original timestamps', () => {
   const events = [failure(3,'Connection error.\nProvider details'),failure(2),{id:1,kind:'jev_error',code:'jev_auth',message:'Jev authentication failed.'} as StringRouteEvent];
   const original = structuredClone(events);

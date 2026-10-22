@@ -2476,24 +2476,43 @@ fn schedule_interpretation(schedule: &EmberSchedule) -> String {
 }
 
 fn cli_project_root(args: &[String]) -> Result<PathBuf> {
-    let mut project_root = std::env::var("KOTA_PROJECT_ROOT").ok();
+    cli_project_root_with(args, std::env::current_dir().ok().as_deref(), |key| {
+        std::env::var(key).ok()
+    })
+}
+
+fn cli_project_root_with(
+    args: &[String],
+    cwd: Option<&Path>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<PathBuf> {
+    let mut flag_project_root = None;
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--project-root" {
             i += 1;
-            project_root = args.get(i).cloned();
+            flag_project_root = args.get(i).cloned();
             i += 1;
             continue;
         }
         i += 1;
     }
-    project_root
-        .map(PathBuf::from)
+    let flag_project_root = flag_project_root
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(dir) = crate::cli_identity::resolve(cwd, &env)? {
+        return Ok(flag_project_root
+            .map(PathBuf::from)
+            .unwrap_or(dir.project_root));
+    }
+    flag_project_root
         .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(find_project_root_from)
+            env("KOTA_PROJECT_ROOT")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
         })
+        .map(PathBuf::from)
+        .or_else(|| cwd.map(Path::to_path_buf).and_then(find_project_root_from))
         .ok_or_else(|| anyhow!("kota-ember requires KOTA_PROJECT_ROOT or --project-root"))
 }
 
@@ -3987,6 +4006,58 @@ mod tests {
             outcome.partial_error().as_deref(),
             Some("Some targets failed: Agent Two: unavailable")
         );
+    }
+
+    #[test]
+    fn cli_project_root_uses_working_directory_identity_rejects_mismatch_and_falls_back() {
+        let root = std::env::temp_dir().join(format!("kota-ember-id-{}", Uuid::new_v4().simple()));
+        let project = root.join("cedar-project");
+        let agent_cwd = project.join(".agent-workspaces/agent-birch");
+        let worktree = agent_cwd.join("project-files");
+        let plain_dir = root.join("outside");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&plain_dir).unwrap();
+        fs::write(
+            project.join("workspace.json"),
+            r#"{"projectId":"cedar-project"}"#,
+        )
+        .unwrap();
+        fs::write(
+            agent_cwd.join("agent.yaml"),
+            "id: agent-birch\ndisplay-name: Birch\nstatus: active\n",
+        )
+        .unwrap();
+
+        // 1) Directory matches environment -> resolves project_root from ancestor workspace.json.
+        let matching = std::collections::HashMap::from([
+            ("KOTA_AGENT_ID", "agent-birch".to_string()),
+            ("KOTA_PROJECT_ID", "cedar-project".to_string()),
+            ("KOTA_AGENT_CWD", agent_cwd.display().to_string()),
+        ]);
+        let resolved =
+            cli_project_root_with(&[], Some(&worktree), |k| matching.get(k).cloned()).unwrap();
+        assert_eq!(resolved, project);
+
+        // 2) Directory vs environment mismatch -> rejected with exact copy.
+        let mismatched = std::collections::HashMap::from([
+            ("KOTA_AGENT_ID", "agent-maple".to_string()),
+            ("KOTA_PROJECT_ID", "maple-project".to_string()),
+            ("KOTA_PROJECT_ROOT", root.join("maple-project").display().to_string()),
+        ]);
+        let err = cli_project_root_with(&[], Some(&worktree), |k| mismatched.get(k).cloned())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "identity mismatch: environment says agent-maple@maple-project, working directory says agent-birch@cedar-project"
+        );
+
+        // 3) No directory evidence -> falls back to KOTA_PROJECT_ROOT.
+        let fallback =
+            cli_project_root_with(&[], Some(&plain_dir), |k| mismatched.get(k).cloned()).unwrap();
+        assert_eq!(fallback, root.join("maple-project"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

@@ -1,0 +1,37 @@
+.github-dialog-layer { position:fixed; z-index:24000; padding:24px; overscroll-behavior:contain; }
+.github-dialog-layer .kota-confirm-card { width:min(580px,100%); max-height:calc(100dvh - 48px); overflow:auto; overscroll-behavior:contain; color:var(--text); }
+.github-dialog-head { display:flex; align-items:start; justify-content:space-between; gap:16px; margin-bottom:18px; }
+.github-dialog-head h2 { margin:0; }
+.github-dialog-head>button { flex-shrink:0; border:0; background:transparent; color:var(--text-3); font:22px/1 var(--font-sans); cursor:pointer; padding:0 4px; }
+.github-dialog-head>button:disabled { opacity:.45; cursor:default; }
+.github-dialog-layer p { margin:10px 0; font:12px/1.7 var(--font-sans); color:var(--text-2); }
+.github-confirm-transition { display:grid; gap:12px; padding:14px 16px; margin:18px 0; background:var(--bg-panel); border:1px solid var(--border); border-radius:8px; font:12px/1.6 var(--font-sans); }
+.github-confirm-transition>div { display:grid; grid-template-columns:42px 1fr; gap:12px; }
+.github-confirm-transition dt { color:var(--text-3); }
+.github-confirm-transition dd { margin:0; white-space:pre-line; overflow-wrap:anywhere; }
+.github-dialog-layer .github-confirm-warning { border-left:2px solid var(--brass-hi); padding:8px 12px; background:var(--bg-panel); color:var(--text); }
+.github-dialog-layer .github-dialog-error { color:var(--danger); overflow-wrap:anywhere; }
+.github-connect-form { display:flex; flex-direction:column; gap:16px; }
+.github-connect-form label { display:flex; flex-direction:column; gap:7px; color:var(--text-2); font:12px/1.6 var(--font-sans); }
+.github-connect-form input:not([type=checkbox]),.github-connect-form select { min-width:0; width:100%; box-sizing:border-box; background:var(--bg-panel); color:var(--text); border:1px solid var(--border-hi); border-radius:6px; padding:9px 10px; font:12px var(--font-sans); }
+.github-connect-form .github-private { flex-direction:row; align-items:center; }
+.github-connect-modes { display:flex; gap:4px; padding:4px; border:1px solid var(--border); border-radius:8px; }
+.github-connect-modes button { flex:1; border:0; border-radius:4px; background:transparent; color:var(--text-3); font:12px var(--font-sans); padding:8px; cursor:pointer; }
+.github-connect-modes button[aria-pressed=true] { background:var(--bg-elevated); color:var(--text); box-shadow:0 1px 4px #0005; }
+.github-repo-check { padding:14px; border:1px solid var(--border); border-left:2px solid var(--brass-hi); border-radius:6px; background:var(--bg-panel); font:12px/1.6 var(--font-sans); }
+.github-repo-check[data-state=check_failed],.github-repo-check[data-state=blocked_large_file] { border-left-color:var(--danger); }
+.github-repo-check p { margin:6px 0 0; }
+.github-repo-check ul { margin:12px 0 0; padding-left:20px; }
+.github-repo-check li { overflow-wrap:anywhere; }
+.github-connect-account { display:flex; align-items:end; gap:10px; }
+.github-connect-account label { flex:1; min-width:0; }
+.github-connect-account>button,.github-repo-check>button,.github-dialog-error>button,.project-account-issue .github-sign-in>button { color:var(--text-2); background:transparent; border:1px solid var(--border-hi); border-radius:5px; padding:8px; font:11px var(--font-sans); cursor:pointer; }
+.github-dialog-error>button { display:block; margin-top:8px; }
+.project-account-issue .github-sign-in>button:disabled { opacity:.45; cursor:default; }
+.project-connection-notice { position:relative; margin-top:12px; padding:12px 28px 12px 12px; background:var(--bg-panel); border-left:2px solid var(--brass-hi); font:11px/1.6 var(--font-sans); color:var(--text-2); }
+.project-connection-notice button { position:absolute; right:8px; top:8px; background:transparent; border:0; color:var(--text-3); cursor:pointer; }
+.project-connection-action { margin-top:8px; }
+.project-account-issue { margin-top:12px; padding:12px; border:1px solid var(--border); border-radius:6px; font:11px/1.6 var(--font-sans); color:var(--text-2); }
+.project-account-issue p { margin:6px 0 10px; }
+.gh-pill.project-connection-pill { cursor:pointer; }
+@media(max-width:600px) { .github-dialog-layer { padding:12px; } .github-dialog-layer .kota-confirm-card { max-height:calc(100dvh - 24px); } .github-confirm-transition>div { grid-template-columns:32px 1fr; } }

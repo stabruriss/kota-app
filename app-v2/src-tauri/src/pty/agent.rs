@@ -199,6 +199,11 @@ fn ensure_default_runtime_args(cli: AgentCli, args: &mut Vec<String>) {
             ) {
                 args.push("--dangerously-bypass-approvals-and-sandbox".into());
             }
+            // A shared daemon retains its launcher's identity and credentials.
+            // Keep interactive sessions (including resume/fork) in this agent's process.
+            if !codex_args_request_subcommand(args) && !args.iter().any(|arg| arg == "--no-daemon") {
+                args.push("--no-daemon".into());
+            }
         }
         AgentCli::Antigravity => {
             if !args
@@ -858,6 +863,7 @@ fn codex_args_request_session(args: &[String]) -> bool {
 
 fn codex_args_request_subcommand(args: &[String]) -> bool {
     const COMMANDS: &[&str] = &[
+        "agents",
         "exec",
         "e",
         "review",
@@ -871,10 +877,16 @@ fn codex_args_request_subcommand(args: &[String]) -> bool {
         "app",
         "completion",
         "update",
+        "doctor",
         "sandbox",
         "debug",
         "apply",
         "a",
+        "queue",
+        "archive",
+        "delete",
+        "migrate-rollouts",
+        "unarchive",
         "cloud",
         "exec-server",
         "features",
@@ -2286,12 +2298,12 @@ impl AgentTerminalPty {
         }
         if let Some(project_id) = self.inner.project_id.as_deref() {
             cmd.env("KOTA_PROJECT_ID", project_id);
-            cmd.env(
-                "KOTA_PROJECT_DISPLAY_NAME",
-                crate::bbs::display_project_name_with_fallback(project_id, None),
-            );
+            for (key, value) in crate::integrations::agent_project_env(&self.inner.project_root, project_id) {
+                cmd.env(key, value);
+            }
         }
-        if let Some(project_remote) = self.inner.project_remote.as_deref() {
+        // A local project has no remote; an empty value would read as one.
+        if let Some(project_remote) = self.inner.project_remote.as_deref().filter(|remote| !remote.is_empty()) {
             cmd.env("KOTA_PROJECT_REMOTE", project_remote);
         }
         if let Some(project_base_ref) = self.inner.project_base_ref.as_deref() {
@@ -2930,14 +2942,18 @@ fn apply_agent_git_identity(
     project_root: &Path,
     agent_id: &str,
 ) {
-    let default_email = format!("{agent_id}@kota.local");
+    let (name, default_email) = agent_placeholder_identity(agent_id);
     let email = crate::project_settings::runtime_commit_email(project_root, &default_email)
         .unwrap_or(default_email);
-    let name = format!("{agent_id} (Agent)");
     cmd.env("GIT_AUTHOR_EMAIL", &email);
     cmd.env("GIT_COMMITTER_EMAIL", &email);
     cmd.env("GIT_AUTHOR_NAME", &name);
     cmd.env("GIT_COMMITTER_NAME", &name);
+}
+
+/// The "agent dummy email" identity Project Settings promises when no commit email is set.
+pub(crate) fn agent_placeholder_identity(agent_id: &str) -> (String, String) {
+    (format!("{agent_id} (Agent)"), format!("{agent_id}@kota.local"))
 }
 
 pub(crate) fn local_rpc_inherits_environment(key: &str) -> bool { should_inherit_agent_spawn_env(key) }
@@ -2962,6 +2978,11 @@ fn should_inherit_agent_spawn_env(key: &str) -> bool {
         return false;
     }
     if key == "KIMI_SESSION_ID" || key == "KIMI_WORK_DIR" {
+        return false;
+    }
+    // Kota sets GH_TOKEN per project; an exported GITHUB_TOKEN would hand tools
+    // that read it some other account.
+    if key == "GITHUB_TOKEN" {
         return false;
     }
     true
@@ -3434,6 +3455,17 @@ mod tests {
     }
 
     #[test]
+    fn codex_spawn_args_new_session_disables_shared_daemon() {
+        assert_eq!(
+            args_for_spawn(AgentCli::Codex, &[], Path::new("/tmp/agent-cwd"), None),
+            vec![
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--no-daemon".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn codex_spawn_args_resume_exact_session() {
         assert_eq!(
             args_for_spawn(
@@ -3445,9 +3477,77 @@ mod tests {
             vec![
                 "resume".to_string(),
                 "codex-session-1".to_string(),
-                "--ask-for-approval=never".to_string()
+                "--ask-for-approval=never".to_string(),
+                "--no-daemon".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn codex_spawn_args_explicit_session_disables_shared_daemon() {
+        for command in ["resume", "fork"] {
+            let args = vec![
+                command.to_string(),
+                "manual-session".to_string(),
+                "--ask-for-approval=never".to_string(),
+            ];
+            let mut expected = args.clone();
+            expected.push("--no-daemon".to_string());
+            assert_eq!(
+                args_for_spawn(
+                    AgentCli::Codex,
+                    &args,
+                    Path::new("/tmp/agent-cwd"),
+                    Some("saved-session"),
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn codex_spawn_args_preserve_existing_no_daemon_without_duplication() {
+        let args = vec!["--no-daemon".to_string(), "--sandbox=read-only".to_string()];
+        for session in [None, Some("saved-session")] {
+            let mut expected = Vec::new();
+            if let Some(id) = session {
+                expected.extend(["resume".to_string(), id.to_string()]);
+            }
+            expected.extend(args.clone());
+            assert_eq!(
+                args_for_spawn(AgentCli::Codex, &args, Path::new("/tmp/agent-cwd"), session),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn codex_spawn_args_noninteractive_commands_do_not_get_tui_args() {
+        for command in [
+            vec!["exec", "synthetic prompt"],
+            vec!["e", "synthetic prompt"],
+            vec!["exec", "resume", "saved-session"],
+            vec!["review"],
+            vec!["queue", "saved-session", "synthetic prompt"],
+            vec!["agents"],
+            vec!["app-server"],
+            vec!["doctor"],
+            vec!["archive", "saved-session"],
+            vec!["delete", "saved-session"],
+            vec!["migrate-rollouts"],
+            vec!["unarchive", "saved-session"],
+        ] {
+            // Leading global options must not turn a subcommand into a TUI.
+            let mut args = vec!["--config".to_string(), "model=\"synthetic\"".to_string()];
+            args.extend(command.into_iter().map(str::to_string));
+            args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+            for session in [None, Some("automatic-session")] {
+                assert_eq!(
+                    args_for_spawn(AgentCli::Codex, &args, Path::new("/tmp/agent-cwd"), session),
+                    args
+                );
+            }
+        }
     }
 
     #[test]
@@ -3753,7 +3853,8 @@ mod tests {
             vec![
                 "resume".to_string(),
                 "codex-session-1".to_string(),
-                "--ask-for-approval=never".to_string()
+                "--ask-for-approval=never".to_string(),
+                "--no-daemon".to_string()
             ]
         );
     }
@@ -3791,7 +3892,8 @@ mod tests {
             vec![
                 "--model".to_string(),
                 "gpt-5.5".to_string(),
-                "--dangerously-bypass-approvals-and-sandbox".to_string()
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--no-daemon".to_string()
             ]
         );
     }

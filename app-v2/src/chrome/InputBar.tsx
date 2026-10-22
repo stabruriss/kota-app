@@ -34,6 +34,8 @@ export interface InputBarProps {
   onChange: (next: string) => void;
   variant?: 'room' | 'embedded';
   footerSlot?: ReactNode;
+  modelControls?: ReactNode;
+  getRouteModel?: () => string | undefined;
   disabled?: boolean;
   placeholder?: string;
   captainId?: AgentId;
@@ -61,6 +63,7 @@ export interface InputBarProps {
       privacy: boolean;
       mentions?: ComposerMention[];
       dance?: DanceComposerDraft;
+      routeModel?: string;
       eligibilityText?: string;
       onAccepted?: () => void;
     },
@@ -535,6 +538,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onChange,
   variant = 'room',
   footerSlot,
+  modelControls,
+  getRouteModel,
   disabled = false,
   placeholder,
   captainId,
@@ -908,6 +913,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
         privacy: boolean;
         mentions?: ComposerMention[];
         dance?: DanceComposerDraft;
+        routeModel?: string;
         eligibilityText?: string;
         onAccepted?: () => void;
       } = {
@@ -917,6 +923,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
         eligibilityText: editorPlainText(fieldRef.current, false).trimEnd(),
         onAccepted: accept,
       };
+      const routeModel = !broadcastMode && !danceMode ? getRouteModel?.() : undefined;
+      if (routeModel) options.routeModel = routeModel;
       if (mentions.length > 0) options.mentions = mentions;
       if (danceMode) options.dance = { text: editorPlainText(fieldRef.current).trimEnd(), attachments: Array.from(fieldRef.current?.querySelectorAll<HTMLElement>(ATTACHMENT_SELECTOR) ?? [])
         .filter(chip => !!chip.dataset.path && chip.dataset.kind !== 'prompt').map(chip => ({ name: chip.dataset.name || basename(chip.dataset.path!), path: chip.dataset.path! })) };
@@ -1188,6 +1196,8 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             })}
           </div>
         )}
+        <div className={modelControls ? "ib-model-footer with-models" : "ib-model-footer"}>
+        {modelControls}
         <div className="ib-toolbar">
           <div className="ib-toolbar-left">
             <button
@@ -1276,6 +1286,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
             {sendLabel}
           </button>
           )}
+        </div>
         </div>
         {footerSlot && <div className="ib-footer-slot">{footerSlot}</div>}
       </div>

@@ -28,7 +28,7 @@ import { VioletRoomPanel, trimVioletRoomHistoryCache, type VioletComposerRetryRe
 import { VioletRoomSearch } from './VioletRoomSearch';
 import { ProjectRulesMedal } from './ProjectRulesMedal';
 import { ProjectSettings } from './ProjectSettings';
-import type { ProjectAgentCommendSource, ProjectAgentRecord } from '../pty-client';
+import type { ProjectAgentCommendSource, ProjectAgentRecord, WorkspaceProject } from '../pty-client';
 import { avatarClassForAgentFallback, avatarImageStyleForId } from '../lib/hero-avatars';
 import { useFileTreeAgentHover } from '../lib/file-tree-agent-hover';
 import { MAX_AGENT_SLOTS } from '../lib/agent-slots';
@@ -317,6 +317,7 @@ export interface StageProps {
   agentRecords?: Readonly<Record<AgentId, ProjectAgentRecord>>;
   projectName?: string | null;
   projectId?: string;
+  workspace?: WorkspaceProject | null;
   onIncarnateHero?: (hero: WorkingHero, seatIndex?: number) => void;
   onOpenAgentAdd?: () => void;
   onOpenAgentSlotAdd?: (seatIndex: number) => void;
@@ -391,6 +392,7 @@ export function Stage({
   agentRecords,
   projectName,
   projectId,
+  workspace,
   onIncarnateHero,
   onOpenAgentAdd,
   onOpenAgentSlotAdd,
@@ -730,7 +732,7 @@ export function Stage({
             onChangeDeskTheme={onChangeDeskTheme}
             onChangeCenter={onChangeCenter}
           />
-          {projectId && <ProjectSettings key={projectId} projectId={projectId} projectName={projectName ?? projectId} />}
+          {projectId && <ProjectSettings key={projectId} projectId={projectId} projectName={projectName ?? projectId} workspace={workspace} />}
           {privacyControlsEnabled && (
             <div ref={privacyWrapRef} className="privacy-drawer">
               <button

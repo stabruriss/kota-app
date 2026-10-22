@@ -31,6 +31,17 @@ test('all seven sources preserve original content and routing metadata', () => {
   }
 });
 
+test('a composer routeModel is an optional ID-shaped detail and survives parsing unchanged', () => {
+  const input = envelope('msg-route');
+  input.details.routeModel = 'model-2';
+  assert.deepEqual(parseInjection(JSON.stringify(input)), input);
+  for (const routeModel of [2, '', 'model 2', 'm'.repeat(129)]) {
+    const bad = envelope('msg-route');
+    bad.details.routeModel = routeModel;
+    assert.match(errorFor(bad), /code=invalid-details$/);
+  }
+});
+
 test('accepts structured text/image content without rewriting it', () => {
   const input = envelope('msg-blocks', 'kota.user', [
     { type: 'text', text: ' do not trim ' },

@@ -390,6 +390,19 @@ fn sixth_model_facts_are_kept_but_a_seventh_model_is_rejected() {
     assert!(matches!(&route.events[0].data, RouteEventData::ModelError { model, .. } if model == "sixth"));
 }
 #[test]
+fn a_manual_selection_is_kept_like_a_jev_selection_and_unknown_outcomes_are_not() {
+    let mut view = Workbench::default();
+    let mut s = snapshot(); s.model = Some(json!({"provider":"kota","id":"auto"}));
+    let selection = |outcome: &str| json!({"schema":1,"event":"selection","outcome":outcome,
+        "selected":{"provider":"fable","model":"second","thinkingLevel":"high"},
+        "candidate":{"routeModel":"model-2","provider":"fable","model":"second","probability":1},"threshold":0.85});
+    view.route_fact(&selection("manual"));
+    view.route_fact(&selection("guessed"));
+    let route = view.read(s, None).auto_route.unwrap();
+    assert_eq!(route.events.len(), 1);
+    assert!(matches!(&route.events[0].data, RouteEventData::Selection { outcome, .. } if outcome == "manual"));
+}
+#[test]
 fn prompt_fallback_is_a_bounded_workbench_notice_not_a_routing_error_and_recovers() {
     let mut view = Workbench::default();
     let mut auto = snapshot(); auto.model = Some(json!({"provider":"kota","id":"auto"}));

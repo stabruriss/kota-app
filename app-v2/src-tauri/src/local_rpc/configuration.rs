@@ -17,16 +17,33 @@ impl LaunchCheck {
 
 pub(crate) fn agent_cwd(app: &tauri::AppHandle, root: &Path, agent: &str) -> LocalResult<PathBuf> {
     use tauri::Manager;
+    let manager = app.state::<crate::integrations::IntegrationManager>();
+    let active = manager.workspace_status().active;
+    agent_cwd_with(root, agent, active.as_ref(),
+        || manager.list_workspaces().map_err(|_| LocalError::new("invalid_request")))
+}
+
+/// The requested project must be registered and not archived; the displayed project is
+/// accepted first, without listing the others, and keeps the exact directory the
+/// incarnation context gave it. Any other registered project resolves to its own agent
+/// directory, as `resolve_shell_context` does for an undisplayed root, so Ember, the bus,
+/// BBS, Telegram and Bartender can cold-start a Local agent in a room that is not on screen.
+pub(crate) fn agent_cwd_with(root: &Path, agent: &str, active: Option<&crate::integrations::WorkspaceProject>,
+    list_workspaces: impl FnOnce() -> LocalResult<Vec<crate::integrations::WorkspaceProject>>) -> LocalResult<PathBuf> {
     if !root.is_absolute() || agent.is_empty() || agent.len() > 128
         || !agent.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
         return Err(LocalError::new("invalid_request"));
     }
-    let context = crate::resolve_incarnation_context(&app.state::<crate::integrations::IntegrationManager>(),
-        root.to_str(), agent).map_err(|_| LocalError::new("invalid_request"))?;
-    if root.canonicalize().ok().filter(|p| Some(p) == context.project_root.canonicalize().ok().as_ref()).is_none() {
+    let requested = root.canonicalize().map_err(|_| LocalError::new("invalid_request"))?;
+    let matches = |workspace: &crate::integrations::WorkspaceProject| !workspace.archived
+        && Path::new(&workspace.local_root).canonicalize().ok().as_ref() == Some(&requested);
+    if let Some(workspace) = active.filter(|workspace| matches(workspace)) {
+        return Ok(PathBuf::from(&workspace.local_root).join(".agent-workspaces").join(agent));
+    }
+    if !list_workspaces()?.iter().any(|workspace| matches(workspace)) {
         return Err(LocalError::new("invalid_request"));
     }
-    Ok(context.cwd)
+    Ok(requested.join(".agent-workspaces").join(agent))
 }
 
 pub(crate) fn emit_change(app: &tauri::AppHandle, root: &Path, agent: &str, revision: &str) {

@@ -138,6 +138,9 @@ pub(crate) struct InjectionDetails {
     pub source_actor_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_intent: Option<String>,
+    /// The composer's String override: a RouteModel id of the target's group, read by kota-ext's router.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_model: Option<String>,
 }
 
 pub(super) fn valid_id(value: &str, max: usize) -> bool {
@@ -158,7 +161,7 @@ impl Injection {
             content: Value::String(content),
             details: InjectionDetails {
                 schema: 1, message_id: message_id.into(), target_agent_id: target.into(), created_at, private,
-                source_actor_id: source.map(|s| s.0.into()), source_intent: source.map(|s| s.1.into()),
+                source_actor_id: source.map(|s| s.0.into()), source_intent: source.map(|s| s.1.into()), route_model: None,
             },
         }
     }
@@ -168,6 +171,7 @@ impl Injection {
         if d.schema != 1 || !valid_id(&d.message_id, 256) || !valid_id(&d.target_agent_id, 128)
             || d.target_agent_id != target || self.kota_id != format!("{}#{}", d.message_id, target)
             || chrono::DateTime::parse_from_rfc3339(&d.created_at).is_err()
+            || d.route_model.as_deref().is_some_and(|m| !valid_id(m, 128))
             || !known_custom_type(&self.custom_type) {
             bail!("invalid Local injection identity or source");
         }
@@ -271,7 +275,7 @@ pub(super) fn fixture(id: &str) -> Injection {
         content: Value::String("Original text\n  stays intact.".into()),
         details: InjectionDetails { schema: 1, message_id: id.into(),
             target_agent_id: "agent-fable-copper".into(), created_at: "2026-10-02T00:00:00Z".into(),
-            private: false, source_actor_id: None, source_intent: None },
+            private: false, source_actor_id: None, source_intent: None, route_model: None },
     }
 }
 
@@ -308,5 +312,25 @@ mod tests {
         event["extensionPath"] = json!("<runtime>/send_message");
         assert_eq!(rejection(&event, &input.kota_id), None);
         assert!(custom_receipt(&json!({"role":"custom","customType":"untrusted","details":{"kotaId":input.kota_id}})).is_none());
+    }
+
+    #[test]
+    fn a_composer_route_model_round_trips_is_validated_and_keeps_receipts_parsing() {
+        let mut input = fixture("msg-route");
+        input.details.route_model = Some("model-2".into());
+        input.validate("agent-fable-copper").unwrap();
+        let decoded: Injection = serde_json::from_str(input.prompt().unwrap().strip_prefix("/kota-inject ").unwrap()).unwrap();
+        assert_eq!(decoded, input);
+        // Pi stores the details plus kotaId; delivery receipts must still parse them.
+        let mut details = serde_json::to_value(&input.details).unwrap();
+        details["kotaId"] = json!(input.kota_id);
+        let receipt = custom_receipt(&json!({"type":"custom_message","customType":"kota.user","details":details})).unwrap();
+        assert_eq!(receipt.details.route_model.as_deref(), Some("model-2"));
+        assert!(!serde_json::to_string(&fixture("msg-plain")).unwrap().contains("routeModel"));
+        let long = "m".repeat(129);
+        for bad in ["", "model 2", long.as_str()] {
+            input.details.route_model = Some(bad.into());
+            assert!(input.validate("agent-fable-copper").is_err(), "{bad}");
+        }
     }
 }

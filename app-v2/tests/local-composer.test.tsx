@@ -10,6 +10,7 @@ import * as core from '@tauri-apps/api/core';
 import * as danceApi from '../src/lib/puppeteer-dance';
 import * as jev from '../src/lib/jev';
 import type { AgentCli } from '../src/types/agent-pty';
+import type { AutoRouteGroup } from '../src/lib/string-routing';
 import { formatAgentPromptInput } from '../src/lib/agent-prompt';
 import { __clearVioletComposerSentHistoryForTests, emitVioletComposerSent, violetComposerSentHistory } from '../src/chrome/violet-room-events';
 
@@ -58,7 +59,7 @@ beforeEach(() => { vi.restoreAllMocks(); window.localStorage.clear(); __clearVio
 });
 afterEach(() => vi.restoreAllMocks());
 
-async function mount(ids = [localId], extraWorkspaces: pty.WorkspaceProject[] = []) {
+async function mount(ids = [localId], extraWorkspaces: pty.WorkspaceProject[] = [], modelConfig: { model: string; thinkingLevel: string; autoRoute?: AutoRouteGroup } = { model: 'fixture/base', thinkingLevel: 'off' }) {
   const workspace: pty.WorkspaceProject = { projectId: 'fixture-local-composer', repoFullName: 'mock/fixture-local-composer',
     remoteUrl: 'https://example.invalid/fixture.git', githubHtmlUrl: 'https://example.invalid/fixture', defaultBranch: 'main', baseRef: 'HEAD',
     localRoot: root, localRootBytes: 0, sourceDir: `${root}/source`, sourceDirBytes: 0,
@@ -82,7 +83,7 @@ async function mount(ids = [localId], extraWorkspaces: pty.WorkspaceProject[] = 
   vi.spyOn(local, 'checkLocalLaunch').mockResolvedValue({ status: 'ok' });
   vi.spyOn(startup,'onLocalStartup').mockImplementation(async (_agent,callback) => {startupListeners.add(callback);return () => {startupListeners.delete(callback);};});
   vi.spyOn(startup,'localLaunchAction').mockImplementation(async (_root,_agent,action) => {
-    if(action === 'configuration') return {model:'fixture/base',thinkingLevel:'off'} as never;
+    if(action === 'configuration') return structuredClone(modelConfig) as never;
     if(action === 'begin') {
       const reused = startupView?.state === 'running';
       if(!reused) startupView = {projectRoot:root,agentId:localId,attemptId:crypto.randomUUID(),revision:1,state:'running',selection:null,saved:false,error:null,
@@ -923,4 +924,32 @@ it('uses normal Local sending from an offline workbench without the terminal Wak
   expect(screen.queryByRole('dialog', { name: 'Wake sleeping agent?' })).not.toBeInTheDocument();
   expect(spawn).not.toHaveBeenCalled(); expect(terminalSubmit).not.toHaveBeenCalled();
   expect(violetComposerSentHistory(root)).toHaveLength(2);
+});
+
+
+it('wires composer overrides through Local submit and takeover, keeps them sticky, and omits them again on Auto', async () => {
+  const autoRoute: AutoRouteGroup = { threshold: .5, defaultModel: 'model-1', models: [
+    { id: 'model-1', providerId: 'fixture', modelId: 'base', thinkingLevel: 'off', intent: 'One' },
+    { id: 'model-2', providerId: 'fixture', modelId: 'other', thinkingLevel: 'high', intent: 'Two' },
+  ] };
+  const { submit, spawn } = await mount([localId, terminalId], [], { model: 'kota/auto', thinkingLevel: 'off', autoRoute });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Auto String routing: Auto' })).toBeEnabled());
+  fireEvent.pointerEnter(screen.getByRole('button', { name: 'Auto String routing: Auto' }));
+  await userEvent.click(screen.getByRole('menuitemradio', { name: 'fixture / other • high' }));
+  submit.mockRejectedValueOnce(new pty.AgentSessionLeaseConflictError(conflict));
+  spawn.mockRejectedValueOnce(new pty.AgentSessionLeaseConflictError(conflict));
+  await send('Manual takeover');
+  const dialog = await screen.findByRole('dialog', { name: 'Copper is running in another window' });
+  expect(submit.mock.calls[0][0]).toMatchObject({ agentId: localId, routeModel: 'model-2', text: 'Manual takeover' });
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Yes, takeover here.' }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
+  expect(submit.mock.calls[1][0]).toEqual(submit.mock.calls[0][0]);
+  await send('Still manual'); await waitFor(() => expect(submit).toHaveBeenCalledTimes(3));
+  expect(submit.mock.calls[2][0].routeModel).toBe('model-2');
+  fireEvent.pointerEnter(screen.getByRole('button', { name: 'Manual model: other • high' }));
+  await userEvent.click(screen.getByRole('menuitemradio', { name: 'Auto' }));
+  await send('Automatic again'); await waitFor(() => expect(submit).toHaveBeenCalledTimes(4));
+  expect(submit.mock.calls[3][0]).not.toHaveProperty('routeModel');
+  await userEvent.click(screen.getByTestId(`chip-${terminalId}`));
+  await waitFor(() => expect(screen.queryByTestId('composer-model-controls')).not.toBeInTheDocument());
 });

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { TavernModal } from '../src/chrome/TavernModal';
@@ -21,12 +21,25 @@ afterEach(() => {
 });
 
 it('opens the GitHub CLI install page in the system browser, never with window.open', async () => {
+  const accounts: pty.GithubAccounts = { defaultLogin: null, accounts: [] };
+  vi.spyOn(pty, 'githubAccountsRead').mockResolvedValue(accounts);
   vi.spyOn(pty, 'ghAuthStatus').mockResolvedValue(cliMissing);
+  const beginSignIn = vi.spyOn(pty, 'githubAccountAddBegin').mockResolvedValue(null);
+  const finishSignIn = vi.spyOn(pty, 'githubAccountAddFinish').mockResolvedValue({
+    added: [], active: null, restoreFailed: false, view: accounts,
+  });
   const openExternal = vi.spyOn(pty, 'openExternalUrl').mockResolvedValue(undefined);
   const windowOpen = vi.spyOn(window, 'open').mockImplementation(() => null);
-  render(<TavernModal open onClose={() => {}} initialTab="link" initialGhAuth={cliMissing} />);
-  await userEvent.click(await screen.findByRole('button', { name: 'Install GitHub CLI' }));
-  await waitFor(() => expect(openExternal).toHaveBeenCalledTimes(1));
+  render(<TavernModal open onClose={() => {}} initialTab="link" />);
+  const card = screen.getByRole('region', { name: 'GitHub accounts' });
+  await within(card).findByText('No GitHub accounts yet.');
+  await userEvent.click(within(card).getByRole('button', { name: '+ New' }));
+  await waitFor(() => {
+    expect(openExternal).toHaveBeenCalledTimes(1);
+    expect(card).toHaveAttribute('aria-busy', 'false');
+  });
   expect(openExternal).toHaveBeenCalledWith(pty.GITHUB_CLI_INSTALL_URL);
   expect(windowOpen).not.toHaveBeenCalled();
+  expect(beginSignIn).not.toHaveBeenCalled();
+  expect(finishSignIn).not.toHaveBeenCalled();
 });

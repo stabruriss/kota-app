@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import { TavernModal } from '../src/chrome/TavernModal';
@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/core', async (original) => ({
   ...await original<typeof import('@tauri-apps/api/core')>(),
   invoke: async (command: string) => {
     calls.push(command);
+    if (command === 'github_accounts_read') return { defaultLogin: null, accounts: [] };
     throw new Error(`Unexpected fixture IPC: ${command}`);
   },
 }));
@@ -35,7 +36,9 @@ it('shows no Kota Local card, makes no Local IPC and ignores Local links with Lo
     act(() => requestKotaLocalLink('kota-local-jev'));
     expect(screen.getByRole('button', { name: 'Hero' })).toHaveClass('active');
     await userEvent.click(screen.getByRole('button', { name: 'Link' }));
-    expect(await screen.findByText('GitHub CLI')).toBeInTheDocument();
+    const card = screen.getByRole('region', { name: 'GitHub accounts' });
+    expect(await within(card).findByText('No GitHub accounts yet.')).toBeInTheDocument();
+    expect(calls).toContain('github_accounts_read');
     expect(screen.queryByTestId('tavern-kota-local')).not.toBeInTheDocument();
     expect(screen.queryByText('Kota Local')).not.toBeInTheDocument();
     expect(calls.filter((command) => command.startsWith('local_rpc_'))).toEqual([]);

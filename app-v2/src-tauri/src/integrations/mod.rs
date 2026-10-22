@@ -162,15 +162,6 @@ pub struct GoogleDriveStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GithubToken {
-    access_token: String,
-    token_type: Option<String>,
-    scope: Option<String>,
-    username: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GithubRepo {
     pub full_name: String,
     pub name: String,
@@ -187,12 +178,17 @@ pub struct GithubCreateRepoRequest {
     pub name: String,
     pub private: bool,
     pub auto_init: bool,
+    #[serde(default)]
+    pub account_login: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrepareGithubProjectRequest {
     pub repo_full_name: String,
+    /// The account to open it with; the default account when absent.
+    #[serde(default)]
+    pub account_login: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,6 +214,181 @@ pub struct WorkspaceProject {
     pub archived: bool,
     #[serde(default)]
     pub archived_at: Option<String>,
+    /// The name people chose for a local project; GitHub projects use the repository name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Absent in registrations written before local projects, which are all GitHub projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ProjectConnection>,
+}
+
+/// Whether Bartender, agents and Git may reach GitHub for this project, and as whom.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ProjectConnection {
+    Local,
+    #[serde(rename_all = "camelCase")]
+    Github {
+        /// gh's login for the project's account; gh keys its tokens by login.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_login: Option<String>,
+    },
+}
+
+impl WorkspaceProject {
+    pub fn is_local(&self) -> bool {
+        self.connection == Some(ProjectConnection::Local)
+    }
+}
+
+/// gh prefers `GH_TOKEN` over its keychain login, so this invalid value leaves a
+/// local project's agents with no GitHub identity instead of the default account.
+pub const LOCAL_ONLY_GH_TOKEN: &str = "kota-local-only";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredProject {
+    #[serde(default)]
+    remote_url: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    connection: Option<ProjectConnection>,
+}
+
+fn registered_project(project_root: &Path) -> Option<RegisteredProject> {
+    serde_json::from_slice(&fs::read(project_root.join("workspace.json")).ok()?).ok()
+}
+
+/// Read at every spawn and commit, so a project's mode reaches the next start.
+/// An unreadable registration counts as a GitHub project, as before local projects.
+pub fn project_is_local(project_root: &Path) -> bool {
+    registered_project(project_root).is_some_and(|p| p.connection == Some(ProjectConnection::Local))
+}
+
+/// Agent environment derived from the registration: its display name and the gh
+/// token of the project's account. A local project, or one whose account is
+/// missing, gets the placeholder rather than falling back to gh's active account.
+pub fn agent_project_env(project_root: &Path, project_id: &str) -> Vec<(&'static str, String)> {
+    agent_project_env_with(project_root, project_id, &crate::github_accounts::kota_home(), &crate::github_accounts::GhCli)
+}
+
+fn agent_project_env_with(
+    project_root: &Path,
+    project_id: &str,
+    kota_home: &Path,
+    gh: &dyn crate::github_accounts::Gh,
+) -> Vec<(&'static str, String)> {
+    let registered = registered_project(project_root);
+    let name = registered.as_ref().and_then(|p| p.display_name.as_deref());
+    let mut env = vec![(
+        "KOTA_PROJECT_DISPLAY_NAME",
+        match name.map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => name.to_owned(),
+            None => crate::bbs::display_project_name_with_fallback(project_id, None),
+        },
+    )];
+    if let Some(registered) = registered {
+        // Agents restored at launch can start before the startup takeover has written
+        // the store; they take over gh's active login here instead of starting without one.
+        let token = (registered.connection != Some(ProjectConnection::Local))
+            .then(|| crate::github_accounts::ensure_store(kota_home, gh).unwrap_or_default())
+            .and_then(|store| crate::github_accounts::project_login(&store, registered.connection.as_ref(), !registered.remote_url.trim().is_empty()))
+            .and_then(|login| gh.token(&login));
+        env.push(("GH_TOKEN", token.unwrap_or_else(|| LOCAL_ONLY_GH_TOKEN.to_owned())));
+    }
+    env
+}
+
+const LOCAL_ONLY_HELPER: &str = "!f() { echo quit=1; }; f";
+const GITHUB_HELPER_KEY: &str = "credential.https://github.com.helper";
+
+/// The source repository's github.com helpers (PLAN §2.3), shared by every agent
+/// worktree: emptied first so gh's global helper never answers, then Kota's
+/// per-project helper, or `quit` for a local project.
+fn ensure_project_credentials(workspace: &WorkspaceProject, kota_home: &Path) -> Result<()> {
+    let source = Path::new(&workspace.source_dir);
+    let helper = if workspace.is_local() {
+        LOCAL_ONLY_HELPER.to_owned()
+    } else {
+        crate::github_accounts::credential_helper(kota_home, &workspace.project_id)
+    };
+    let current = Command::new("git")
+        .current_dir(source)
+        .args(["config", "--local", "--get-all", GITHUB_HELPER_KEY])
+        .output()?;
+    let current: Vec<String> = String::from_utf8_lossy(&current.stdout).lines().map(str::to_owned).collect();
+    if current == ["", helper.as_str()] {
+        return Ok(());
+    }
+    if !current.is_empty() {
+        run_git_plain(source, &["config", "--local", "--unset-all", GITHUB_HELPER_KEY])?;
+    }
+    run_git_plain(source, &["config", "--local", "--add", GITHUB_HELPER_KEY, ""])?;
+    run_git_plain(source, &["config", "--local", "--add", GITHUB_HELPER_KEY, &helper])
+}
+
+/// Loading checks each project's helpers once per process, not on every status poll.
+fn ensure_project_credentials_once(workspace: &WorkspaceProject) {
+    static DONE: std::sync::OnceLock<Mutex<HashSet<(String, bool)>>> = std::sync::OnceLock::new();
+    let key = (workspace.project_id.clone(), workspace.is_local());
+    if DONE.get_or_init(Default::default).lock().expect("credential set poisoned").contains(&key) {
+        return;
+    }
+    if !Path::new(&workspace.source_dir).join(".git").exists() {
+        return;
+    }
+    match ensure_project_credentials(workspace, &kota_home()) {
+        Ok(()) => {
+            DONE.get().expect("initialized above").lock().expect("credential set poisoned").insert(key);
+        }
+        Err(error) => crate::kota_debug_log(&format!(
+            "[github-accounts] cannot set credential helpers for {}: {error}",
+            workspace.project_id
+        )),
+    }
+}
+
+/// Registrations without a bound account take the default, which on first use is gh's
+/// active login (老无, item 6). With no account yet nothing changes; they are bound once
+/// an account exists.
+fn bind_project_account(workspace: &mut WorkspaceProject, default_login: impl FnOnce() -> Option<String>) -> bool {
+    let unbound = match &workspace.connection {
+        None => !workspace.remote_url.trim().is_empty(),
+        Some(ProjectConnection::Github { account_login }) => account_login.is_none(),
+        Some(ProjectConnection::Local) => false,
+    };
+    if !unbound {
+        return false;
+    }
+    let Some(login) = default_login() else {
+        return false;
+    };
+    workspace.connection = Some(ProjectConnection::Github { account_login: Some(login) });
+    true
+}
+
+/// The token Kota's own GitHub calls use (list, create, clone): a named account,
+/// or the default one. Never gh's active account.
+fn account_token(account_login: Option<&str>) -> Result<(String, String)> {
+    use crate::github_accounts::Gh;
+    let gh = crate::github_accounts::GhCli;
+    let store = crate::github_accounts::ensure_store(&kota_home(), &gh)?;
+    let login = match account_login {
+        Some(login) if store.accounts.iter().any(|account| account.login == login) => login.to_owned(),
+        Some(_) => bail!("github_account_unknown"),
+        None => store.default_login.context("github_account_required")?,
+    };
+    let token = gh.token(&login).context("github_account_needs_login")?;
+    Ok((login, token))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitAvailability {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -513,23 +684,23 @@ impl IntegrationManager {
         Ok(self.google_drive_status())
     }
 
-    pub fn github_list_repos(&self) -> Result<Vec<GithubRepo>> {
-        let token = github_cli_token()?;
+    pub fn github_list_repos(&self, account_login: Option<&str>) -> Result<Vec<GithubRepo>> {
+        let (_, token) = account_token(account_login)?;
         let value = github_get_json(
-            &token.access_token,
+            &token,
             "https://api.github.com/user/repos?affiliation=owner,collaborator,organization_member&sort=updated&per_page=100",
         )?;
         parse_repo_list(&value)
     }
 
     pub fn github_create_repo(&self, req: GithubCreateRepoRequest) -> Result<GithubRepo> {
-        let token = github_cli_token()?;
+        let (_, token) = account_token(req.account_login.as_deref())?;
         let name = req.name.trim();
         if name.is_empty() {
             bail!("repo name is required");
         }
         let value = github_post_json(
-            &token.access_token,
+            &token,
             "https://api.github.com/user/repos",
             json!({
                 "name": name,
@@ -544,9 +715,23 @@ impl IntegrationManager {
         &self,
         req: PrepareGithubProjectRequest,
     ) -> Result<WorkspaceProject> {
-        let token = github_cli_token()?;
-        let repo = github_repo(&token.access_token, &req.repo_full_name)?;
-        let workspace = materialize_github_workspace(&token.access_token, repo)?;
+        let (login, token) = account_token(req.account_login.as_deref())?;
+        let repo = github_repo(&token, &req.repo_full_name)?;
+        let workspace = materialize_github_workspace(&token, repo, &login)?;
+        *self
+            .active_workspace
+            .lock()
+            .expect("workspace state poisoned") = Some(workspace.clone());
+        save_active_workspace(&workspace)?;
+        Ok(workspace)
+    }
+
+    pub fn create_local_project(&self, name: &str) -> Result<WorkspaceProject> {
+        if !git_availability().available {
+            bail!("git_unavailable");
+        }
+        let cfg = load_oauth_config().unwrap_or_default();
+        let workspace = materialize_local_workspace(name, &kota_workspaces_dir(), &local_project_root(&cfg))?;
         *self
             .active_workspace
             .lock()
@@ -1135,49 +1320,6 @@ fn google_userinfo(access_token: &str) -> Result<String> {
     json_string(&value, "email")
 }
 
-fn github_user(access_token: &str) -> Result<String> {
-    let value = github_get_json(access_token, "https://api.github.com/user")?;
-    json_string(&value, "login")
-}
-
-fn github_cli_token() -> Result<GithubToken> {
-    let output = run_gh_auth_token()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.is_empty() {
-            bail!("gh auth token exited with {}", output.status);
-        }
-        bail!("gh auth token exited with {}: {stderr}", output.status);
-    }
-
-    let access_token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if access_token.is_empty() {
-        bail!("gh auth token returned an empty token");
-    }
-
-    let username = github_user(&access_token)?;
-    let token = GithubToken {
-        access_token,
-        token_type: Some("gh-cli".into()),
-        scope: None,
-        username: Some(username),
-    };
-    Ok(token)
-}
-
-fn run_gh_auth_token() -> Result<std::process::Output> {
-    let mut errors = Vec::new();
-    for candidate in ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"] {
-        match Command::new(candidate)
-            .args(["auth", "token", "--hostname", "github.com"])
-            .output()
-        {
-            Ok(output) => return Ok(output),
-            Err(err) => errors.push(format!("{candidate}: {err}")),
-        }
-    }
-    bail!("gh executable not found ({})", errors.join("; "))
-}
 
 fn github_repo(access_token: &str, full_name: &str) -> Result<GithubRepo> {
     let safe = full_name.trim();
@@ -1242,7 +1384,7 @@ fn parse_repo(value: &Value) -> Result<GithubRepo> {
     })
 }
 
-fn materialize_github_workspace(access_token: &str, repo: GithubRepo) -> Result<WorkspaceProject> {
+fn materialize_github_workspace(access_token: &str, repo: GithubRepo, account_login: &str) -> Result<WorkspaceProject> {
     let cfg = load_oauth_config().unwrap_or_default();
     let project_id = safe_project_id(&repo.full_name);
     let root = workspace_project_root(&project_id);
@@ -1299,10 +1441,128 @@ fn materialize_github_workspace(access_token: &str, repo: GithubRepo) -> Result<
         agents: Vec::new(),
         archived: false,
         archived_at: None,
+        display_name: None,
+        connection: Some(ProjectConnection::Github { account_login: Some(account_login.to_owned()) }),
     };
 
+    ensure_project_credentials(&workspace, &kota_home())?;
     save_workspace_files(&workspace)?;
     Ok(workspace)
+}
+
+const LOCAL_PROJECT_NAME_CHARS: usize = 100;
+const LOCAL_PROJECT_SOURCE_DIR: &str = "_local";
+const LOCAL_PROJECT_SLUG_BYTES: usize = 60;
+
+/// A local project (PLAN §2.1, §3 A): its own Git repository and no remote.
+/// Ids are `local_<slug>` and sources live under `<projects>/_local/<slug>`;
+/// GitHub owners cannot contain `_`, so neither can collide with `owner-repo`.
+fn materialize_local_workspace(name: &str, workspaces_dir: &Path, projects_root: &Path) -> Result<WorkspaceProject> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > LOCAL_PROJECT_NAME_CHARS || name.chars().any(char::is_control) {
+        bail!("local_project_name_invalid");
+    }
+    // BBS and the agent directory accept ids of at most 80 bytes.
+    let base: String = safe_project_id(name).split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+    let base = base.get(..LOCAL_PROJECT_SLUG_BYTES).unwrap_or(&base).trim_end_matches('-');
+    let base = if base.is_empty() { "project".to_owned() } else { base.to_owned() };
+    let source_parent = projects_root.join(LOCAL_PROJECT_SOURCE_DIR);
+    let slug = (1..)
+        .map(|n| if n == 1 { base.clone() } else { format!("{base}-{n}") })
+        .find(|slug| !workspaces_dir.join(format!("local_{slug}")).exists() && !source_parent.join(slug).exists())
+        .expect("an unused local project slug");
+    let project_id = format!("local_{slug}");
+    let root = workspaces_dir.join(&project_id);
+    let source = source_parent.join(&slug);
+    let created = (|| -> Result<WorkspaceProject> {
+        let shared = project_memory_dir(&root);
+        let rules = project_rules_dir(&root);
+        fs::create_dir_all(root.join(".agent-workspaces"))?;
+        ensure_project_memory_dirs(&shared)?;
+        fs::create_dir_all(&rules)?;
+        fs::create_dir_all(&source)?;
+        run_git_plain(&source, &["init", "-q", "-b", "main"])?;
+        // Finder writes .DS_Store into project folders; Bartender snapshots everything else.
+        fs::write(source.join(".gitignore"), ".DS_Store\n")?;
+        run_git_plain(&source, &["add", ".gitignore"])?;
+        let output = Command::new("git")
+            .current_dir(&source)
+            .args(["-c", "commit.gpgSign=false", "commit", "-q", "-m", "Initialize Kota project"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            // A new machine may have no Git identity yet.
+            .env("GIT_AUTHOR_NAME", "Kota")
+            .env("GIT_AUTHOR_EMAIL", "kota@kota.local")
+            .env("GIT_COMMITTER_NAME", "Kota")
+            .env("GIT_COMMITTER_EMAIL", "kota@kota.local")
+            .output()?;
+        if !output.status.success() {
+            bail!("git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        let workspace = WorkspaceProject {
+            project_id: project_id.clone(),
+            repo_full_name: String::new(),
+            remote_url: String::new(),
+            github_html_url: String::new(),
+            default_branch: "main".into(),
+            base_ref: "main".into(),
+            local_root: path_str(&root),
+            local_root_bytes: 0,
+            source_dir: path_str(&source),
+            source_dir_bytes: 0,
+            shared_dir: path_str(&shared),
+            rules_dir: path_str(&rules),
+            agents: Vec::new(),
+            archived: false,
+            archived_at: None,
+            display_name: Some(name.to_owned()),
+            connection: Some(ProjectConnection::Local),
+        };
+        // No helper may answer for github.com, so an agent's push to a remote it added
+        // fails at once instead of using the default gh account or waiting at a prompt.
+        ensure_project_credentials(&workspace, workspaces_dir)?;
+        save_workspace_files(&workspace)?;
+        Ok(workspace)
+    })();
+    if created.is_err() {
+        // A failed creation leaves no half project behind to block or confuse a retry.
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&source);
+    }
+    created
+}
+
+/// Git is the only requirement of a local project. On macOS `/usr/bin/git` is a stub
+/// that opens an installer, so it is asked about only once Command Line Tools exist.
+pub fn git_availability() -> GitAvailability {
+    let unavailable = GitAvailability { available: false, version: None };
+    let stub = Path::new("/usr/bin/git");
+    let candidates: Vec<PathBuf> = crate::pty::path_env::augmented_path(dirs::home_dir().as_deref())
+        .split(':')
+        .map(|dir| Path::new(dir).join("git"))
+        .filter(|path| path.is_file())
+        .collect();
+    let tools = cfg!(target_os = "macos").then(|| {
+        Command::new("xcode-select").arg("-p").output().is_ok_and(|output| output.status.success())
+    });
+    let Some(git) = candidates.into_iter().find(|path| path != stub || tools != Some(false)) else {
+        return unavailable;
+    };
+    match Command::new(&git).arg("--version").env("GIT_TERMINAL_PROMPT", "0").output() {
+        Ok(output) if output.status.success() => GitAvailability {
+            available: true,
+            version: Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()),
+        },
+        _ => unavailable,
+    }
+}
+
+/// Opens Apple's Command Line Tools installer; the user finishes it in that window.
+pub fn install_git_command_line_tools() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("Install Git with your system package manager.");
+    }
+    Command::new("xcode-select").arg("--install").spawn()?;
+    Ok(())
 }
 
 fn materialize_workspace_agent(
@@ -1704,6 +1964,13 @@ fn adapter_file_for_cli(cli: crate::pty::agent::AgentCli) -> &'static str {
 }
 
 fn run_git_with_token(access_token: &str, cwd: &Path, args: &[&str]) -> Result<()> {
+    git_with_token(access_token, cwd, args).map(|_| ())
+}
+
+/// git with one named account's token. Repository helpers are emptied for this
+/// command: they answer for the project's current account, which a connection
+/// change must not use, and a local project's helper would refuse.
+fn git_with_token(access_token: &str, cwd: &Path, args: &[&str]) -> Result<String> {
     let helper =
         std::env::temp_dir().join(format!("kota-git-askpass-{}.sh", Uuid::new_v4().simple()));
     fs::write(
@@ -1720,6 +1987,7 @@ fn run_git_with_token(access_token: &str, cwd: &Path, args: &[&str]) -> Result<(
 
     let output = Command::new("git")
         .current_dir(cwd)
+        .args(["-c", "credential.https://github.com.helper="])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", &helper)
@@ -1729,7 +1997,7 @@ fn run_git_with_token(access_token: &str, cwd: &Path, args: &[&str]) -> Result<(
     let _ = fs::remove_file(&helper);
     let output = output?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
     bail!(
         "git {} failed: {}{}",
@@ -2702,6 +2970,10 @@ fn merge_directory_contents(old: &Path, new: &Path) -> Result<()> {
 
 fn prepare_loaded_workspace(workspace: &mut WorkspaceProject) -> Result<bool> {
     let mut changed = normalize_workspace_metadata(workspace);
+    changed |= bind_project_account(workspace, || {
+        crate::github_accounts::read_store(&kota_home()).ok().flatten().and_then(|store| store.default_login)
+    });
+    ensure_project_credentials_once(workspace);
     changed |= migrate_workspace_storage_layout(workspace)?;
     changed |= maybe_migrate_legacy_workspace_source(workspace)?;
     changed |= migrate_legacy_gemini_agents(workspace)?;
@@ -3050,7 +3322,7 @@ fn maybe_migrate_legacy_workspace_source(workspace: &mut WorkspaceProject) -> Re
         refresh_workspace_agent_source_metadata(workspace);
         return Ok(true);
     }
-    let Ok(token) = github_cli_token() else {
+    let Ok((_, token)) = account_token(None) else {
         return Ok(false);
     };
     if target.exists() && fs::read_dir(&target)?.next().is_some() {
@@ -3068,7 +3340,7 @@ fn maybe_migrate_legacy_workspace_source(workspace: &mut WorkspaceProject) -> Re
         workspace.remote_url.clone()
     };
     run_git_with_token(
-        &token.access_token,
+        &token,
         &workspace_project_root(&workspace.project_id),
         &["clone", clone_url.as_str(), path_str(&target).as_str()],
     )?;
@@ -3577,6 +3849,11 @@ fn yaml_quote(value: &str) -> String {
         .to_string()
 }
 
+mod connection;
+pub use connection::{
+    ConnectionApplied, ConnectionCandidates, ConnectionCheck, ConnectionError, ConnectionRequest, ConnectionStatus,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3628,6 +3905,181 @@ mod tests {
         visit(root, root, &mut entries);
         entries.sort();
         entries
+    }
+
+    fn git_lines(dir: &Path, args: &[&str]) -> Vec<String> {
+        let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_local_project_is_its_own_main_repository_with_no_github_identity() {
+        let base = temp_dir("local-project");
+        let (workspaces, projects) = (base.join("Workspaces"), base.join("Projects"));
+        let workspace = materialize_local_workspace("  Field Notes ", &workspaces, &projects).unwrap();
+        let root = workspaces.join("local_field-notes");
+        let source = projects.join("_local").join("field-notes");
+        assert_eq!(workspace.project_id, "local_field-notes");
+        assert_eq!((workspace.local_root.as_str(), workspace.source_dir.as_str()), (path_str(&root).as_str(), path_str(&source).as_str()));
+        assert_eq!((workspace.base_ref.as_str(), workspace.default_branch.as_str(), workspace.remote_url.as_str()), ("main", "main", ""));
+        assert_eq!(workspace.display_name.as_deref(), Some("Field Notes"));
+        assert!(workspace.is_local());
+        assert_eq!(git_lines(&source, &["branch", "--show-current"]), ["main"]);
+        assert_eq!(git_lines(&source, &["log", "--format=%s|%an|%ae"]), ["Initialize Kota project|Kota|kota@kota.local"]);
+        assert_eq!(git_lines(&source, &["ls-files"]), [".gitignore"]);
+        assert!(git_lines(&source, &["remote"]).is_empty());
+        assert_eq!(git_lines(&source, &["config", "--local", "--get-all", "credential.https://github.com.helper"]),
+            ["", "!f() { echo quit=1; }; f"]);
+        // The helper stops git at once: no default account, no prompt even where prompts are allowed.
+        let mut fill = Command::new("git").current_dir(&source).args(["credential", "fill"])
+            .env("GIT_TERMINAL_PROMPT", "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        fill.stdin.take().unwrap().write_all(b"protocol=https\nhost=github.com\n\n").unwrap();
+        let fill = fill.wait_with_output().unwrap();
+        assert!(!fill.status.success() && fill.stdout.is_empty(), "{}", String::from_utf8_lossy(&fill.stderr));
+        let saved: WorkspaceProject = serde_json::from_slice(&fs::read(root.join("workspace.json")).unwrap()).unwrap();
+        assert_eq!(saved.connection, Some(ProjectConnection::Local));
+        assert!(project_is_local(&root));
+        assert_eq!(agent_project_env_with(&root, &workspace.project_id, &base, &crate::github_accounts::tests::FakeGh::default()), [
+            ("KOTA_PROJECT_DISPLAY_NAME", "Field Notes".to_owned()), ("GH_TOKEN", LOCAL_ONLY_GH_TOKEN.to_owned())]);
+        // A local project's agent starts from local main; there is no origin/main.
+        let cwd = root.join(".agent-workspaces").join("agent-copper");
+        ensure_project_files_worktree(&source, &cwd, &cwd.join("project-files"), "agent-copper", &workspace.base_ref).unwrap();
+        assert_eq!(git_lines(&cwd.join("project-files"), &["rev-parse", "HEAD"]), git_lines(&source, &["rev-parse", "main"]));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn local_project_ids_stay_unique_short_and_ascii_and_bad_names_leave_nothing() {
+        let base = temp_dir("local-project-ids");
+        let (workspaces, projects) = (base.join("Workspaces"), base.join("Projects"));
+        let create = |name: &str| materialize_local_workspace(name, &workspaces, &projects).map(|w| w.project_id);
+        assert_eq!(create("Notes").unwrap(), "local_notes");
+        assert_eq!(create("notes").unwrap(), "local_notes-2");
+        assert_eq!(create("田野笔记").unwrap(), "local_project");
+        assert_eq!(create("a/b -- c").unwrap(), "local_a-b-c");
+        let long = create(&"a".repeat(100)).unwrap();
+        assert!(long.len() <= 80 && crate::bbs_sync::safe_id(&long).is_ok(), "{long}");
+        let before = fs::read_dir(&workspaces).unwrap().count();
+        let too_long = "a".repeat(101);
+        for bad in ["", "   ", "line\nbreak", too_long.as_str()] {
+            assert_eq!(create(bad).unwrap_err().to_string(), "local_project_name_invalid");
+        }
+        assert_eq!(fs::read_dir(&workspaces).unwrap().count(), before);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn registrations_without_a_connection_stay_github_projects() {
+        let root = temp_dir("legacy-registration");
+        settings_workspace_for_test(&root, "owner-repo");
+        assert!(!project_is_local(&root));
+        assert!(!project_is_local(&root.join("missing")));
+        let gh = crate::github_accounts::tests::FakeGh::default();
+        assert_eq!(agent_project_env_with(&root.join("missing"), "owner-repo", &root, &gh),
+            [("KOTA_PROJECT_DISPLAY_NAME", crate::bbs::display_project_name_with_fallback("owner-repo", None))]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn github_projects_get_kotas_helper_once_and_it_follows_the_project_mode() {
+        let base = temp_dir("project-credentials");
+        let source = base.join("source");
+        fs::create_dir_all(&source).unwrap();
+        git_lines(&source, &["init", "-q"]);
+        // gh's own helper written into the repository is replaced, not appended to.
+        git_lines(&source, &["config", "--local", "--add", GITHUB_HELPER_KEY, "!gh auth git-credential"]);
+        let mut workspace = workspace_for_test(&base, Vec::new());
+        workspace.source_dir = path_str(&source);
+        let helpers = || git_lines(&source, &["config", "--local", "--get-all", GITHUB_HELPER_KEY]);
+        ensure_project_credentials(&workspace, &base).unwrap();
+        let expected = crate::github_accounts::credential_helper(&base, "owner-repo");
+        assert_eq!(helpers(), ["".to_owned(), expected.clone()]);
+        let config = fs::read(source.join(".git/config")).unwrap();
+        ensure_project_credentials(&workspace, &base).unwrap();
+        assert_eq!(fs::read(source.join(".git/config")).unwrap(), config, "an unchanged project is not rewritten");
+        workspace.connection = Some(ProjectConnection::Local);
+        ensure_project_credentials(&workspace, &base).unwrap();
+        assert_eq!(helpers(), ["", LOCAL_ONLY_HELPER]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn unbound_github_projects_take_the_default_account_and_bound_or_local_ones_stay() {
+        let base = temp_dir("bind-account");
+        let default = || Some("fable-copper".to_owned());
+        let mut legacy = workspace_for_test(&base, Vec::new());
+        assert!(bind_project_account(&mut legacy, default));
+        assert_eq!(legacy.connection, Some(ProjectConnection::Github { account_login: Some("fable-copper".into()) }));
+        let mut unbound = workspace_for_test(&base, Vec::new());
+        unbound.connection = Some(ProjectConnection::Github { account_login: None });
+        assert!(!bind_project_account(&mut unbound, || None), "no account yet: nothing changes");
+        assert!(bind_project_account(&mut unbound, default));
+        let mut bound = legacy.clone();
+        bound.connection = Some(ProjectConnection::Github { account_login: Some("fable-indigo".into()) });
+        assert!(!bind_project_account(&mut bound, default));
+        let mut local = legacy.clone();
+        local.connection = Some(ProjectConnection::Local);
+        assert!(!bind_project_account(&mut local, || panic!("a local project never reads accounts")));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn github_project_agents_get_their_own_account_token_or_the_placeholder() {
+        use crate::github_accounts::tests::FakeGh;
+        let base = temp_dir("agent-token");
+        let gh = FakeGh::with(&["fable-copper", "fable-indigo"], Some("fable-copper"));
+        crate::github_accounts::finish_add(&base, &gh, None).unwrap();
+        let root = base.join("project");
+        let mut workspace = settings_workspace_for_test(&root, "owner-repo");
+        let env = |workspace: &WorkspaceProject, gh: &FakeGh| {
+            fs::write(root.join("workspace.json"), serde_json::to_vec(workspace).unwrap()).unwrap();
+            agent_project_env_with(&root, "owner-repo", &base, gh).into_iter().find(|(key, _)| *key == "GH_TOKEN").unwrap().1
+        };
+        assert_eq!(env(&workspace, &gh), "fixture-token-fable-copper", "an unbound project uses the default");
+        workspace.connection = Some(ProjectConnection::Github { account_login: Some("fable-indigo".into()) });
+        assert_eq!(env(&workspace, &gh), "fixture-token-fable-indigo");
+        assert_eq!(env(&workspace, &FakeGh::with(&["fable-copper"], None)), LOCAL_ONLY_GH_TOKEN, "a signed-out account");
+        workspace.connection = Some(ProjectConnection::Github { account_login: Some("removed".into()) });
+        assert_eq!(env(&workspace, &gh), LOCAL_ONLY_GH_TOKEN, "a removed account");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn an_agent_started_before_the_startup_takeover_takes_over_gh_login_first() {
+        use crate::github_accounts::tests::FakeGh;
+        let base = temp_dir("agent-before-takeover");
+        let root = base.join("project");
+        settings_workspace_for_test(&root, "owner-repo");
+        assert!(crate::github_accounts::read_store(&base).unwrap().is_none());
+        let gh = FakeGh::with(&["fable-copper"], Some("fable-copper"));
+        let env = agent_project_env_with(&root, "owner-repo", &base, &gh);
+        assert!(env.contains(&("GH_TOKEN", "fixture-token-fable-copper".to_owned())), "{:?}", env.iter().map(|(key, _)| key).collect::<Vec<_>>());
+        assert_eq!(crate::github_accounts::read_store(&base).unwrap().unwrap().default_login.as_deref(), Some("fable-copper"));
+        // A local project never asks gh, even with no store.
+        let local = base.join("local");
+        let mut workspace = settings_workspace_for_test(&local, "local_notes");
+        workspace.connection = Some(ProjectConnection::Local);
+        fs::write(local.join("workspace.json"), serde_json::to_vec(&workspace).unwrap()).unwrap();
+        let empty = temp_dir("agent-before-takeover-local");
+        let env = agent_project_env_with(&local, "local_notes", &empty, &FakeGh::with(&["fable-copper"], Some("fable-copper")));
+        assert!(env.contains(&("GH_TOKEN", LOCAL_ONLY_GH_TOKEN.to_owned())));
+        assert!(crate::github_accounts::read_store(&empty).unwrap().is_none());
+        let _ = fs::remove_dir_all(base);
+        let _ = fs::remove_dir_all(empty);
+    }
+
+    #[test]
+    fn a_local_project_keeps_its_commit_email_but_commits_with_agent_emails() {
+        let root = temp_dir("local-commit-email");
+        let mut workspace = settings_workspace_for_test(&root, "local_notes");
+        crate::project_settings::save_commit_email(&root, Some("me@example.com".into())).unwrap();
+        assert_eq!(crate::project_settings::runtime_commit_email(&root, "x@kota.local").as_deref(), Some("me@example.com"));
+        workspace.connection = Some(ProjectConnection::Local);
+        fs::write(root.join("workspace.json"), serde_json::to_vec(&workspace).unwrap()).unwrap();
+        assert_eq!(crate::project_settings::runtime_commit_email(&root, "x@kota.local"), None);
+        assert_eq!(crate::project_settings::read(&root).unwrap().commit_email.as_deref(), Some("me@example.com"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3809,6 +4261,8 @@ mod tests {
             agents,
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         }
     }
 
@@ -3890,6 +4344,8 @@ mod tests {
             agents: Vec::new(),
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
         let json = serde_json::to_string(&workspace).unwrap();
         assert!(json.contains("\"githubHtmlUrl\":\"https://github.com/owner/repo\""));
@@ -4000,6 +4456,8 @@ mod tests {
             agents: Vec::new(),
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         assert!(migrate_workspace_storage_layout(&mut workspace).unwrap());
@@ -4054,6 +4512,8 @@ mod tests {
             }],
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         normalize_workspace_metadata(&mut workspace);
@@ -4098,6 +4558,8 @@ mod tests {
             }],
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         let changed = rebase_workspace_project_root(
@@ -4166,6 +4628,8 @@ mod tests {
             }],
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         assert!(sync_workspace_agent_specs_from_disk(&mut workspace).unwrap());
@@ -4308,6 +4772,8 @@ args:
             agents: Vec::new(),
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         assert!(migrate_legacy_gemini_agents(&workspace).unwrap());

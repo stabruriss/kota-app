@@ -290,3 +290,71 @@ fn dream_entry_external_binaries_match_startup_shims_and_build_lists() {
         }
     }
 }
+
+#[test]
+fn dream_cli_uses_working_directory_identity_rejects_mismatch_and_falls_back() {
+    let f = Fixture::new();
+    let agent_cwd = f.root().join(".agent-workspaces/agent-fixture");
+    let worktree = agent_cwd.join("project-files");
+    let plain_dir = f.0.join("outside");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&plain_dir).unwrap();
+    fs::write(
+        f.root().join("workspace.json"),
+        r#"{"projectId":"cedar-project"}"#,
+    )
+    .unwrap();
+    fs::write(
+        agent_cwd.join("agent.yaml"),
+        "id: agent-fixture\ndisplay-name: Birch v. cedar\nstatus: active\n",
+    )
+    .unwrap();
+    let args = vec![
+        "--kota-home".into(),
+        f.home().display().to_string(),
+        "--".into(),
+        "Verify working directory identity.".into(),
+    ];
+
+    // 1) Directory matches environment -> records entry under agent-fixture@cedar-project.
+    let matching = HashMap::from([
+        ("KOTA_AGENT_ID", "agent-fixture".to_string()),
+        ("KOTA_PROJECT_ID", "cedar-project".to_string()),
+        ("KOTA_AGENT_CWD", agent_cwd.display().to_string()),
+    ]);
+    let reply = run_cli_with(&args, Some(&worktree), |k| matching.get(k).cloned(), T1).unwrap();
+    assert_eq!(reply, "Dream entry recorded (1 item).");
+    let entries = read_inbox(&f.home(), false).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].agent_id, "agent-fixture");
+    assert_eq!(entries[0].agent_display_name.as_deref(), Some("Birch"));
+    assert_eq!(entries[0].project_id, "cedar-project");
+    remove_acknowledged(&f.home(), &HashSet::from([entries[0].id.clone()])).unwrap();
+
+    // 2) Directory vs environment mismatch -> rejected with exact copy, inbox stays empty.
+    let mismatched = HashMap::from([
+        ("KOTA_AGENT_ID", "agent-maple".to_string()),
+        ("KOTA_PROJECT_ID", "maple-project".to_string()),
+    ]);
+    let err = run_cli_with(&args, Some(&worktree), |k| mismatched.get(k).cloned(), T1).unwrap_err();
+    assert_eq!(
+        err,
+        "identity mismatch: environment says agent-maple@maple-project, working directory says agent-fixture@cedar-project"
+    );
+    assert!(read_inbox(&f.home(), false).unwrap().is_empty());
+
+    // 3) No directory evidence -> falls back to environment variables.
+    let fallback_env = HashMap::from([
+        ("KOTA_AGENT_CWD", agent_cwd.display().to_string()),
+        ("KOTA_AGENT_ID", "agent-maple".to_string()),
+        ("KOTA_PROJECT_ID", "maple-project".to_string()),
+        ("KOTA_PROJECT_ROOT", f.root().display().to_string()),
+    ]);
+    let reply =
+        run_cli_with(&args, Some(&plain_dir), |k| fallback_env.get(k).cloned(), T2).unwrap();
+    assert_eq!(reply, "Dream entry recorded (1 item).");
+    let entries = read_inbox(&f.home(), false).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].agent_id, "agent-maple");
+    assert_eq!(entries[0].project_id, "maple-project");
+}

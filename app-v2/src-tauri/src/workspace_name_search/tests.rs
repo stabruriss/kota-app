@@ -65,6 +65,8 @@ impl Fixture {
             agents: vec![],
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
         Self { base, workspace }
     }

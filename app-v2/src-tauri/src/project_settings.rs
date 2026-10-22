@@ -33,6 +33,10 @@ pub fn read(project_root: &Path) -> Result<ProjectSettings> {
 /// preserves the caller's legacy behavior; a read failure explicitly selects
 /// its default email. Settings IPC continues to use the strict reader above.
 pub fn runtime_commit_email(project_root: &Path, default_email: &str) -> Option<String> {
+    // A local project keeps its saved email for a later connection but commits as before.
+    if crate::integrations::project_is_local(project_root) {
+        return None;
+    }
     match read(project_root) {
         Ok(settings) => settings.commit_email,
         Err(error) => {

@@ -115,3 +115,16 @@ fn collector_has_no_agent_total_cap_and_detects_rename_removal_and_bad_partial_i
         129
     );
 }
+
+#[test]
+fn a_local_project_is_listed_under_its_chosen_name() {
+    let account = Account::new();
+    let root = account.0.join("Workspaces").join("local_project");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("workspace.json"), serde_json::to_vec(&json!({
+        "projectId":"local_project","repoFullName":"","displayName":"田野笔记","connection":{"kind":"local"},
+    })).unwrap()).unwrap();
+    account.agent("local_project", "agent-a", "display-name: Copper\nstatus: active\n");
+    let directory = collect(&account.0).unwrap().complete().unwrap();
+    assert_eq!(directory[0].name, "田野笔记");
+}

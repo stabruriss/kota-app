@@ -11,6 +11,7 @@ import {
 import { RightColumn, type DreamProjectTarget } from './chrome/RightColumn';
 import type { ComposerAttachment, InputBarHandle } from './chrome/InputBar';
 import { RoomComposer } from './chrome/RoomComposer';
+import { ComposerModelControl, type ComposerModelMemory } from './chrome/ComposerModelControl';
 import type { Centerpiece } from './chrome/Hearth';
 import { HotMemoryPopup } from './popups/HotMemoryPopup';
 import { RowPopup } from './popups/RowPopup';
@@ -52,6 +53,8 @@ import { LocalWorkbenchHost } from './chrome/LocalWorkbenchHost';
 import { EMPTY_LOCAL_QUEUE_GUARDS, localQueueGuardKey } from './lib/local-queue';
 import { KOTA_LOCAL_ENABLED, localInputTargets, submitLocal, type LocalComposerInput } from './lib/local-rpc';
 import { KOTA_LOCAL_LINK_EVENT, type KotaLocalLinkTarget } from './lib/local-auth';
+import { GITHUB_LINK_EVENT, openGithubAccounts } from './lib/github-account-flow';
+import { PROJECT_CONNECTION_CHANGED, mergeWorkspaceConnection } from './lib/project-connection-ui';
 import { recruitFromIncarnation, type IncarnationRecruitSource, type RecruitPreview } from './lib/reincarnation';
 import {
   isAgentCli,
@@ -60,8 +63,6 @@ import {
   type AgentSummary,
 } from './types/agent-pty';
 import {
-  GITHUB_CLI_INSTALL_URL,
-  GITHUB_CLI_LOGIN_COMMAND,
   archiveProjectAgent,
   archiveWorkspaceProject,
   callBackProjectAgent,
@@ -85,7 +86,6 @@ import {
   lmStatus,
   lmUpdateWorkingAgents,
   materializeComposerAttachmentPath,
-  openExternalUrl,
   openWorkspaceProject,
   onVioletRoomSynced,
   onIncarnationProgressEvent,
@@ -779,6 +779,7 @@ function withAgentHydrationDeadline<T>(operation: Promise<T>, signal: AbortSigna
 }
 
 function workspaceProjectName(workspace: WorkspaceProject): string {
+  if (workspace.displayName?.trim()) return workspace.displayName.trim();
   const trimmed = workspace.repoFullName.trim();
   const parts = trimmed.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? (trimmed || workspace.projectId);
@@ -788,6 +789,7 @@ function workspaceProjectToTab(workspace: WorkspaceProject): Project {
   return {
     id: workspace.projectId,
     name: workspaceProjectName(workspace),
+    displayName: workspace.displayName,
     path: workspace.sourceDir,
     sourcePath: workspace.sourceDir,
     accountPath: workspace.localRoot,
@@ -1085,6 +1087,7 @@ export function App() {
   }, []);
 
   const [composerTarget, setComposerTarget] = useState<AgentId | null>(null);
+  const composerModels = useRef<ComposerModelMemory>({ choices: new Map(), current: null });
   const [composerBroadcast, setComposerBroadcast] = useState(false);
   const [broadcastPopupOpen, setBroadcastPopupOpen] = useState(false);
   const [broadcastRecipients, setBroadcastRecipients] = useState<Set<AgentId>>(() => new Set());
@@ -1180,6 +1183,19 @@ export function App() {
   const agentHydrationGenerationRef = useRef(0);
   const agentHydrationAbortRef = useRef<AbortController | null>(null);
   const workspaceRefreshesRef = useRef<Map<ProjectId, Promise<WorkspaceProject>>>(new Map());
+  const connectionChangesRef = useRef(new Map<string, { revision: number; workspace: WorkspaceProject }>());
+  useEffect(() => {
+    const changed = (event: Event) => {
+      const next = (event as CustomEvent<WorkspaceProject>).detail;
+      if (!next?.projectId) return;
+      const revision = (connectionChangesRef.current.get(next.projectId)?.revision ?? 0) + 1;
+      connectionChangesRef.current.set(next.projectId, { revision, workspace: next });
+      setActiveWorkspace(current => current ? mergeWorkspaceConnection(current, next) : current);
+      setWorkspaceTabs(current => current.map(item => mergeWorkspaceConnection(item, next)));
+    };
+    window.addEventListener(PROJECT_CONNECTION_CHANGED, changed);
+    return () => window.removeEventListener(PROJECT_CONNECTION_CHANGED, changed);
+  }, []);
   const projectsWithConfirmedAgentRosterRef = useRef<Set<ProjectId>>(new Set());
   const [agentHydrationFailure, setAgentHydrationFailure] = useState<AgentHydrationFailure | null>(null);
   const [agentHydrationRetryNonce, setAgentHydrationRetryNonce] = useState(0);
@@ -2522,10 +2538,13 @@ export function App() {
     if (cachedWorkspace) {
       switchToWorkspace(cachedWorkspace);
       focusComposerEndSoon();
+      const connectionRevision = connectionChangesRef.current.get(projectId)?.revision ?? 0;
       const refresh = openWorkspaceProject(projectId);
       workspaceRefreshesRef.current.set(projectId, refresh);
       void refresh
         .then((freshWorkspace) => {
+          const changed = connectionChangesRef.current.get(projectId);
+          if (changed && changed.revision !== connectionRevision) freshWorkspace = mergeWorkspaceConnection(freshWorkspace, changed.workspace);
           setActiveWorkspace((current) => (
             refreshedActiveWorkspace(current, projectId, freshWorkspace)
           ));
@@ -2567,8 +2586,8 @@ export function App() {
         };
       }
       const body = status.dirty
-        ? `Archive ${workspace.repoFullName}? It will disappear from the project tabs and all running agents for this project will stop.\n\nUnsynced or dirty Git state was detected:\n\n${status.dirtySummary}`
-        : `Archive ${workspace.repoFullName}? It will disappear from the project tabs and all running agents for this project will stop. Files stay on disk.`;
+        ? `Archive ${workspace.displayName || workspace.repoFullName || workspace.projectId}? It will disappear from the project tabs and all running agents for this project will stop.\n\nUnsynced or dirty Git state was detected:\n\n${status.dirtySummary}`
+        : `Archive ${workspace.displayName || workspace.repoFullName || workspace.projectId}? It will disappear from the project tabs and all running agents for this project will stop. Files stay on disk.`;
       const confirmed = await confirmInApp(
         'Archive project?',
         body,
@@ -2875,6 +2894,19 @@ export function App() {
     window.addEventListener(KOTA_LOCAL_LINK_EVENT, onLocalLink);
     return () => window.removeEventListener(KOTA_LOCAL_LINK_EVENT, onLocalLink);
   }, [tavernOpen, localWorkbench]);
+
+  useEffect(() => {
+    const onGithubLink = () => {
+      tavernPrepareSeqRef.current += 1;
+      setTavernPreparing(false); setTavernPrepareItems([]);
+      setProjectSetupOpen(false);
+      setTavernLocalLinkIntent(null);
+      setTavernInitialTab('link');
+      setTavernOpen(true);
+    };
+    window.addEventListener(GITHUB_LINK_EVENT, onGithubLink);
+    return () => window.removeEventListener(GITHUB_LINK_EVENT, onGithubLink);
+  }, []);
 
   const openTavern = useCallback(() => {
     if (tavernOpen) {
@@ -4316,6 +4348,7 @@ export function App() {
         recipientIds?: AgentId[];
         dance?: DanceComposerDraft;
         danceRetry?: DanceDelivery;
+        routeModel?: string;
         eligibilityText?: string;
         onAccepted?: () => void;
       },
@@ -4481,6 +4514,7 @@ export function App() {
         recipients.map(async (id) => {
           await submitPromptToAgent(id, preparedPayloads.get(id) ?? payload, sent && localRecipients.has(id) ? {
             projectRoot: violetProjectRoot ?? '', messageId: sent.id, createdAt: sent.timestamp, private: !!sent.privacy,
+            ...(!danceDelivery && !options?.broadcast && id === target && options?.routeModel ? { routeModel: options.routeModel } : {}),
           } : undefined, soulInput);
           return id;
         }),
@@ -4573,16 +4607,8 @@ export function App() {
         tavernPreparing={tavernPreparing}
         hideProjectTabs={tavernOpen || tavernPreparing}
         ghAuth={ghAuth}
-        onGhAuthClick={() => {
-          if (ghAuth?.authenticated) return;
-          if (ghAuth?.cliMissing) {
-            void openExternalUrl(GITHUB_CLI_INSTALL_URL).catch(() => {});
-            return;
-          }
-          window.dispatchEvent(new CustomEvent('kota:smart-run', {
-            detail: { command: GITHUB_CLI_LOGIN_COMMAND },
-          }));
-        }}
+        workspace={activeWorkspace}
+        onGhAuthClick={openGithubAccounts}
       />
       <>
         <>
@@ -4646,6 +4672,7 @@ export function App() {
                     unsupportedAgentProviders={unsupportedAgentProviders}
                     projectName={activeProjectName}
                     projectId={activeWorkspace?.projectId}
+                    workspace={activeWorkspace}
                     targetAgent={targetAgent}
                     danceActive={danceEnabled}
                     chatFilterTargetAgents={chatFilterTargetAgents}
@@ -4728,6 +4755,13 @@ export function App() {
                         onDraftChange={clearPartialSessionSend}
                         onPasteImage={handlePasteComposerImage}
                         onMaterializeAttachments={handleMaterializeComposerAttachments}
+                        modelControls={!danceEnabled && targetAgent && violetProjectRoot && isLocalAgent(targetAgent) ?
+                          <ComposerModelControl key={`${violetProjectRoot}:${targetAgent}`} projectRoot={violetProjectRoot}
+                            agentId={targetAgent} name={agentMeta[targetAgent]?.name ?? targetAgent} memory={composerModels.current} /> : null}
+                        getRouteModel={() => {
+                          const current = composerModels.current.current;
+                          return current?.projectRoot === violetProjectRoot && current.agentId === targetAgent ? current.routeModel : undefined;
+                        }}
                         onWhiteboardOpen={toggleWhiteboard}
                         onFocus={() => setTerminalFocusedAgent(null)}
                       />
@@ -4932,10 +4966,13 @@ export function App() {
           onClose={closeTavern}
           initialTab={tavernInitialTab}
           localLinkIntent={tavernLocalLinkIntent}
-          initialGhAuth={ghAuth}
           ghosttyTerminalEnhancement={ghosttyTerminalEnhancement}
           onGhosttyTerminalEnhancementChange={setGhosttyTerminalEnhancement}
           onWorkspaceResumed={handleWorkspacePrepared}
+          onConfirmProjectRemoval={(title, body) => confirmInApp(title, body, {
+            confirmLabel: 'Remove',
+            tone: 'danger',
+          })}
         />
       </>
     </>

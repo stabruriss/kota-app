@@ -185,7 +185,7 @@ function ProjectIncarnations({ project, disabled, onSelect }: {
     return () => { active = false; };
   }, [open, project.localRoot, revision]);
   return <div className="soul-recruit-project">
-    <button type="button" className="soul-recruit-project-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}><span>{project.repoFullName || project.projectId}</span><span>{agents ? `${agents.length} ${agents.length === 1 ? 'agent' : 'agents'}` : ''} {open ? '▾' : '▸'}</span></button>
+    <button type="button" className="soul-recruit-project-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}><span>{project.displayName || project.repoFullName || project.projectId}</span><span>{agents ? `${agents.length} ${agents.length === 1 ? 'agent' : 'agents'}` : ''} {open ? '▾' : '▸'}</span></button>
     {open && <div className="soul-recruit-agents">
       {error ? <p role="alert">{error} <button type="button" onClick={() => setRevision(value => value + 1)}>Retry</button></p>
         : !agents ? <p role="status">Loading agents…</p>

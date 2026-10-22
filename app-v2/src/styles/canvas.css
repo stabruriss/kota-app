@@ -13089,6 +13089,11 @@ body::before {
   font-size: 18px;
 }
 .tavern-close:hover { color: var(--text); border-color: var(--brass-lo); }
+.project-setup-modal .tavern-close {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
 .tavern-tabs {
   display: inline-flex;
   margin: 16px 0 14px;
@@ -13217,6 +13222,18 @@ body::before {
 .project-setup-empty button:disabled {
   opacity: 0.44;
   cursor: not-allowed;
+}
+.project-setup-modal .project-create-action,
+.project-setup-modal .github-sign-in > button {
+  appearance: none;
+  border: 1px solid rgba(218,214,204,0.24);
+  background: rgba(0,0,0,0.2);
+  color: var(--brass-hi);
+  box-shadow: none;
+  padding: 0 12px;
+}
+.project-setup-modal .github-sign-in {
+  gap: 12px;
 }
 .project-setup-empty button.secondary {
   border-color: var(--border);

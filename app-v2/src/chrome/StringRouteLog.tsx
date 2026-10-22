@@ -5,6 +5,7 @@ const TYPE = { selection: 'String Selection', model_error: 'Model Error', jev_er
 export function stringEventText(event: StringRouteEvent): string {
   if (event.kind === 'selection') {
     const model = `${event.selected.provider}/${event.selected.model}[${event.selected.thinkingLevel}]`;
+    if (event.outcome === 'manual') return `${model} overwrite by user`;
     return event.outcome === 'selected' ? `${model} selected • Certainty ${event.candidate.probability.toFixed(2)}`
       : `${model} ${event.outcome} • Candidate ${event.candidate.provider}/${event.candidate.model} ${event.candidate.probability.toFixed(2)} ≤ ${event.threshold.toFixed(2)}`;
   }

@@ -2486,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "kota-v2"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "alacritty_terminal",
  "anyhow",

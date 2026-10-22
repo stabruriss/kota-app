@@ -11,8 +11,10 @@ pub mod agent_bus;
 pub mod bartender;
 pub mod bbs;
 pub mod bbs_sync;
+mod cli_identity;
 mod claude_native_images;
 mod file_clipboard;
+mod github_accounts;
 mod file_preview;
 pub mod laughing_man;
 pub mod ember;
@@ -11056,13 +11058,72 @@ async fn google_drive_connect_and_setup(
 }
 
 #[tauri::command]
-async fn github_list_repos(app: tauri::AppHandle) -> Result<Vec<integrations::GithubRepo>, String> {
+async fn github_list_repos(
+    app: tauri::AppHandle,
+    account_login: Option<String>,
+) -> Result<Vec<integrations::GithubRepo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let manager = app.state::<IntegrationManager>();
-        manager.github_list_repos().map_err(|err| err.to_string())
+        manager
+            .github_list_repos(account_login.as_deref())
+            .map_err(|err| err.to_string())
     })
     .await
     .map_err(|err| format!("join github_list_repos: {err}"))?
+}
+
+/// Tavern Link: the GitHub accounts Kota uses. Reading also takes over gh's active
+/// login on first use after upgrade.
+#[tauri::command]
+async fn github_accounts_read() -> Result<github_accounts::AccountsView, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let gh = github_accounts::GhCli;
+        let store = github_accounts::ensure_store(&github_accounts::kota_home(), &gh).map_err(|err| err.to_string())?;
+        Ok(github_accounts::view(&store, &gh))
+    })
+    .await
+    .map_err(|err| format!("join github_accounts_read: {err}"))?
+}
+
+/// Before the Smart Terminal runs `gh auth login`: gh's active login, to restore after.
+#[tauri::command]
+async fn github_account_add_begin() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use github_accounts::Gh;
+        github_accounts::GhCli.logins().map(|logins| logins.active).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("join github_account_add_begin: {err}"))?
+}
+
+#[tauri::command]
+async fn github_account_add_finish(previous_active: Option<String>) -> Result<github_accounts::AddResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        github_accounts::finish_add(&github_accounts::kota_home(), &github_accounts::GhCli, previous_active.as_deref())
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("join github_account_add_finish: {err}"))?
+}
+
+#[tauri::command]
+async fn github_account_set_default(login: String) -> Result<github_accounts::AccountsView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = github_accounts::set_default(&github_accounts::kota_home(), &login).map_err(|err| err.to_string())?;
+        Ok(github_accounts::view(&store, &github_accounts::GhCli))
+    })
+    .await
+    .map_err(|err| format!("join github_account_set_default: {err}"))?
+}
+
+#[tauri::command]
+async fn github_account_remove(login: String) -> Result<github_accounts::AccountsView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = github_accounts::remove(&github_accounts::kota_home(), &login).map_err(|err| err.to_string())?;
+        Ok(github_accounts::view(&store, &github_accounts::GhCli))
+    })
+    .await
+    .map_err(|err| format!("join github_account_remove: {err}"))?
 }
 
 #[tauri::command]
@@ -11095,6 +11156,102 @@ async fn workspace_prepare_github_project(
     })
     .await
     .map_err(|err| format!("join workspace_prepare_github_project: {err}"))?
+}
+
+#[tauri::command]
+async fn workspace_create_local_project(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<integrations::WorkspaceProject, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = app.state::<IntegrationManager>();
+        let workspace = manager
+            .create_local_project(&name)
+            .map_err(|err| err.to_string())?;
+        regenerate_workspace_adapters_best_effort(&workspace, "local project create");
+        Ok(workspace)
+    })
+    .await
+    .map_err(|err| format!("join workspace_create_local_project: {err}"))?
+}
+
+fn connection_join_error(error: tauri::Error) -> integrations::ConnectionError {
+    integrations::ConnectionError::new("internal", error.to_string())
+}
+
+/// Connect dialog (local-project PLAN §3 D/E): repositories of one account, with the
+/// previous origin first and preselected.
+#[tauri::command]
+async fn project_connection_candidates(
+    app: tauri::AppHandle,
+    project_id: String,
+    account_login: String,
+) -> Result<integrations::ConnectionCandidates, integrations::ConnectionError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<IntegrationManager>().project_connection_candidates(&project_id, &account_login)
+    })
+    .await
+    .map_err(connection_join_error)?
+}
+
+/// Read-only: can this project connect to that repository, and what would happen.
+#[tauri::command]
+async fn project_connection_check(
+    app: tauri::AppHandle,
+    project_id: String,
+    account_login: String,
+    repo_full_name: String,
+) -> Result<integrations::ConnectionCheck, integrations::ConnectionError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<IntegrationManager>().project_connection_check(&project_id, &account_login, &repo_full_name)
+    })
+    .await
+    .map_err(connection_join_error)?
+}
+
+/// Connect, or change account or repository. On failure the project keeps its
+/// previous connection; the error names any repository created on the way.
+#[tauri::command]
+async fn project_connection_apply(
+    app: tauri::AppHandle,
+    request: integrations::ConnectionRequest,
+) -> Result<integrations::ConnectionApplied, integrations::ConnectionError> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<IntegrationManager>().project_connection_apply(request))
+        .await
+        .map_err(connection_join_error)?
+}
+
+#[tauri::command]
+async fn project_connection_set_local(
+    app: tauri::AppHandle,
+    project_id: String,
+) -> Result<integrations::WorkspaceProject, integrations::ConnectionError> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<IntegrationManager>().project_connection_set_local(&project_id))
+        .await
+        .map_err(connection_join_error)?
+}
+
+/// TopBar and gear: the project's mode and the state of its account.
+#[tauri::command]
+async fn project_connection_status(
+    app: tauri::AppHandle,
+    project_id: String,
+) -> Result<integrations::ConnectionStatus, integrations::ConnectionError> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<IntegrationManager>().project_connection_status(&project_id))
+        .await
+        .map_err(connection_join_error)?
+}
+
+#[tauri::command]
+async fn git_availability() -> integrations::GitAvailability {
+    tauri::async_runtime::spawn_blocking(integrations::git_availability)
+        .await
+        .unwrap_or(integrations::GitAvailability { available: false, version: None })
+}
+
+#[tauri::command]
+fn git_install_command_line_tools() -> Result<(), String> {
+    integrations::install_git_command_line_tools().map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -13996,6 +14153,13 @@ pub fn run() {
                     eprintln!("Kota {name} CLI shim setup failed: {err}");
                 }
             }
+            // First use after upgrade takes over gh's active login (it may ask the
+            // network), off the workspace path that status polls hold a lock in.
+            std::thread::spawn(|| {
+                if let Err(err) = github_accounts::ensure_store(&github_accounts::kota_home(), &github_accounts::GhCli) {
+                    kota_debug_log(&format!("[github-accounts] cannot read gh accounts: {err}"));
+                }
+            });
             if let Ok(workspaces) = app.state::<IntegrationManager>().list_workspaces() {
                 for workspace in workspaces {
                     if let Err(err) = app
@@ -14098,8 +14262,21 @@ pub fn run() {
             google_drive_disconnect,
             google_drive_connect_and_setup,
             github_list_repos,
+            github_accounts_read,
+            github_account_add_begin,
+            github_account_add_finish,
+            github_account_set_default,
+            github_account_remove,
             github_create_repo,
             workspace_prepare_github_project,
+            workspace_create_local_project,
+            git_availability,
+            git_install_command_line_tools,
+            project_connection_candidates,
+            project_connection_check,
+            project_connection_apply,
+            project_connection_set_local,
+            project_connection_status,
             workspace_status,
             bbs_sync_status,
             bbs_sync_diagnostics,
@@ -14672,6 +14849,8 @@ zai          glm-5.2           1M       131.1K   yes       no
             }],
             archived: false,
             archived_at: None,
+            display_name: None,
+            connection: None,
         };
 
         let index = project_tree_diff_index(&workspace).unwrap();

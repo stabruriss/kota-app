@@ -256,15 +256,15 @@ struct VioletSummaryModelOutput {
 
 #[derive(Clone, Debug, Deserialize)]
 struct EmberDreamConsolidationModelOutput {
-    decisions: Vec<EmberDreamDecision>,
+    dreams: Vec<EmberDreamFinalItem>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct EmberDreamDecision {
-    id: String,
-    op: String,
-    #[serde(default)]
-    text: Option<String>,
+struct EmberDreamFinalItem {
+    // Unlike a default Option, require the field while accepting explicit null.
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    from: Option<String>,
+    text: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -280,29 +280,9 @@ struct EmberDreamPromptItem {
 pub(crate) struct ActiveDream {
     pub id: String,
     pub text: String,
-    /// Position in the active list, oldest first. Rewrites and new entries are
-    /// appended by consolidation; the file has no per-entry creation dates.
+    /// Position in the model's retained list (file order). The file has no
+    /// per-entry creation dates.
     pub position: usize,
-}
-
-#[derive(Clone, Debug)]
-struct EmberDreamCandidateItem {
-    id: String,
-    project_index: usize,
-    text: String,
-}
-
-#[derive(Clone, Debug)]
-struct EmberDreamCandidateProposal {
-    project_index: usize,
-    text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum EmberDreamDecisionAction {
-    Keep,
-    Drop,
-    Rewrite(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8497,29 +8477,30 @@ fn run_ember_dream_consolidation(
             None
         }
     };
-    let (prompt_items, candidate_items) =
+    let prompt_items =
         build_ember_dream_consolidation_items(&current_dreams, &project_entries, usage.as_ref());
-    if candidate_items.is_empty() {
+    if !prompt_items.iter().any(|item| item.kind == "candidate") {
         append_dream_entry_records(&collected_entries)?;
         return Ok((collected_entries.len(), 0));
     }
-    let prompt = render_ember_dream_consolidation_prompt(&prompt_items)?;
+    let prompt = render_ember_dream_consolidation_prompt(
+        &prompt_items,
+        &read_ember_dream_consolidate_prompt_template(),
+    )?;
     let provider = request
         .provider
         .as_deref()
         .map(normalize_summary_provider)
         .unwrap_or_else(|| "codex".into());
-    let decisions = run_summary_cli(&provider, &project_roots[0], &prompt)
-        .and_then(|output| parse_ember_dream_cli_output(&output))?;
-    let decisions = validate_ember_dream_decisions(&prompt_items, decisions)?;
-    let result = apply_ember_dream_decisions(
+    let output = run_summary_cli(&provider, &project_roots[0], &prompt)?;
+    let archived_count = finish_ember_dream_consolidation(
+        &crate::kota_home_dir(),
         &current_dreams,
-        &candidate_items,
-        &decisions,
-        EMBER_DREAM_MAX_ACTIVE_ENTRIES,
+        &output,
+        &provider,
+        &collected_entries,
     )?;
-    persist_ember_dream_result(&crate::kota_home_dir(), &result, &provider, &collected_entries)?;
-    Ok((collected_entries.len(), result.archived.len()))
+    Ok((collected_entries.len(), archived_count))
 }
 
 fn build_ember_dream_state(
@@ -8542,13 +8523,13 @@ fn build_ember_dream_state(
     })
 }
 
-fn parse_ember_dream_cli_output(output: &str) -> Result<Vec<EmberDreamDecision>, String> {
+fn parse_ember_dream_cli_output(output: &str) -> Result<Vec<EmberDreamFinalItem>, String> {
     let trimmed = output.trim();
     for (start, _) in trimmed.match_indices('{') {
         let mut stream = serde_json::Deserializer::from_str(&trimmed[start..])
             .into_iter::<EmberDreamConsolidationModelOutput>();
         if let Some(Ok(parsed)) = stream.next() {
-            return Ok(parsed.decisions);
+            return Ok(parsed.dreams);
         }
     }
     Err("Ember dream CLI output did not contain valid dream JSON".into())
@@ -8556,18 +8537,22 @@ fn parse_ember_dream_cli_output(output: &str) -> Result<Vec<EmberDreamDecision>,
 
 fn render_ember_dream_consolidation_prompt(
     items: &[EmberDreamPromptItem],
+    template: &str,
 ) -> Result<String, String> {
     let items_json = serde_json::to_string_pretty(items)
         .map_err(|err| format!("serialize Dream consolidation items: {err}"))?;
-    let template = read_ember_dream_consolidate_prompt_template();
-    Ok(template.replace("{{items_json}}", &items_json))
+    let active_count = items.iter().filter(|item| item.kind == "active").count();
+    Ok(template
+        .replace("{{active_count}}", &active_count.to_string())
+        .replace("{{capacity}}", &EMBER_DREAM_MAX_ACTIVE_ENTRIES.to_string())
+        .replace("{{items_json}}", &items_json))
 }
 
 fn build_ember_dream_consolidation_items(
     current_dreams: &[String],
     project_entries: &[Vec<EmberDreamEntryRecord>],
     usage: Option<&HashMap<String, DreamUsage>>,
-) -> (Vec<EmberDreamPromptItem>, Vec<EmberDreamCandidateItem>) {
+) -> Vec<EmberDreamPromptItem> {
     let mut prompt_items = current_dreams
         .iter()
         .enumerate()
@@ -8578,26 +8563,21 @@ fn build_ember_dream_consolidation_items(
             usage: usage.map(|usage| usage.get(&dream_id(text)).cloned().unwrap_or_default()),
         })
         .collect::<Vec<_>>();
-    let mut candidate_items = Vec::new();
-    for (project_index, entries) in project_entries.iter().enumerate() {
+    let mut candidate_count = 0;
+    for entries in project_entries {
         for entry in entries {
             for text in split_ember_dream_entry_items(&entry.text) {
-                let id = format!("candidate-{}", candidate_items.len() + 1);
+                candidate_count += 1;
                 prompt_items.push(EmberDreamPromptItem {
-                    id: id.clone(),
+                    id: format!("candidate-{candidate_count}"),
                     kind: "candidate".into(),
-                    text: text.clone(),
-                    usage: None,
-                });
-                candidate_items.push(EmberDreamCandidateItem {
-                    id,
-                    project_index,
                     text,
+                    usage: None,
                 });
             }
         }
     }
-    (prompt_items, candidate_items)
+    prompt_items
 }
 
 fn ember_active_dream_id(index: usize) -> String {
@@ -8722,162 +8702,97 @@ fn sanitize_ember_dream_text(value: &str) -> String {
     truncate_chars(&cleaned, 240)
 }
 
-fn validate_ember_dream_decisions(
-    items: &[EmberDreamPromptItem],
-    decisions: Vec<EmberDreamDecision>,
-) -> Result<HashMap<String, EmberDreamDecisionAction>, String> {
-    let items_by_id = items
-        .iter()
-        .map(|item| (item.id.as_str(), item))
-        .collect::<HashMap<_, _>>();
-    let mut actions = HashMap::new();
-    for decision in decisions {
-        let id = decision.id.trim();
-        let Some(item) = items_by_id.get(id) else {
-            return Err(format!("Ember dream decision used unknown id: {id}"));
-        };
-        if actions.contains_key(id) {
-            return Err(format!("Ember dream decision repeated id: {id}"));
-        }
-        let action = match decision.op.trim().to_ascii_lowercase().as_str() {
-            "keep" => EmberDreamDecisionAction::Keep,
-            "drop" => EmberDreamDecisionAction::Drop,
-            "rewrite" => {
-                let text = sanitize_ember_dream_text(decision.text.as_deref().unwrap_or_default());
-                if text.is_empty() || is_empty_dream_placeholder(&text) {
-                    return Err(format!(
-                        "Ember dream rewrite requires non-empty text for id: {id}"
-                    ));
-                }
-                if normalized_dream_key(&text) == normalized_dream_key(&item.text) {
-                    EmberDreamDecisionAction::Keep
-                } else {
-                    EmberDreamDecisionAction::Rewrite(text)
-                }
-            }
-            op => {
-                return Err(format!(
-                    "Ember dream decision used unknown op '{op}' for id: {id}"
-                ))
-            }
-        };
-        actions.insert(id.to_string(), action);
-    }
-    let missing = items
-        .iter()
-        .filter(|item| !actions.contains_key(&item.id))
-        .map(|item| item.id.as_str())
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(format!(
-            "Ember dream decisions omitted ids: {}",
-            missing.join(", ")
-        ));
-    }
-    Ok(actions)
-}
-
-fn apply_ember_dream_decisions(
+fn apply_ember_dream_final_list(
     current: &[String],
-    candidates: &[EmberDreamCandidateItem],
-    decisions: &HashMap<String, EmberDreamDecisionAction>,
+    mut dreams: Vec<EmberDreamFinalItem>,
     max_active: usize,
 ) -> Result<EmberDreamApplyResult, String> {
-    let mut kept = Vec::new();
-    let mut refreshed = Vec::new();
-    let mut archived = Vec::new();
-    let mut seen = HashSet::new();
+    let active_ids = (0..current.len())
+        .map(ember_active_dream_id)
+        .collect::<HashSet<_>>();
+    let mut referenced = HashSet::new();
+    // Validate every row before deduplication or truncation. A bad trailing row
+    // must not turn a partial model answer into an acknowledged Dream batch.
+    for item in &mut dreams {
+        if let Some(id) = &item.from {
+            if !active_ids.contains(id) {
+                return Err(format!("Ember dream list used unknown active id: {id}"));
+            }
+            if !referenced.insert(id.clone()) {
+                return Err(format!("Ember dream list repeated active id: {id}"));
+            }
+        }
+        item.text = clean_dream_bullet_text(&item.text)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if item.text.is_empty() || is_empty_dream_placeholder(&item.text) {
+            return Err("Ember dream list requires non-empty text".into());
+        }
+        if item.text.chars().count() > 240 {
+            return Err("Ember dream list text exceeds 240 characters".into());
+        }
+    }
 
+    let mut seen = HashSet::new();
+    dreams.retain(|item| seen.insert(normalized_dream_key(&item.text)));
+    let overflow = dreams.split_off(max_active.min(dreams.len()));
+    // Recover a missing continuation label only for an otherwise unreferenced
+    // active item. Explicit from values keep precedence, including trimmed rows.
     for (index, text) in current.iter().enumerate() {
         let id = ember_active_dream_id(index);
-        let action = decisions
-            .get(&id)
-            .ok_or_else(|| format!("missing validated Ember dream decision for id: {id}"))?;
-        match action {
-            EmberDreamDecisionAction::Keep => {
-                if seen.insert(normalized_dream_key(text)) {
-                    kept.push(text.clone());
-                } else {
-                    archived.push(text.clone());
-                }
-            }
-            EmberDreamDecisionAction::Drop => archived.push(text.clone()),
-            EmberDreamDecisionAction::Rewrite(rewritten) => {
-                archived.push(text.clone());
-                if seen.insert(normalized_dream_key(rewritten)) {
-                    refreshed.push(rewritten.clone());
-                }
-            }
+        if referenced.contains(&id) {
+            continue;
+        }
+        let key = normalized_dream_key(text);
+        if let Some(item) = dreams
+            .iter_mut()
+            .find(|item| item.from.is_none() && normalized_dream_key(&item.text) == key)
+        {
+            item.from = Some(id);
         }
     }
-
-    let mut proposals = Vec::new();
-    for candidate in candidates {
-        let action = decisions.get(&candidate.id).ok_or_else(|| {
-            format!(
-                "missing validated Ember dream decision for id: {}",
-                candidate.id
-            )
-        })?;
-        let text = match action {
-            EmberDreamDecisionAction::Keep => candidate.text.clone(),
-            EmberDreamDecisionAction::Drop => continue,
-            EmberDreamDecisionAction::Rewrite(rewritten) => rewritten.clone(),
-        };
-        if seen.insert(normalized_dream_key(&text)) {
-            proposals.push(EmberDreamCandidateProposal {
-                project_index: candidate.project_index,
-                text,
-            });
-        }
-    }
-
-    if refreshed.len() > max_active {
-        let overflow = refreshed.len() - max_active;
-        archived.extend(refreshed.drain(0..overflow));
-    }
-    let candidate_capacity = max_active.saturating_sub(refreshed.len());
-    let selected_candidates = fair_order_ember_dream_candidates(proposals)
-        .into_iter()
-        .take(candidate_capacity)
-        .map(|candidate| candidate.text)
+    let continued = dreams
+        .iter()
+        .filter_map(|item| {
+            item.from
+                .as_deref()
+                .map(|id| (id, normalized_dream_key(&item.text)))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut archived = current
+        .iter()
+        .enumerate()
+        .filter_map(|(index, text)| {
+            let id = ember_active_dream_id(index);
+            // Formatting-only changes keep the same identity and usage. A removed
+            // or rewritten active item archives its old text, including when its
+            // proposed continuation was deduplicated or trimmed from the final list.
+            (continued.get(id.as_str()) != Some(&normalized_dream_key(text))).then(|| text.clone())
+        })
         .collect::<Vec<_>>();
-    let kept_capacity = max_active.saturating_sub(refreshed.len() + selected_candidates.len());
-    if kept.len() > kept_capacity {
-        let overflow = kept.len() - kept_capacity;
-        archived.extend(kept.drain(0..overflow));
-    }
-
-    let mut active = kept;
-    active.extend(refreshed);
-    active.extend(selected_candidates);
-    Ok(EmberDreamApplyResult { active, archived })
+    archived.extend(overflow.into_iter().map(|item| item.text));
+    let mut archived_keys = HashSet::new();
+    archived.retain(|text| archived_keys.insert(normalized_dream_key(text)));
+    // Unselected candidates are discarded, not added to the archive. Only the
+    // final list determines the active order; there is no slot allocation here.
+    Ok(EmberDreamApplyResult {
+        active: dreams.into_iter().map(|item| item.text).collect(),
+        archived,
+    })
 }
 
-fn fair_order_ember_dream_candidates(
-    candidates: Vec<EmberDreamCandidateProposal>,
-) -> Vec<EmberDreamCandidateProposal> {
-    let mut queues = BTreeMap::<usize, VecDeque<EmberDreamCandidateProposal>>::new();
-    for candidate in candidates {
-        queues
-            .entry(candidate.project_index)
-            .or_default()
-            .push_back(candidate);
-    }
-    let mut ordered = Vec::new();
-    loop {
-        let mut added = false;
-        for queue in queues.values_mut() {
-            if let Some(candidate) = queue.pop_front() {
-                ordered.push(candidate);
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
-    ordered
+fn finish_ember_dream_consolidation(
+    kota_home: &Path,
+    current: &[String],
+    output: &str,
+    provider: &str,
+    records: &[EmberDreamEntryRecord],
+) -> Result<usize, String> {
+    let dreams = parse_ember_dream_cli_output(output)?;
+    let result = apply_ember_dream_final_list(current, dreams, EMBER_DREAM_MAX_ACTIVE_ENTRIES)?;
+    persist_ember_dream_result(kota_home, &result, provider, records)?;
+    Ok(result.archived.len())
 }
 
 fn read_processed_dream_entry_ids() -> Result<HashSet<String>, String> {
@@ -15667,7 +15582,7 @@ done"#;
     }
 
     #[test]
-    fn ember_dream_prompt_items_hide_projects_and_keep_private_mapping() {
+    fn ember_dream_prompt_items_hide_project_and_agent_metadata() {
         let current = vec!["Existing portrait.".to_string()];
         let projects = vec![
             vec![EmberDreamEntryRecord {
@@ -15686,129 +15601,19 @@ done"#;
             }],
         ];
 
-        let (prompt_items, candidates) =
+        let prompt_items =
             build_ember_dream_consolidation_items(&current, &projects, Some(&HashMap::new()));
 
         assert_eq!(prompt_items.len(), 3);
         assert_eq!(prompt_items[0].id, "active-1");
         assert_eq!(prompt_items[1].id, "candidate-1");
         assert_eq!(prompt_items[2].id, "candidate-2");
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].project_index, 0);
-        assert_eq!(candidates[1].project_index, 0);
+        assert_eq!(prompt_items[1].text, "First observation.");
+        assert_eq!(prompt_items[2].text, "Second observation.");
         let serialized = serde_json::to_string(&prompt_items).unwrap();
         assert!(!serialized.contains("project"));
         assert!(!serialized.contains("event-1"));
         assert!(!serialized.contains("agent-1"));
-    }
-
-    #[test]
-    fn ember_dream_rewrite_refreshes_and_archives_the_old_text() {
-        let current = vec![
-            "Oldest Dream.".to_string(),
-            "Dream needing detail.".to_string(),
-            "Recent Dream.".to_string(),
-        ];
-        let candidates = vec![EmberDreamCandidateItem {
-            id: "candidate-1".into(),
-            project_index: 0,
-            text: "Brand-new Dream.".into(),
-        }];
-        let decisions = HashMap::from([
-            ("active-1".into(), EmberDreamDecisionAction::Keep),
-            (
-                "active-2".into(),
-                EmberDreamDecisionAction::Rewrite("Rewritten Dream.".into()),
-            ),
-            ("active-3".into(), EmberDreamDecisionAction::Keep),
-            ("candidate-1".into(), EmberDreamDecisionAction::Keep),
-        ]);
-
-        let result = apply_ember_dream_decisions(&current, &candidates, &decisions, 3).unwrap();
-
-        assert_eq!(
-            result.active,
-            vec!["Recent Dream.", "Rewritten Dream.", "Brand-new Dream."]
-        );
-        assert_eq!(
-            result.archived,
-            vec!["Dream needing detail.", "Oldest Dream."]
-        );
-    }
-
-    #[test]
-    fn ember_dream_candidate_slots_round_robin_across_projects() {
-        let candidates = vec![
-            EmberDreamCandidateItem {
-                id: "candidate-1".into(),
-                project_index: 0,
-                text: "Project zero first.".into(),
-            },
-            EmberDreamCandidateItem {
-                id: "candidate-2".into(),
-                project_index: 0,
-                text: "Project zero second.".into(),
-            },
-            EmberDreamCandidateItem {
-                id: "candidate-3".into(),
-                project_index: 1,
-                text: "Project one first.".into(),
-            },
-        ];
-        let decisions = candidates
-            .iter()
-            .map(|candidate| (candidate.id.clone(), EmberDreamDecisionAction::Keep))
-            .collect::<HashMap<_, _>>();
-
-        let result = apply_ember_dream_decisions(&[], &candidates, &decisions, 2).unwrap();
-
-        assert_eq!(
-            result.active,
-            vec!["Project zero first.", "Project one first."]
-        );
-        assert!(result.archived.is_empty());
-    }
-
-    #[test]
-    fn ember_dream_decisions_require_full_valid_coverage() {
-        let items = vec![
-            EmberDreamPromptItem {
-                id: "active-1".into(),
-                kind: "active".into(),
-                text: "Existing Dream.".into(),
-                usage: Some(DreamUsage::default()),
-            },
-            EmberDreamPromptItem {
-                id: "candidate-1".into(),
-                kind: "candidate".into(),
-                text: "Candidate Dream.".into(),
-                usage: None,
-            },
-        ];
-        let incomplete = vec![EmberDreamDecision {
-            id: "active-1".into(),
-            op: "keep".into(),
-            text: None,
-        }];
-        assert!(validate_ember_dream_decisions(&items, incomplete).is_err());
-
-        let complete = vec![
-            EmberDreamDecision {
-                id: "active-1".into(),
-                op: "rewrite".into(),
-                text: Some("Existing Dream.".into()),
-            },
-            EmberDreamDecision {
-                id: "candidate-1".into(),
-                op: "drop".into(),
-                text: None,
-            },
-        ];
-        let validated = validate_ember_dream_decisions(&items, complete).unwrap();
-        assert_eq!(
-            validated.get("active-1"),
-            Some(&EmberDreamDecisionAction::Keep)
-        );
     }
 
     #[test]

@@ -15,6 +15,8 @@ export interface InjectionDetails {
   private: boolean;
   sourceActorId?: string;
   sourceIntent?: string;
+  /** Composer override of the target's Auto String: a RouteModel id, read by the router. */
+  routeModel?: string;
 }
 export interface InjectionEnvelope {
   kotaId: string;
@@ -76,11 +78,12 @@ export function parseInjection(raw: string): InjectionEnvelope {
   if (!completeId(id)) failed('invalid-id');
   if (typeof input.customType !== 'string' || !(CUSTOM_TYPES as readonly string[]).includes(input.customType)) failed('invalid-envelope', id);
   const details = input.details;
-  if (!isObject(details) || !exactKeys(details, ['schema', 'messageId', 'targetAgentId', 'createdAt', 'private'], ['sourceActorId', 'sourceIntent'])
+  if (!isObject(details) || !exactKeys(details, ['schema', 'messageId', 'targetAgentId', 'createdAt', 'private'], ['sourceActorId', 'sourceIntent', 'routeModel'])
     || details.schema !== 1 || !component(details.messageId, 256) || !component(details.targetAgentId, 128)
     || !validTimestamp(details.createdAt) || typeof details.private !== 'boolean'
     || (Object.hasOwn(details, 'sourceActorId') && typeof details.sourceActorId !== 'string')
-    || (Object.hasOwn(details, 'sourceIntent') && typeof details.sourceIntent !== 'string')) failed('invalid-details', id);
+    || (Object.hasOwn(details, 'sourceIntent') && typeof details.sourceIntent !== 'string')
+    || (Object.hasOwn(details, 'routeModel') && !component(details.routeModel, 128))) failed('invalid-details', id);
   if (id !== `${details.messageId}#${details.targetAgentId}`) failed('invalid-id', id);
   if (!validContent(input.content)) failed('invalid-content', id);
   return input as unknown as InjectionEnvelope;

@@ -21,7 +21,8 @@ export function nextStringTemplateName(templates: readonly StringTemplate[]): st
 export type StringRouteEvent = { id: number; occurredAt?: string } & (
   | { kind: 'selection'; selected: { provider: string; model: string; thinkingLevel: string };
       candidate: { routeModel: string; provider: string; model: string; probability: number };
-      threshold: number; outcome: 'selected' | 'retained' | 'default' }
+      /** manual: the composer chose this model; candidate is that choice and probability carries no Jev meaning. */
+      threshold: number; outcome: 'selected' | 'retained' | 'default' | 'manual' }
   | { kind: 'model_error'; provider: string; model: string; message: string }
   | { kind: 'jev_error'; code: string; message: string }
   | { kind: 'string_error'; code: string; message: string; provider?: string; model?: string }

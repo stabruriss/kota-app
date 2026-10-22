@@ -41,6 +41,8 @@ struct Registration {
     project_id: String,
     repo_full_name: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     archived: bool,
 }
 
@@ -126,8 +128,12 @@ fn registration(root: &Path) -> Result<Option<Project>> {
         .trim()
         .rsplit(['/', '\\'])
         .next();
+    let name = match registration.display_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.to_owned(),
+        None => crate::bbs::display_project_name_with_fallback(&registration.project_id, label),
+    };
     let project = Project {
-        name: crate::bbs::display_project_name_with_fallback(&registration.project_id, label),
+        name,
         id: registration.project_id,
         root: root.to_path_buf(),
         agents: Vec::new(),

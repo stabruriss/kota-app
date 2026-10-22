@@ -2,10 +2,13 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
+import { refreshGithubAccounts } from '../src/lib/github-account-flow';
 import { ProjectSettings } from '../src/chrome/ProjectSettings';
-import { readProjectSettings, saveProjectCommitEmail, type ProjectSettingsValue } from '../src/pty-client';
+import { readProjectSettings, saveProjectCommitEmail, githubAccountsRead, projectConnectionStatus, type ProjectSettingsValue, type WorkspaceProject } from '../src/pty-client';
 
-vi.mock('../src/pty-client', () => ({
+vi.mock('../src/pty-client', async original => ({
+  ...await original<typeof import('../src/pty-client')>(),
+  githubAccountsRead: vi.fn(), projectConnectionStatus: vi.fn(),
   readProjectSettings: vi.fn(),
   saveProjectCommitEmail: vi.fn(),
 }));
@@ -14,9 +17,12 @@ const read = vi.mocked(readProjectSettings);
 const save = vi.mocked(saveProjectCommitEmail);
 let values: Record<string, string | null>;
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetAllMocks();
   values = {};
+  vi.mocked(githubAccountsRead).mockResolvedValue({defaultLogin:null,accounts:[]});
+  vi.mocked(projectConnectionStatus).mockResolvedValue({kind:'github',accountLogin:'bound-login',accountState:'ok'});
+  await refreshGithubAccounts();
   read.mockImplementation(async id => ({ commitEmail: values[id] ?? null }));
   save.mockImplementation(async (id, value) => {
     values[id] = value;
@@ -146,4 +152,31 @@ it('keeps a normal cursor while saving without losing the save lock or errors', 
   } finally {
     style.remove();
   }
+});
+
+const localWorkspace = { projectId:'local_fixture', displayName:'Local Notes', connection:{kind:'local'},
+  repoFullName:'', remoteUrl:'', githubHtmlUrl:'', sourceDir:'/fixture/local', localRoot:'/fixture/state',
+  sourceDirBytes:0, localRootBytes:0, sharedDir:'/fixture/shared', rulesDir:'/fixture/rules', agents:[], defaultBranch:'main', baseRef:'main' } satisfies WorkspaceProject;
+
+it('keeps Local disconnected without an available account and preserves its disabled commit email', async () => {
+  values.local_fixture = 'retained@example.test';
+  render(<ProjectSettings projectId="local_fixture" projectName="Local Notes" workspace={localWorkspace}/>);
+  await open();
+  const toggle=screen.getByRole('switch',{name:'Link GitHub'});
+  expect(toggle).toBeDisabled();expect(toggle).toHaveAttribute('aria-checked','false');
+  expect(screen.getByText('retained@example.test')).toBeInTheDocument();
+  expect(screen.getByText('Saved commit email')).toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'Edit'})).toBeDisabled();
+  expect(screen.getByRole('button',{name:'Remove'})).toBeDisabled();
+  fireEvent.click(screen.getByRole('button',{name:'Remove'}));
+  expect(save).not.toHaveBeenCalled();expect(values.local_fixture).toBe('retained@example.test');
+  expect(screen.getByText('Available when this project is connected to GitHub.')).toBeInTheDocument();
+  expect(screen.queryByText('Use another GH account for this project')).not.toBeInTheDocument();
+});
+it('keeps legacy GitHub project email editing and displays a bound project login', async () => {
+  render(<ProjectSettings projectId="linked" projectName="Linked" workspace={{...localWorkspace,projectId:'linked',repoFullName:'owner/repo',connection:{kind:'github',accountLogin:'bound-login'}}}/>);
+  await open();
+  expect(screen.getByText('Connected to GH ID bound-login')).toBeInTheDocument();
+  expect(screen.getByRole('switch')).toBeEnabled();expect(screen.getByRole('switch')).toHaveAttribute('aria-checked','true');
+  expect(screen.getByRole('button',{name:'Add commit email'})).toBeEnabled();
 });

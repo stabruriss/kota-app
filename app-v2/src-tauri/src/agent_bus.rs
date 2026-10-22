@@ -925,90 +925,12 @@ pub fn run_cli() -> Result<()> {
     let command = args.remove(0);
     match command.as_str() {
         "send" => {
-            let mut target = None;
-            let mut intent = "message".to_string();
-            let mut project_root = std::env::var("KOTA_PROJECT_ROOT").ok();
-            let mut sender_agent_id = std::env::var("KOTA_AGENT_ID").ok();
-            let mut sender_name = std::env::var("KOTA_AGENT_DISPLAY_NAME").ok();
-            let mut i = 0;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--to" => {
-                        i += 1;
-                        target = args.get(i).cloned();
-                        i += 1;
-                    }
-                    "--intent" => {
-                        i += 1;
-                        intent = args
-                            .get(i)
-                            .ok_or_else(|| anyhow!("usage: kota-agent-bus send --intent <intent>"))?
-                            .clone();
-                        i += 1;
-                    }
-                    "--project-root" => {
-                        i += 1;
-                        project_root = args.get(i).cloned();
-                        i += 1;
-                    }
-                    "--from" => {
-                        i += 1;
-                        sender_agent_id = args.get(i).cloned();
-                        i += 1;
-                    }
-                    "--from-name" => {
-                        i += 1;
-                        sender_name = args.get(i).cloned();
-                        i += 1;
-                    }
-                    value => bail!("unknown kota-agent-bus send argument: {value}"),
-                }
-            }
-            let project_root = project_root
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .and_then(find_project_root_from)
-                })
-                .ok_or_else(|| {
-                    anyhow!("kota-agent-bus send requires KOTA_PROJECT_ROOT or --project-root")
-                })?;
-            let sender_agent_id = sender_agent_id
-                .as_deref()
-                .map(normalize_agent_ref)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow!("kota-agent-bus send requires KOTA_AGENT_ID or --from"))?;
-            let sender_name = sender_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    agent_yaml_path(&project_root, &sender_agent_id)
-                        .and_then(|path| read_agent_display_name(&path))
-                });
-            let target_ref = target
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| anyhow!("usage: kota-agent-bus send --to <AKA-or-agent-id>"))?;
-            let target = resolve_cli_target_agent_id(&project_root, target_ref)?;
-            let body = read_stdin_body()?;
-            let event_id = mint_event_id(&sender_agent_id, &target);
-            let request = AgentBusDispatchFile {
-                schema: DISPATCH_SCHEMA.into(),
-                created_at: now_iso(),
-                project_root: path_string(&project_root),
-                sender_agent_id,
-                sender_name,
-                target,
-                intent,
-                text: body,
-                event_id: event_id.clone(),
-                dedupe_key: event_id.clone(),
-            };
-            enqueue_dispatch(&project_root, &request)?;
+            let event_id = cli_send(
+                &args,
+                std::env::current_dir().ok().as_deref(),
+                |key| std::env::var(key).ok(),
+                read_stdin_body,
+            )?;
             println!("{event_id}");
         }
         "install-shim" => {
@@ -1027,6 +949,120 @@ fn print_cli_usage() {
     eprintln!("usage:");
     eprintln!("  kota-agent-bus send --to <AKA-or-agent-id> [--intent <intent>] <<'EOF'");
     eprintln!("  kota-agent-bus install-shim");
+}
+
+fn cli_send(
+    args: &[String],
+    cwd: Option<&Path>,
+    env: impl Fn(&str) -> Option<String>,
+    read_body: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    let mut target = None;
+    let mut intent = "message".to_string();
+    let mut flag_project_root = None;
+    let mut flag_from = None;
+    let mut flag_from_name = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--to" => {
+                i += 1;
+                target = args.get(i).cloned();
+                i += 1;
+            }
+            "--intent" => {
+                i += 1;
+                intent = args
+                    .get(i)
+                    .ok_or_else(|| anyhow!("usage: kota-agent-bus send --intent <intent>"))?
+                    .clone();
+                i += 1;
+            }
+            "--project-root" => {
+                i += 1;
+                flag_project_root = args.get(i).cloned();
+                i += 1;
+            }
+            "--from" => {
+                i += 1;
+                flag_from = args.get(i).cloned();
+                i += 1;
+            }
+            "--from-name" => {
+                i += 1;
+                flag_from_name = args.get(i).cloned();
+                i += 1;
+            }
+            value => bail!("unknown kota-agent-bus send argument: {value}"),
+        }
+    }
+    let dir = crate::cli_identity::resolve(cwd, &env)?;
+    let (project_root, sender_agent_id, sender_name) = if let Some(dir) = dir {
+        let project_root = flag_project_root
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or(dir.project_root);
+        let sender_agent_id = flag_from
+            .as_deref()
+            .map(normalize_agent_ref)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(dir.agent_id);
+        let sender_name = flag_from_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToOwned::to_owned)
+            .or(dir.agent_display_name);
+        (project_root, sender_agent_id, sender_name)
+    } else {
+        let project_root = flag_project_root
+            .or_else(|| env("KOTA_PROJECT_ROOT"))
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| cwd.map(Path::to_path_buf).and_then(find_project_root_from))
+            .ok_or_else(|| {
+                anyhow!("kota-agent-bus send requires KOTA_PROJECT_ROOT or --project-root")
+            })?;
+        let sender_agent_id = flag_from
+            .or_else(|| env("KOTA_AGENT_ID"))
+            .as_deref()
+            .map(normalize_agent_ref)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("kota-agent-bus send requires KOTA_AGENT_ID or --from"))?;
+        let sender_name = flag_from_name
+            .or_else(|| env("KOTA_AGENT_DISPLAY_NAME"))
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                agent_yaml_path(&project_root, &sender_agent_id)
+                    .and_then(|path| read_agent_display_name(&path))
+            });
+        (project_root, sender_agent_id, sender_name)
+    };
+    let target_ref = target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("usage: kota-agent-bus send --to <AKA-or-agent-id>"))?;
+    let target = resolve_cli_target_agent_id(&project_root, target_ref)?;
+    let body = read_body()?;
+    let event_id = mint_event_id(&sender_agent_id, &target);
+    let request = AgentBusDispatchFile {
+        schema: DISPATCH_SCHEMA.into(),
+        created_at: now_iso(),
+        project_root: path_string(&project_root),
+        sender_agent_id,
+        sender_name,
+        target,
+        intent,
+        text: body,
+        event_id: event_id.clone(),
+        dedupe_key: event_id.clone(),
+    };
+    enqueue_dispatch(&project_root, &request)?;
+    Ok(event_id)
 }
 
 fn enqueue_dispatch(project_root: &Path, request: &AgentBusDispatchFile) -> Result<PathBuf> {
@@ -1636,6 +1672,104 @@ mod tests {
 
         assert!(err.contains("agent not found for reference: 座山雕CC48"));
         assert!(err.contains("canonical agent id"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_send_uses_working_directory_identity_rejects_mismatch_and_falls_back() {
+        let root =
+            std::env::temp_dir().join(format!("kota-agent-bus-id-{}", Uuid::new_v4().simple()));
+        let project = root.join("cedar-project");
+        let alice_cwd = project.join(".agent-workspaces/agent-alice");
+        let worktree = alice_cwd.join("project-files");
+        let bob_cwd = project.join(".agent-workspaces/agent-bob");
+        let plain_dir = root.join("outside");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&bob_cwd).unwrap();
+        fs::create_dir_all(&plain_dir).unwrap();
+        fs::write(
+            project.join("workspace.json"),
+            r#"{"projectId":"cedar-project"}"#,
+        )
+        .unwrap();
+        fs::write(
+            alice_cwd.join("agent.yaml"),
+            "id: agent-alice\ndisplay-name: Alice\nstatus: active\n",
+        )
+        .unwrap();
+        fs::write(
+            bob_cwd.join("agent.yaml"),
+            "id: agent-bob\ndisplay-name: Bob\nstatus: active\n",
+        )
+        .unwrap();
+
+        let args = vec![
+            "--to".into(),
+            "Bob".into(),
+            "--intent".into(),
+            "handoff".into(),
+        ];
+
+        // 1) Directory matches environment -> sends as agent-alice from agent.yaml.
+        let matching = std::collections::HashMap::from([
+            ("KOTA_AGENT_ID", "agent-alice".to_string()),
+            ("KOTA_PROJECT_ID", "cedar-project".to_string()),
+            ("KOTA_AGENT_CWD", alice_cwd.display().to_string()),
+        ]);
+        let event_id = cli_send(
+            &args,
+            Some(&worktree),
+            |k| matching.get(k).cloned(),
+            || Ok("hello bob".into()),
+        )
+        .unwrap();
+        let dispatch_path = dispatch_outbox_dir(&project).join(format!("{event_id}.json"));
+        let dispatch: AgentBusDispatchFile =
+            serde_json::from_slice(&fs::read(&dispatch_path).unwrap()).unwrap();
+        assert_eq!(dispatch.sender_agent_id, "agent-alice");
+        assert_eq!(dispatch.sender_name.as_deref(), Some("Alice"));
+        assert_eq!(dispatch.target, "agent-bob");
+        fs::remove_file(&dispatch_path).unwrap();
+
+        // 2) Directory vs environment mismatch -> rejected before reading body or writing outbox.
+        let mismatched = std::collections::HashMap::from([
+            ("KOTA_AGENT_ID", "agent-maple".to_string()),
+            ("KOTA_PROJECT_ID", "maple-project".to_string()),
+        ]);
+        let err = cli_send(
+            &args,
+            Some(&worktree),
+            |k| mismatched.get(k).cloned(),
+            || panic!("stdin must not be read on identity mismatch"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "identity mismatch: environment says agent-maple@maple-project, working directory says agent-alice@cedar-project"
+        );
+        assert_eq!(fs::read_dir(dispatch_outbox_dir(&project)).unwrap().count(), 0);
+
+        // 3) No directory evidence -> falls back to environment variables.
+        let fallback = std::collections::HashMap::from([
+            ("KOTA_PROJECT_ROOT", project.display().to_string()),
+            ("KOTA_AGENT_ID", "agent-bob".to_string()),
+        ]);
+        let fallback_args = vec!["--to".into(), "Alice".into()];
+        let event_id = cli_send(
+            &fallback_args,
+            Some(&plain_dir),
+            |k| fallback.get(k).cloned(),
+            || Ok("from outside".into()),
+        )
+        .unwrap();
+        let dispatch_path = dispatch_outbox_dir(&project).join(format!("{event_id}.json"));
+        let dispatch: AgentBusDispatchFile =
+            serde_json::from_slice(&fs::read(&dispatch_path).unwrap()).unwrap();
+        assert_eq!(dispatch.sender_agent_id, "agent-bob");
+        assert_eq!(dispatch.sender_name.as_deref(), Some("Bob"));
+        assert_eq!(dispatch.target, "agent-alice");
+
         fs::remove_dir_all(root).unwrap();
     }
 }

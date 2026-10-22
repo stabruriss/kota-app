@@ -75,6 +75,7 @@ beforeEach(() => {
   bus.listeners.clear();
   states = { openai: { status: 'signed_in', authType: 'oauth' }, anthropic: { status: 'signed_in', authType: 'api_key' } };
   bus.handlers = new Map<string, (args: any) => unknown>([
+    ['github_accounts_read', (): pty.GithubAccounts => ({ defaultLogin: null, accounts: [] })],
     ['local_rpc_auth_availability', () => availability()],
     ['local_rpc_model_catalog', (): LocalModelCatalog => ({
       schema: 1,
@@ -619,8 +620,10 @@ it('opens Puppeteer for Jev and keeps ordinary sign-in on Tavern Link', async ()
     await screen.findByTestId('tavern-kota-local');
     expect(screen.getByRole('button', { name: 'Link' })).toHaveClass('active');
     await waitFor(() => expect(document.getElementById('link-kota-local')).toHaveFocus());
+    const github = screen.getByRole('region', { name: 'GitHub accounts' });
+    await within(github).findByText('No GitHub accounts yet.');
     const cards = [...document.querySelectorAll('.tavern-pane.connections .tavern-section-title')].map((title) => title.textContent);
-    expect(cards.indexOf('Kota Local')).toBe(cards.indexOf('GitHub CLI') + 1);
+    expect(cards.slice(0, 2)).toEqual(['GitHub', 'Kota Local']);
   } finally {
     if (previous) Object.defineProperty(window, 'localStorage', previous);
     else Reflect.deleteProperty(window, 'localStorage');
