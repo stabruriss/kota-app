@@ -43,6 +43,7 @@ async fn connection_adoption_keeps_the_original_member_fence_and_cancellation_ow
                     assert!(matches!(adopted, Err(Error::Unauthorized)));
                 } else {
                     let connection = adopted.unwrap();
+                    assert_eq!(connection.exchange_version(), ExchangeVersion::V5);
                     assert!(!cancels[0].is_cancelled());
                     assert!(connection.diagnostics().await?.is_none());
                     current.store(false, Ordering::Release);

@@ -20,16 +20,24 @@ struct Marker {
 }
 impl ContentStore {
     fn marker_path(&self, thread: &str, post: &str, parents: bool) -> Result<PathBuf> {
+        self.marker_path_tracked(thread, post, parents, &mut Deps::untracked())
+    }
+    fn marker_path_tracked(&self, thread: &str, post: &str, parents: bool, deps: &mut Deps) -> Result<PathBuf> {
         bbs_sync::safe_id(post).map_err(anyhow::Error::msg)?;
-        self.managed(
+        self.managed_tracked(
             &Self::thread_relative(thread)?
                 .join("placeholders")
                 .join(format!("{post}.json")),
             parents,
+            deps,
         )
     }
     fn read_marker(&self, thread: &str, post: &str) -> Result<Option<UnavailableView>> {
-        let path = self.marker_path(thread, post, false)?;
+        self.read_marker_tracked(thread, post, &mut Deps::untracked())
+    }
+    fn read_marker_tracked(&self, thread: &str, post: &str, deps: &mut Deps) -> Result<Option<UnavailableView>> {
+        let path = self.marker_path_tracked(thread, post, false, deps)?;
+        deps.stat(&path);
         let Some(before) = current_stamp(&path)? else {
             return Ok(None);
         };
@@ -146,11 +154,20 @@ impl ContentStore {
         state: &SyncState,
         real_posts: &BTreeSet<String>,
     ) -> Result<Vec<UnavailableView>> {
+        self.unavailable_views_tracked(thread, state, real_posts, &mut Deps::untracked())
+    }
+    pub(in crate::bbs) fn unavailable_views_tracked(
+        &self,
+        thread: &str,
+        state: &SyncState,
+        real_posts: &BTreeSet<String>,
+        deps: &mut Deps,
+    ) -> Result<Vec<UnavailableView>> {
         if state.tombstones.contains_key(&format!("thread:{thread}")) {
             return Ok(vec![]);
         }
-        let dir = self.managed(&Self::thread_relative(thread)?.join("placeholders"), false)?;
-        let entries = match fs::read_dir(dir) {
+        let dir = self.managed_tracked(&Self::thread_relative(thread)?.join("placeholders"), false, deps)?;
+        let entries = match deps.read_dir(&dir) {
             Ok(v) => v,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(e.into()),
@@ -169,7 +186,7 @@ impl ContentStore {
                 continue;
             }
             // A broken sidecar cannot hide neighboring real posts or markers.
-            if let Ok(Some(view)) = self.read_marker(thread, id) {
+            if let Ok(Some(view)) = self.read_marker_tracked(thread, id, deps) {
                 views.push(view)
             }
         }

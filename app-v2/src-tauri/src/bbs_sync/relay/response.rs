@@ -22,16 +22,22 @@ fn identity(headers: &BTreeMap<String, Vec<String>>) -> bool {
 
 /// Exact application codes take precedence over the generic 429/503 fallback.
 /// No raw upstream text, guessed platform number or resetAtUtc leaves here.
-pub(super) fn rejected(
+pub(super) fn rejected(status: u16, headers: &BTreeMap<String, Vec<String>>, bytes: &[u8]) -> Error {
+    failure(status, headers, bytes).0
+}
+
+// The cause is populated only inside the closed status/code match below.
+// Neither an unknown code nor raw upstream response text reaches a log.
+pub(super) fn failure(
     status: u16,
     headers: &BTreeMap<String, Vec<String>>,
     bytes: &[u8],
-) -> Error {
+) -> (Error, Option<String>) {
     if (200..400).contains(&status) {
-        return Error::Protocol;
+        return (Error::Protocol, None);
     }
     if bytes.len() >= MAX_JSON {
-        return Error::CloudflareResourceLimit;
+        return (Error::CloudflareResourceLimit, None);
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -43,16 +49,16 @@ pub(super) fn rejected(
     if json && compact_json(bytes, MAX_JSON).is_ok() {
         if let Ok(body) = serde_json::from_slice::<Rejection>(bytes) {
             if !body.ok {
-                match (status, body.error.as_str()) {
+                let error = match (status, body.error.as_str()) {
                     (429, "relay_backpressure" | "rate_limited") | (409, "relay_not_ready") => {
-                        return Error::Busy
+                        Error::Busy
                     }
-                    (401, "stale_signature") => return Error::StaleSignature,
+                    (401, "stale_signature") => Error::StaleSignature,
                     (401 | 403, "unauthorized")
                     | (401, "invalid_key_or_signature")
                     | (403 | 409, "removed")
-                    | (409, "replayed_signature") => return Error::Unauthorized,
-                    (409, "protocol_mismatch") => return Error::ProtocolVersion,
+                    | (409, "replayed_signature") => Error::Unauthorized,
+                    (409, "protocol_mismatch") => Error::ProtocolVersion,
                     (
                         409,
                         "relay_session_lost"
@@ -60,8 +66,8 @@ pub(super) fn rejected(
                         | "relay_wake_expired"
                         | "relay_wake_used"
                         | "relay_instance_changed",
-                    ) => return Error::RelaySessionLost,
-                    (503, "relay_service_limit") => return Error::CloudflareResourceLimit,
+                    ) => Error::RelaySessionLost,
+                    (503, "relay_service_limit") => Error::CloudflareResourceLimit,
                     (
                         400 | 404 | 405 | 409 | 413,
                         "invalid_relay_integer"
@@ -89,13 +95,14 @@ pub(super) fn rejected(
                         | "invalid_id"
                         | "invalid_hash"
                         | "not_found",
-                    ) => return Error::Protocol,
-                    _ => {}
-                }
+                    ) => Error::Protocol,
+                    _ => return (Error::CloudflareResourceLimit, None),
+                };
+                return (error, Some(format!("worker:{}", body.error)));
             }
         }
     }
-    Error::CloudflareResourceLimit
+    (Error::CloudflareResourceLimit, None)
 }
 
 /// Success is route-specific. In particular HTML, even with HTTP 200, is not

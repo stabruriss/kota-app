@@ -51,6 +51,7 @@ fn detail(root: &Path) -> ProjectAgentDetail {
         adapter_path: root.join("AGENTS.md").to_string_lossy().into_owned(),
         shell_path: shell_path.to_string_lossy().into_owned(),
         agent_yaml_path: root.join("agent.yaml").to_string_lossy().into_owned(),
+        notes: crate::project_agent_notes(root),
         status: "active".into(),
         archived_at: None,
         invite_eligibility: eligibility(

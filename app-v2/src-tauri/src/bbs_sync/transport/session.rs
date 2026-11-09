@@ -1,9 +1,9 @@
 use super::{
     control_channel::{ControlChannel, Delivery},
-    data_channel::{DataPipe, IncomingFile},
+    data_channel::{DataPipe, IncomingFile, ResumableFile},
     network_policy::{NetworkPolicy, PolicyRuntime, STUN_URLS},
     runtime_host::{require_network_thread, Context},
-    signaling, Cancellation, Error, MembershipCheck, PeerIdentity, Resource, Result, SessionRole,
+    signaling, Cancellation, Error, ExchangeVersion, MembershipCheck, PeerIdentity, Resource, Result, SessionRole,
     SignedDescription, MAX_FRAME,
 };
 use crate::bbs_sync::DeviceIdentity;
@@ -369,6 +369,7 @@ impl PendingConnection {
             data,
             cancel: self.cancel.clone(),
             authorized: self.authorized.clone(),
+            exchange_version: ExchangeVersion::V4,
         })
     }
 }
@@ -401,6 +402,7 @@ pub(crate) struct Connection {
     data: Arc<DataPipe>,
     cancel: Cancellation,
     authorized: MembershipCheck,
+    exchange_version: ExchangeVersion,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -417,6 +419,7 @@ impl Connection {
         data: Arc<DataPipe>,
         cancel: Cancellation,
         authorized: MembershipCheck,
+        exchange_version: ExchangeVersion,
     ) -> Result<Self> {
         require_network_thread()?;
         if cancel.is_cancelled() {
@@ -432,7 +435,17 @@ impl Connection {
             data,
             cancel,
             authorized,
+            exchange_version,
         })
+    }
+    pub(crate) fn exchange_version(&self) -> ExchangeVersion {
+        self.exchange_version
+    }
+    /// The local RTC test carrier uses the same DataPipe as relay TLS.
+    #[cfg(test)]
+    pub(crate) fn with_exchange_version(mut self, version: ExchangeVersion) -> Self {
+        self.exchange_version = version;
+        self
     }
     #[cfg(test)]
     pub(super) fn rtc_policy(&self) -> &Arc<NetworkPolicy> {
@@ -449,8 +462,13 @@ impl Connection {
         )
     }
     #[cfg(test)]
-    pub(super) async fn pause_file(&self, rx: tokio::sync::oneshot::Receiver<()>) {
+    pub(crate) async fn pause_file(&self, rx: tokio::sync::oneshot::Receiver<()>) {
         *self.data.pause_after_ready.lock().await = Some(rx);
+    }
+    /// From a synchronous hook between slices, when no file is in flight.
+    #[cfg(test)]
+    pub(crate) fn pause_next_file(&self, rx: tokio::sync::oneshot::Receiver<()>) {
+        *self.data.pause_after_ready.try_lock().expect("no file in flight") = Some(rx);
     }
     #[cfg(test)]
     pub(crate) async fn pause_after_first_file_write(
@@ -459,6 +477,10 @@ impl Connection {
         release: tokio::sync::oneshot::Receiver<()>,
     ) {
         *self.data.pause_after_write.lock().await = Some((started, release));
+    }
+    #[cfg(test)]
+    pub(crate) fn corrupt_next_slice(&self) {
+        self.data.corrupt_next_slice.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     pub(crate) fn cancellation(&self) -> Cancellation {
         self.cancel.clone()
@@ -502,6 +524,26 @@ impl Connection {
         require_network_thread()?;
         self.recheck_membership()?;
         self.data.expect_file(resource, staging).await
+    }
+    pub(crate) async fn send_range(
+        &self,
+        resource: Resource,
+        source: &Path,
+        start: u64,
+        end: u64,
+    ) -> Result<()> {
+        require_network_thread()?;
+        self.recheck_membership()?;
+        self.data.send_range(resource, source, start, end).await
+    }
+    pub(crate) async fn resume_file(
+        &self,
+        resource: Resource,
+        staging: &Path,
+    ) -> Result<ResumableFile> {
+        require_network_thread()?;
+        self.recheck_membership()?;
+        self.data.resume_file(resource, staging).await
     }
     pub(crate) async fn diagnostics(&self) -> Result<Option<Diagnostics>> {
         require_network_thread()?;

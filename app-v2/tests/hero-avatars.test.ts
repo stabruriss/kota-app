@@ -142,4 +142,17 @@ describe('user hero avatar storage', () => {
     await deleteUserHeroAvatar(stored.id);
     expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '[]')).toEqual([]);
   });
+
+  it('maps kota-local to its dedicated default avatar without affecting pi or other providers', async () => {
+    const heroAvatars = await import('../src/lib/hero-avatars');
+    expect(heroAvatars.defaultAvatarIdForProvider('kota-local')).toBe('kota-local');
+    expect(heroAvatars.avatarClassForId(null, 'kota-local')).toBe('provider-kota-local');
+    expect(heroAvatars.avatarClassForId('pi', 'kota-local')).toBe('provider-kota-local');
+    expect(heroAvatars.avatarClassForCli('kota-local')).toBe('provider-kota-local');
+    expect(heroAvatars.avatarClassForAgentFallback('kota-local', 'agent-local')).toBe('provider-kota-local');
+    expect(heroAvatars.avatarClassForAgentFallback(null, 'hero-kota-local')).toBe('provider-kota-local');
+    expect(heroAvatars.defaultAvatarIdForProvider('pi')).toBe('pi');
+    expect(heroAvatars.avatarClassForId('pi', 'pi')).toBe('provider-pi');
+    expect(heroAvatars.avatarClassForCli('pi')).toBe('provider-pi');
+  });
 });

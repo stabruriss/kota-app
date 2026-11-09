@@ -1016,5 +1016,6 @@ function AddChip({
 }
 
 function providerAvatarClass(cli: WorkingHero['cli'] | undefined, id: AgentId): string {
+  if (cli === 'kota-local') return 'provider-kota-local';
   return avatarClassForAgentFallback(cli, id);
 }

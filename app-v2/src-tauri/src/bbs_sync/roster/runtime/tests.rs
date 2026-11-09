@@ -247,3 +247,48 @@ async fn local_projection_does_not_clean_another_owners_stage_and_network_retire
         .is_ok());
     close(&runtime).await;
 }
+
+#[tokio::test]
+async fn failed_member_projection_keeps_the_same_authority_and_withdraws_a_changed_one() {
+    let account = Account::new();
+    account.project("p", false);
+    let (state, _own, peer) = super::super::tests::joined(&account);
+    let content = store(&account);
+    content.prepare_layout().unwrap();
+    let runtime = Runtime::new(content.clone());
+    runtime.start(Arc::new(|| {}), Arc::new(|| {}));
+    page(&runtime).await;
+    let current = context(&state).unwrap().membership;
+    let members = |incarnation: &str| {
+        vec![control::Member {
+            device_id: peer.clone(),
+            public_key: String::new(),
+            name: "Renamed while the lock was busy".into(),
+            role: control::Role::Member,
+            membership_id: incarnation.into(),
+            last_seen_at: 0,
+            online: true,
+        }]
+    };
+    let read = |runtime: &Runtime| {
+        runtime.page(public::ReadRequest {
+            version: None,
+            after: None,
+        })
+    };
+    // Same membership and incarnations: only presence/name differ, so a
+    // transient failure keeps the published roster readable.
+    assert!(runtime.member_projection_failed(current.as_ref(), &members("peer-membership"), false));
+    assert!(read(&runtime).is_ok());
+    // A changed group context withdraws it.
+    assert!(!runtime.member_projection_failed(current.as_ref(), &members("peer-membership"), true));
+    assert!(read(&runtime).is_err());
+    // Nothing published: nothing to keep.
+    assert!(!runtime.member_projection_failed(current.as_ref(), &members("peer-membership"), false));
+    // Republished, then a replaced member incarnation is a changed authority.
+    runtime.update_context(context(&state).unwrap());
+    page(&runtime).await;
+    assert!(!runtime.member_projection_failed(current.as_ref(), &members("peer-membership-2"), false));
+    assert!(read(&runtime).is_err());
+    close(&runtime).await;
+}

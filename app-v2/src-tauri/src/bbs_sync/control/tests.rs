@@ -620,6 +620,8 @@ fn consumed_invitation_rotates_on_explicit_background_refresh_not_status_reads()
     client.status_memory();
     assert_eq!(transport.0.lock().unwrap().calls.len(), before);
     client.refresh_members(Some(&first.group_id)).unwrap();
+    assert!(client.invitation_needs_refresh(now_ms().unwrap()));
+    client.refresh_invitation().unwrap();
     let second = client.invitation(Some(&first.group_id), false).unwrap();
     assert_eq!(second.generation, "2");
     assert_ne!(first.invitation, second.invitation);
@@ -768,4 +770,29 @@ fn a_second_controller_cannot_replace_the_first_controllers_identity() {
     let id = client.device_id().unwrap();
     drop(client);
     assert_eq!(open(&root, transport, false).device_id().unwrap(), id);
+}
+
+#[test]
+fn failed_invitation_rotation_does_not_change_heartbeat_success_or_lose_its_retry() {
+    let root = Root::new();
+    let transport = FakeTransport::default();
+    let mut client = open(&root, transport.clone(), true);
+    let first = client.invitation(None, false).unwrap();
+    {
+        let mut fake = transport.0.lock().unwrap();
+        fake.invite.as_mut().unwrap().has_code = false;
+        fake.failures_before.push_back("/bbs/owner/invitation".into());
+    }
+    let before = transport.0.lock().unwrap().calls.len();
+    client.refresh_members(Some(&first.group_id)).unwrap();
+    assert_eq!(transport.0.lock().unwrap().calls.len(), before + 1);
+    assert!(client.invitation_needs_refresh(now_ms().unwrap()));
+    assert_eq!(client.refresh_invitation().unwrap_err(), "worker_unreachable");
+    assert!(client.has_pending());
+    let saved = fs::read(client.store.control_path()).unwrap();
+    client.refresh_members(Some(&first.group_id)).unwrap();
+    assert_eq!(fs::read(client.store.control_path()).unwrap(), saved);
+    client.resume_pending().unwrap();
+    assert!(!client.has_pending());
+    assert_eq!(client.invitation_generation(now_ms().unwrap()).as_deref(), Some("2"));
 }

@@ -133,14 +133,14 @@ describe('BbsGroup DO request and storage integration', () => {
     const f = environment();
     const health = await worker.fetch(new Request('https://worker.example/health'), f.env);
     expect(health.status).toBe(200);
-    expect(await health.json()).toMatchObject({ relayVersion: '0.1.4', protocolVersion: 'kota-lm-standby.v1' });
+    expect(await health.json()).toMatchObject({ relayVersion: '0.1.5', protocolVersion: 'kota-lm-standby.v1' });
     const heartbeat = await worker.fetch(new Request('https://worker.example/desktop/heartbeat', {
       method: 'POST',
       headers: { 'x-kota-standby-secret': 'paired-secret' },
       body: '{}',
     }), f.env);
     expect(heartbeat.status).toBe(200);
-    expect(await heartbeat.json()).toMatchObject({ relayVersion: '0.1.4', protocolVersion: 'kota-lm-standby.v1' });
+    expect(await heartbeat.json()).toMatchObject({ relayVersion: '0.1.5', protocolVersion: 'kota-lm-standby.v1' });
     const bbs = await worker.fetch(new Request('https://worker.example/bbs/owner/status'), f.env);
     expect(bbs.status).toBe(404);
     expect(await bbs.json()).toMatchObject({ protocolVersion: 1, error: 'not_found' });

@@ -412,6 +412,25 @@ fn read_peer_with_io(
     }))
 }
 
+/// Fixed diagnostic code for a failed member projection. Never echoes paths,
+/// IDs or OS error text into the debug log.
+pub(crate) fn projection_failure(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "bbs_busy" => "bbs_busy",
+        "group_context_changed" => "group_context_changed",
+        "unsafe_roster_directory" => "unsafe_roster_directory",
+        "unsupported_roster_schema"
+        | "invalid_roster_members"
+        | "invalid_roster_member"
+        | "invalid BBS id"
+        | "invalid SHA-256" => "invalid_roster_members",
+        "invalid private state JSON" | "private state must be a regular file" => {
+            "invalid_private_state"
+        }
+        _ => "io",
+    }
+}
+
 /// Called by the existing control owner after it has authenticated membership.
 /// This is public cache data only, saved under the same short group fence used
 /// by publication. It never serializes RemoteResponse, credentials or a URL.

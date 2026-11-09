@@ -24,6 +24,22 @@ const LOCAL: u8 = 1;
 const PUBLIC: u8 = 2;
 const PEERS: u8 = 4;
 static ACTIVE: OnceLock<Mutex<Option<Weak<Runtime>>>> = OnceLock::new();
+fn same_authority(
+    ctx: &Context,
+    current: Option<&control::Membership>,
+    members: &[control::Member],
+) -> bool {
+    let published: BTreeSet<_> = ctx
+        .members
+        .iter()
+        .map(|m| (m.device_id.as_str(), m.membership_id.as_str()))
+        .collect();
+    let next: BTreeSet<_> = members
+        .iter()
+        .map(|m| (m.device_id.as_str(), m.membership_id.as_str()))
+        .collect();
+    ctx.membership.as_ref() == current && published == next
+}
 pub(crate) fn active() -> bool {
     ACTIVE.get().is_some_and(|s| {
         s.lock()
@@ -189,8 +205,25 @@ impl Runtime {
         drop(published);
         self.mark(PUBLIC | PEERS);
     }
-    pub(crate) fn member_projection_failed(&self) {
+    /// A failed member projection keeps the last published roster while it
+    /// still describes the same authority: membership and member incarnations.
+    /// Only presence and names may be stale until the next projection. A
+    /// changed context or authority withdraws it, as before. Returns whether
+    /// the published roster was kept.
+    pub(crate) fn member_projection_failed(
+        &self,
+        current: Option<&control::Membership>,
+        members: &[control::Member],
+        context_changed: bool,
+    ) -> bool {
         let mut p = self.published.write().unwrap();
+        if !context_changed
+            && p.ctx
+                .as_ref()
+                .is_some_and(|ctx| same_authority(ctx, current, members))
+        {
+            return true;
+        }
         p.revision = p.revision.wrapping_add(1);
         p.ctx = None;
         p.page = None;
@@ -199,6 +232,7 @@ impl Runtime {
         if let Some(emit) = self.emit.lock().unwrap().clone() {
             emit();
         }
+        false
     }
     pub(crate) fn peer_changed(&self, peer: &str) {
         let mut p = self.published.write().unwrap();

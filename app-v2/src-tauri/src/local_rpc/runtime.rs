@@ -1,5 +1,6 @@
 use super::{ledger::{Entry, Ledger}, process::{PipeEvent, Process}, protocol::*};
 use anyhow::{anyhow, bail, Context, Result};
+use crossbeam_channel::{SendTimeoutError, Sender};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_WAIT: Duration = Duration::from_secs(35);
+const PROJECTION_QUEUE_CAPACITY: usize = 1024;
 const MAX_OUTSTANDING: usize = 64;
 const MAX_OUTSTANDING_BYTES: usize = 32 * 1024 * 1024;
 type Reply<T> = mpsc::SyncSender<std::result::Result<T, String>>;
@@ -167,6 +169,7 @@ impl Drop for Handle {
 enum Purpose {
     InitialState,
     Entries { recovery: bool, since: Option<String> },
+    History { recovery: bool, acknowledged: bool, result: Option<super::history::History> },
     Inject { kota_id: String, rejected: Option<Rejection> },
     External { kind: String, model: Option<super::models::ModelSelection>, reply: Reply<Value> },
     AuthRefresh { operation: String, acknowledged: bool, result: Option<bool> },
@@ -187,6 +190,23 @@ struct Notification {
     // Recovery is one ordered projection operation, not a burst into the
     // bounded live-event channel that could permanently block a large queue.
     after_recovery: Vec<LocalNotice>,
+}
+
+fn enqueue(tx: &Sender<Notification>, notification: Notification, wait: Duration) -> Result<()> {
+    let started = Instant::now();
+    let result = tx.send_timeout(notification, wait);
+    let elapsed = started.elapsed();
+    if elapsed > Duration::from_secs(1) {
+        crate::kota_debug_log(&format!(
+            "local-rpc: projection queue waited {}ms (payload omitted)", elapsed.as_millis(),
+        ));
+    }
+    match result {
+        Ok(()) => Ok(()),
+        Err(SendTimeoutError::Timeout(_) | SendTimeoutError::Disconnected(_)) => {
+            Err(anyhow!("Local projection queue is full or stopped"))
+        }
+    }
 }
 
 struct Owner {
@@ -219,7 +239,7 @@ struct Owner {
     entries_pending: bool,
     entries_again: bool,
     entries_token: u64,
-    notices: mpsc::SyncSender<Notification>,
+    notices: Sender<Notification>,
     persisted: mpsc::Receiver<Persisted>,
     last_status: Option<(OnlineState, usize, bool, Option<String>)>,
     expected_model: Option<super::models::ModelSelection>,
@@ -230,7 +250,7 @@ impl Owner {
     fn run(config: Config, ledger: Ledger, sink: Arc<dyn Sink>, shared: Arc<Mutex<Snapshot>>,
         view: Arc<Mutex<super::workbench::Workbench>>, clones: super::shadow_clone::Records,
         controls: mpsc::Receiver<Control>, ready: Reply<()>) {
-        let (notices, incoming) = mpsc::sync_channel::<Notification>(128);
+        let (notices, incoming) = crossbeam_channel::bounded::<Notification>(PROJECTION_QUEUE_CAPACITY);
         let (ack, persisted) = mpsc::sync_channel(8);
         let notify_current = config.current.clone();
         let notifier = thread::Builder::new().name("local-rpc-notifier".into()).spawn(move || {
@@ -348,8 +368,7 @@ impl Owner {
     }
 
     fn notify(&self, notice: LocalNotice) -> Result<()> {
-        self.notices.try_send(Notification { notice, acknowledgement: None, after_recovery: Vec::new() })
-            .map_err(|_| anyhow!("Local projection queue is full or stopped"))
+        enqueue(&self.notices, Notification { notice, acknowledgement: None, after_recovery: Vec::new() }, COMMAND_TIMEOUT)
     }
 
     fn status(&mut self, state: OnlineState, error: Option<String>) -> Result<()> {
@@ -403,11 +422,47 @@ impl Owner {
     fn request_entries(&mut self, recovery: bool) -> Result<()> {
         if self.entries_pending { self.entries_again = true; return Ok(()); }
         let since = if recovery { None } else { self.since.clone() };
-        let mut request = json!({"type":"get_entries"});
-        if let Some(since) = &since { request["since"] = json!(since); }
-        self.send(request, Purpose::Entries { recovery, since })?;
+        if let Some(since) = since {
+            self.send(json!({"type":"get_entries", "since":since}), Purpose::Entries { recovery, since:Some(since) })?;
+        } else {
+            let request_id = format!("local-{}-{}", self.scope.epoch, self.counter + 1);
+            self.send(json!({"type":"prompt", "message":format!("/kota-history {}", json!({"schema":1,"requestId":request_id}))}),
+                Purpose::History { recovery, acknowledged:false, result:None })?;
+        }
         self.entries_pending = true;
         Ok(())
+    }
+
+    fn history(&mut self, history: super::history::History, recovery: bool) -> Result<()> {
+        match history {
+            super::history::History::Ready { entries, leaf_id } => self.receive_entries(entries, leaf_id, None, recovery),
+            super::history::History::TooLarge {} => bail!("{}", super::history::TOO_LARGE),
+        }
+    }
+
+    fn receive_entries(&mut self, entries: Vec<Value>, leaf_id: Option<String>, since: Option<String>, recovery: bool) -> Result<()> {
+        let present: BTreeSet<_> = entries.iter().filter_map(custom_receipt)
+            .filter(|receipt| receipt.details.target_agent_id == self.scope.agent_id)
+            .map(|receipt| receipt.kota_id).collect();
+        let recovered_terminal = if recovery {
+            self.ledger.reconcile(&self.scope.session_id, &present)?.into_iter()
+                .filter(|entry| entry.state.terminal()).collect::<Vec<_>>()
+        } else {
+            for id in &present { self.fact(id, DeliveryState::Consumed)?; }
+            Vec::new()
+        };
+        if recovery { self.view.lock().unwrap().refresh_queue(&self.ledger, &self.scope.session_id); }
+        let next = entries.last().and_then(|entry| entry.get("id")).and_then(Value::as_str).map(str::to_owned).or(since.clone());
+        self.entries_token += 1;
+        let after_recovery = if recovery {
+            recovered_terminal.iter().chain(self.ledger.pending(&self.scope.session_id).iter())
+                .map(|entry| self.delivery_notice(entry)).collect()
+        } else { Vec::new() };
+        enqueue(&self.notices, Notification {
+            notice: LocalNotice::Entries { scope: self.scope.clone(), entries, leaf_id, since, recovery },
+            acknowledgement: Some((self.entries_token, next)),
+            after_recovery,
+        }, COMMAND_TIMEOUT)
     }
 
     fn send_hold(&mut self, action: HoldAction, reply: Reply<Value>) -> Result<()> {
@@ -618,28 +673,12 @@ impl Owner {
                 }
                 let entries = data.get("entries").and_then(Value::as_array).context("Local entries response is invalid")?.clone();
                 let leaf_id = data.get("leafId").and_then(Value::as_str).map(str::to_owned);
-                let present: BTreeSet<_> = entries.iter().filter_map(custom_receipt)
-                    .filter(|receipt| receipt.details.target_agent_id == self.scope.agent_id)
-                    .map(|receipt| receipt.kota_id).collect();
-                let recovered_terminal = if recovery {
-                    self.ledger.reconcile(&self.scope.session_id, &present)?.into_iter()
-                        .filter(|entry| entry.state.terminal()).collect::<Vec<_>>()
-                } else {
-                    for id in &present { self.fact(id, DeliveryState::Consumed)?; }
-                    Vec::new()
-                };
-                if recovery { self.view.lock().unwrap().refresh_queue(&self.ledger, &self.scope.session_id); }
-                let next = entries.last().and_then(|entry| entry.get("id")).and_then(Value::as_str).map(str::to_owned).or(since.clone());
-                self.entries_token += 1;
-                let after_recovery = if recovery {
-                    recovered_terminal.iter().chain(self.ledger.pending(&self.scope.session_id).iter())
-                        .map(|entry| self.delivery_notice(entry)).collect()
-                } else { Vec::new() };
-                self.notices.try_send(Notification {
-                    notice: LocalNotice::Entries { scope: self.scope.clone(), entries, leaf_id, since, recovery },
-                    acknowledgement: Some((self.entries_token, next)),
-                    after_recovery,
-                }).map_err(|_| anyhow!("Local projection queue is full or stopped"))?;
+                self.receive_entries(entries, leaf_id, since, recovery)?;
+            },
+            Purpose::History { recovery, result, .. } => {
+                if !success || data["disposition"] != "handled" { bail!("Local history restore failed"); }
+                if let Some(result) = result { self.history(result, recovery)?; }
+                else { self.pending.insert(id.into(), Pending { purpose:Purpose::History { recovery, acknowledged:true, result:None }, deadline:pending.deadline }); }
             },
             Purpose::Inject { kota_id, rejected } => {
                 self.active_inject = None;
@@ -772,6 +811,20 @@ impl Owner {
                 }
             }
             return Ok(());
+        }
+        if event["type"] == "extension_ui_request" && event["message"].as_str().is_some_and(|s| s.starts_with(super::history::CODEC)) {
+            let receipt = super::history::receipt(&event).context("Invalid Local history receipt")?;
+            if self.pending.get(&receipt.request_id).is_some_and(|p| matches!(p.purpose, Purpose::History {..})) {
+                let pending = self.pending.remove(&receipt.request_id).unwrap();
+                if let Purpose::History { recovery, acknowledged, .. } = pending.purpose {
+                    if acknowledged { self.history(receipt.result, recovery)?; }
+                    else { self.pending.insert(receipt.request_id, Pending { purpose:Purpose::History { recovery, acknowledged, result:Some(receipt.result) }, deadline:pending.deadline }); }
+                }
+            }
+            return Ok(()); // Only the decoded entries reach reconciliation/projection.
+        }
+        if event["type"] == "extension_error" && event["extensionPath"] == "command:kota-history" {
+            bail!("Local history restore failed");
         }
         if event["type"] == "extension_ui_request" && event["message"].as_str().is_some_and(|s| s.starts_with(super::mcp::CODEC)) {
             if let Some(receipt) = super::mcp::receipt(&event) {

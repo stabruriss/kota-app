@@ -137,6 +137,20 @@ pub(crate) struct Launch {
 }
 
 impl Launch {
+    pub(crate) fn target_cli(req: &AgentSpawnRequest) -> Result<AgentCli, String> {
+        let cwd = Path::new(&req.project_root)
+            .join(".agent-workspaces")
+            .join(&req.agent_id);
+        if !cwd.join("agent.yaml").is_file() {
+            return Ok(req.cli);
+        }
+        let yaml = read_yaml_mapping(&cwd.join("agent.yaml"))?;
+        let shell = parse_shell_yaml(
+            &fs::read_to_string(cwd.join("SHELL.yaml")).map_err(|e| e.to_string())?,
+        )?;
+        cli_from_project_agent_files(&cwd, &shell, &yaml)
+    }
+
     /// Called under AgentRegistry's replacement serial lock. All settings are
     /// pinned here; a later Save remains the target of a subsequent startup.
     pub(crate) fn prepare(

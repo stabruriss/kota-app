@@ -411,6 +411,13 @@ impl Catalog {
     /// A delta only omits equal facts. Absence in either snapshot is never a
     /// deletion; tombstones remain the sole deletion authority. Include thread
     /// records needed by changed versions/notices even when their record is old.
+    /// Nothing to offer: no tombstone, thread record, version or notice.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.deletions.is_empty()
+            && self.threads.is_empty()
+            && self.versions.is_empty()
+            && self.unavailable_posts.is_empty()
+    }
     pub(crate) fn since(&self, previous: &Self) -> Self {
         let mut delta = Self {
             deletions: self.deletions.iter().filter(|(k, v)| previous.deletions.get(*k) != Some(*v))

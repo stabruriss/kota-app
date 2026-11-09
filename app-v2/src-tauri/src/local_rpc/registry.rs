@@ -256,7 +256,7 @@ impl AgentRegistry {
                 thread::sleep(Duration::from_millis(10));
             }
         }
-        if let Some(previous) = previous { previous.stop_for_replacement()?; }
+        if let Some(previous) = previous { previous.stop_for_replacement("shell_switch")?; }
         if let Some(previous) = &previous_local { previous.stop()?; }
         query.stage("session_ready")?;
         let fence = replacement.clone();
@@ -509,7 +509,12 @@ import sys,json,time
 args=sys.argv[1:]; session=args[args.index('--session-id')+1] if '--session-id' in args else 'parent'
 for line in sys.stdin:
  r=json.loads(line)
- if r['type']=='get_state': data={'sessionId':session,'isStreaming':False,'model':{'provider':'fixture','id':'model'},'thinkingLevel':'off'}
+ if r['type']=='prompt' and r['message'].startswith('/kota-history '):
+  q=json.loads(r['message'][len('/kota-history '):])
+  result={'schema':1,'requestId':q['requestId'],'result':{'status':'ready','entries':[],'leafId':None}}
+  print(json.dumps({'type':'extension_ui_request','method':'notify','message':'kota.history.v1:'+json.dumps(result)}),flush=True)
+  data={'disposition':'handled'}
+ elif r['type']=='get_state': data={'sessionId':session,'isStreaming':False,'model':{'provider':'fixture','id':'model'},'thinkingLevel':'off'}
  elif r['type']=='get_entries': data={'entries':[],'leafId':None}
  elif r['type']=='prompt':
   print(json.dumps({'type':'response','id':r['id'],'success':True,'data':{'disposition':'submitted'}}),flush=True)
@@ -561,7 +566,12 @@ for line in sys.stdin:
         command.args(["-u", "-c", r#"import sys,json
 for line in sys.stdin:
  r=json.loads(line)
- if r['type']=='prompt':
+ if r['type']=='prompt' and r['message'].startswith('/kota-history '):
+  q=json.loads(r['message'][len('/kota-history '):])
+  result={'schema':1,'requestId':q['requestId'],'result':{'status':'ready','entries':[],'leafId':None}}
+  print(json.dumps({'type':'extension_ui_request','method':'notify','message':'kota.history.v1:'+json.dumps(result)}),flush=True)
+  data={'disposition':'handled'}
+ elif r['type']=='prompt':
   assert r['message'].startswith('/kota-mcp ')
   q=json.loads(r['message'][len('/kota-mcp '):])
   result={'schema':1,'requestId':q['requestId'],'available':True,'servers':[{'name':'fixture','status':'connected'}]}
@@ -822,7 +832,12 @@ for line in sys.stdin:
         command.args(["-u", "-c", r#"import sys,json
 for line in sys.stdin:
  r=json.loads(line)
- d={'sessionId':'routing-fixture','isStreaming':False} if r['type']=='get_state' else {'entries':[],'leafId':None}
+ if r['type']=='prompt' and r['message'].startswith('/kota-history '):
+  q=json.loads(r['message'][len('/kota-history '):])
+  result={'schema':1,'requestId':q['requestId'],'result':{'status':'ready','entries':[],'leafId':None}}
+  print(json.dumps({'type':'extension_ui_request','method':'notify','message':'kota.history.v1:'+json.dumps(result)}),flush=True)
+  d={'disposition':'handled'}
+ else: d={'sessionId':'routing-fixture','isStreaming':False} if r['type']=='get_state' else {'entries':[],'leafId':None}
  print(json.dumps({'type':'response','id':r['id'],'success':True,'data':d}),flush=True)
 "#]);
         let runtime = LocalRuntime::start(local_rpc::Config {
@@ -888,7 +903,12 @@ for line in sys.stdin:
         let mut command=Command::new("/usr/bin/python3");command.args(["-u","-c",r#"import sys,json
 for line in sys.stdin:
  r=json.loads(line)
- data={'sessionId':'in-use-fixture','isStreaming':False,'model':{'provider':'fable','id':'confirmed'}} if r['type']=='get_state' else {'entries':[],'leafId':None}
+ if r['type']=='prompt' and r['message'].startswith('/kota-history '):
+  q=json.loads(r['message'][len('/kota-history '):])
+  result={'schema':1,'requestId':q['requestId'],'result':{'status':'ready','entries':[],'leafId':None}}
+  print(json.dumps({'type':'extension_ui_request','method':'notify','message':'kota.history.v1:'+json.dumps(result)}),flush=True)
+  data={'disposition':'handled'}
+ else: data={'sessionId':'in-use-fixture','isStreaming':False,'model':{'provider':'fable','id':'confirmed'}} if r['type']=='get_state' else {'entries':[],'leafId':None}
  print(json.dumps({'type':'response','id':r['id'],'success':True,'data':data}),flush=True)
 "#]);
         let runtime=LocalRuntime::start(local_rpc::Config {scope:LocalScope {project_root:root.clone(),agent_id:request.agent_id.clone(),session_id:"in-use-fixture".into(),epoch:1},

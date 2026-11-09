@@ -234,9 +234,13 @@ pub(crate) struct SendWindow {
 }
 impl SendWindow {
     pub(crate) fn new() -> Self {
+        Self::starting_at(0)
+    }
+    /// A ranged send counts absolute file offsets from its first byte.
+    pub(crate) fn starting_at(offset: u64) -> Self {
         Self {
-            sent: 0,
-            acked: 0,
+            sent: offset,
+            acked: offset,
             ends: VecDeque::with_capacity(DATA_WINDOW),
         }
     }

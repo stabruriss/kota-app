@@ -138,3 +138,19 @@ fn upload_and_ack_receipts_cannot_smuggle_consumption_or_unknown_fields() {
         assert_eq!(mutation(bytes, false), Err(Error::Protocol));
     }
 }
+
+#[test]
+fn diagnostic_worker_causes_use_only_the_closed_error_mapping() {
+    for code in ["relay_session_lost", "relay_wake_changed", "relay_wake_expired",
+        "relay_wake_used", "relay_instance_changed", "removed"] {
+        let bytes = serde_json::to_vec(&serde_json::json!({"ok":false,"error":code})).unwrap();
+        let (error, cause) = failure(409, &headers(), &bytes);
+        assert_eq!(error, rejected(409, &headers(), &bytes));
+        assert_eq!(cause.as_deref(), Some(format!("worker:{code}").as_str()));
+        assert!(failure(500, &headers(), &bytes).1.is_none());
+    }
+    for bytes in [br#"{"ok":false,"error":"secret-device-id"}"#.as_slice(),
+        br#"{"ok":false,"error":"relay_session_lost","id":"secret"}"#] {
+        assert_eq!(failure(409, &headers(), bytes), (Error::CloudflareResourceLimit, None));
+    }
+}

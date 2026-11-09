@@ -1,7 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import type { AgentCli } from '../types/agent-pty';
 
-export type HeroProviderId = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'pi' | 'kimi';
+export type HeroProviderId = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'pi' | 'kimi' | 'kota-local';
 export type GeneratedHeroAvatarId =
   | 'claude'
   | 'claude-lantern'
@@ -13,6 +13,7 @@ export type GeneratedHeroAvatarId =
   | 'opencode'
   | 'pi'
   | 'kimi'
+  | 'kota-local'
   | 'magi'
   | 'violet'
   | 'ember'
@@ -51,6 +52,7 @@ export const HERO_AVATARS: readonly HeroAvatarSpec[] = [
   { id: 'opencode', provider: 'opencode', label: 'OpenCode', className: 'provider-opencode' },
   { id: 'pi', provider: 'pi', label: 'Pi', className: 'provider-pi' },
   { id: 'kimi', provider: 'kimi', label: 'Kimi', className: 'provider-kimi' },
+  { id: 'kota-local', provider: 'kota-local', label: 'Kota Local', className: 'provider-kota-local' },
   { id: 'magi', label: 'Magi', className: 'system-magi' },
   { id: 'violet', label: 'Violet', className: 'system-violet' },
   { id: 'ember', label: 'Ember', className: 'system-ember' },
@@ -71,6 +73,7 @@ const DEFAULT_AVATAR_BY_PROVIDER: Record<HeroProviderId, GeneratedHeroAvatarId> 
   opencode: 'opencode',
   pi: 'pi',
   kimi: 'kimi',
+  'kota-local': 'kota-local',
 };
 const USER_AVATAR_STORAGE_KEY = 'kota-v2.user-hero-avatars';
 const TAVERN_PROFILE_STORAGE_KEY = 'kota-v2.tavern.hero-profiles';
@@ -79,11 +82,11 @@ let userAvatarCache: UserHeroAvatar[] = [];
 let userAvatarCacheHydrated = false;
 
 export function isHeroProviderId(value: unknown): value is HeroProviderId {
-  return value === 'claude' || value === 'codex' || value === 'antigravity' || value === 'opencode' || value === 'pi' || value === 'kimi';
+  return value === 'claude' || value === 'codex' || value === 'antigravity' || value === 'opencode' || value === 'pi' || value === 'kimi' || value === 'kota-local';
 }
 
 export function providerFromCli(cli: AgentCli | string | null | undefined): HeroProviderId {
-  if (cli === 'claude' || cli === 'codex' || cli === 'antigravity' || cli === 'opencode' || cli === 'pi' || cli === 'kimi') return cli;
+  if (cli === 'claude' || cli === 'codex' || cli === 'antigravity' || cli === 'opencode' || cli === 'pi' || cli === 'kimi' || cli === 'kota-local') return cli;
   if (cli === 'agy') return 'antigravity';
   if (cli === 'kimi-code') return 'kimi';
   return 'codex';
@@ -217,6 +220,7 @@ export function normalizeHeroAvatarId(
 ): HeroAvatarId {
   const fallback = defaultAvatarIdForProvider(provider);
   if (!value) return fallback;
+  if (provider === 'kota-local' && value === 'pi') return fallback;
   if (isUserHeroAvatarId(value)) {
     if (!userAvatarCacheHydrated || userAvatarUrlForId(value)) return value;
     return fallback;
@@ -286,6 +290,7 @@ export function avatarClassForAgentFallback(
   if (baseId === 'hero-op') return avatarClassForId(null, 'opencode');
   if (baseId === 'hero-pi') return avatarClassForId(null, 'pi');
   if (baseId === 'hero-kimi') return avatarClassForId(null, 'kimi');
+  if (baseId === 'hero-kota-local' || baseId === 'kota-local') return avatarClassForId(null, 'kota-local');
   if (baseId === 'claude') return avatarClassForId(null, 'claude');
   if (baseId === 'codex') return avatarClassForId(null, 'codex');
   if (baseId === 'alice') return avatarClassForId(null, 'claude');

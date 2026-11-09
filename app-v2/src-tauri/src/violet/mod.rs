@@ -773,6 +773,7 @@ pub fn sync_project(
     project_root: &Path,
     request: VioletRoomRequest,
 ) -> Result<VioletRoomState, String> {
+    let sync_started = std::time::Instant::now();
     let raw_log_dir = project_root.join("project-memory").join("raw_logs");
     let chathistory_dir = chathistory_dir(project_root);
     fs::create_dir_all(&raw_log_dir)
@@ -907,6 +908,17 @@ pub fn sync_project(
     sync_actor_raw_messages_to_chathistory(project_root)?;
     let messages = read_room_messages(project_root, &request)?;
     dedupe_agent_bus_receipts(&mut agent_bus_receipts);
+    let elapsed = sync_started.elapsed();
+    if elapsed > StdDuration::from_secs(1) {
+        crate::kota_debug_log(&format!(
+            "[violet] sync_project project={} sources={} fresh={} messages={} elapsed={}ms",
+            project_root.display(),
+            sources.len(),
+            fresh_room_messages.len(),
+            messages.len(),
+            elapsed.as_millis()
+        ));
+    }
 
     Ok(VioletRoomState {
         messages,
@@ -1291,6 +1303,49 @@ pub(crate) fn record_soul_context(project_root: &Path, agent_id: &str, message_i
         temporal_gap: None,
         message_origin: None,
         target_agent_ids: vec![agent_id.into()],
+        agent_display_name: None,
+        agent_avatar_id: None,
+        agent_provider: None,
+        model: None,
+        effort: None,
+        agent_status: None,
+    };
+    write_chathistory_messages(project_root, &[message])
+}
+
+/// A successful add-mark is room progress, not a reply or a dispatchable message.
+pub(crate) fn record_note_added(
+    project_root: &Path,
+    agent_id: &str,
+    shell: &str,
+    mark: &crate::soul::marks::Mark,
+    revision: u64,
+) -> Result<Vec<PathBuf>, String> {
+    let mut hasher = Sha256::new();
+    hasher.update(agent_id);
+    hasher.update([0]);
+    hasher.update(&mark.id);
+    hasher.update([0]);
+    hasher.update(revision.to_le_bytes());
+    let message = VioletChatMessage {
+        id: format!("violet-note-{:x}", hasher.finalize()),
+        session_id: "soul".into(),
+        agent_id: agent_id.into(),
+        shell: shell.into(),
+        role: "assistant".into(),
+        kind: "commentary".into(),
+        timestamp: mark.created_at.clone(),
+        text: mark.text.clone(),
+        message_origin: Some("note".into()),
+        native_event_id: Some(format!("note:{}:{revision}", mark.id)),
+        source_path: None,
+        overflow_path: None,
+        legacy_dedupe_hash: None,
+        route: None,
+        violet_seq: None,
+        actor_intent: None,
+        temporal_gap: None,
+        target_agent_ids: Vec::new(),
         agent_display_name: None,
         agent_avatar_id: None,
         agent_provider: None,
@@ -1980,13 +2035,9 @@ fn discover_project_agents(project_root: &Path) -> Result<Vec<ProjectAgent>, Str
             continue;
         }
         let yaml_path = cwd.join("agent.yaml");
-        if !yaml_path.is_file() {
+        let Some(yaml) = read_yaml_file(&yaml_path)? else {
             continue;
-        }
-        let yaml_text = fs::read_to_string(&yaml_path)
-            .map_err(|err| format!("read {}: {err}", yaml_path.display()))?;
-        let yaml: YamlValue = serde_yaml::from_str(&yaml_text)
-            .map_err(|err| format!("parse {}: {err}", yaml_path.display()))?;
+        };
         let status = yaml_string(&yaml, "status").unwrap_or_else(|| "active".into());
         let status = status.trim().to_ascii_lowercase();
         if status == "archived" || status == "dismissed" || status == "removed" {
@@ -4215,9 +4266,14 @@ fn read_jsonl_range(
 }
 
 fn read_cached_native_events(path: &Path) -> Result<Vec<NativeEvent>, String> {
-    if !path.is_file() {
+    let Some(stamp) = file_stamp(path) else {
         return Ok(Vec::new());
+    };
+    if let Some(cached) = load_parsed_event_mem_cache(path, stamp) {
+        return Ok(cached);
     }
+    #[cfg(test)]
+    PARSED_EVENT_DISK_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let file = fs::File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
     let reader = std::io::BufReader::new(file);
     let mut lines = VecDeque::with_capacity(PARSED_EVENT_CACHE_LIMIT);
@@ -4231,10 +4287,14 @@ fn read_cached_native_events(path: &Path) -> Result<Vec<NativeEvent>, String> {
         }
         lines.push_back(line);
     }
-    Ok(lines
+    let events: Vec<NativeEvent> = lines
         .into_iter()
         .filter_map(|line| serde_json::from_str::<NativeEvent>(&line).ok())
-        .collect())
+        .collect();
+    if file_stamp(path) == Some(stamp) {
+        store_parsed_event_mem_cache(path, stamp, events.clone());
+    }
+    Ok(events)
 }
 
 fn write_cached_native_events(path: &Path, events: &[NativeEvent]) -> Result<(), String> {
@@ -4246,7 +4306,12 @@ fn write_cached_native_events(path: &Path, events: &[NativeEvent]) -> Result<(),
         );
         out.push('\n');
     }
-    write_if_changed(path, out.as_bytes())
+    write_if_changed(path, out.as_bytes())?;
+    if let Some(stamp) = file_stamp(path) {
+        let tail_start = events.len().saturating_sub(PARSED_EVENT_CACHE_LIMIT);
+        store_parsed_event_mem_cache(path, stamp, events[tail_start..].to_vec());
+    }
+    Ok(())
 }
 
 fn parse_claude_line(
@@ -4298,6 +4363,14 @@ fn parse_claude_line(
     let role = json_string(&json, &["type"])
         .or_else(|| json_string(&json, &["message", "role"]))
         .unwrap_or_else(|| "assistant".into());
+    if role == "attachment" {
+        return match json.get("attachment") {
+            Some(attachment) => {
+                parse_claude_queued_command_attachment(agent, source, index, &json, attachment)
+            }
+            None => Vec::new(),
+        };
+    }
     if role != "user" && role != "assistant" && role != "system" {
         return Vec::new();
     }
@@ -4432,6 +4505,44 @@ fn parse_claude_line(
         caption.apply(event);
     }
     events
+}
+
+fn parse_claude_queued_command_attachment(
+    agent: &ProjectAgent,
+    source: &NativeSource,
+    index: usize,
+    json: &JsonValue,
+    attachment: &JsonValue,
+) -> Vec<NativeEvent> {
+    if json_string(attachment, &["type"]).as_deref() != Some("queued_command") {
+        return Vec::new();
+    }
+    if json_string(attachment, &["origin", "kind"]).as_deref() != Some("human") {
+        return Vec::new();
+    }
+    let Some(prompt) = attachment.get("prompt") else {
+        return Vec::new();
+    };
+    let timestamp = json_string(attachment, &["timestamp"])
+        .filter(|ts| !ts.trim().is_empty())
+        .or_else(|| json_string(json, &["timestamp"]))
+        .unwrap_or_else(now_iso);
+    let event_id = json_string(attachment, &["delivery_id"])
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| {
+            json_string(attachment, &["source_uuid"]).filter(|id| !id.trim().is_empty())
+        })
+        .or_else(|| json_string(json, &["uuid"]))
+        .or_else(|| json_string(json, &["id"]))
+        .unwrap_or_else(|| index.to_string());
+    let normalized = normalize_claude_pasted_content(prompt);
+    let content = normalized.as_ref().unwrap_or(prompt);
+    content_blocks_to_events(agent, source, "user", &timestamp, &event_id, content)
+        .into_iter()
+        .filter(|event| {
+            !is_harness_envelope_text(&event.text) && !is_agent_bus_envelope_text(&event.text)
+        })
+        .collect()
 }
 
 fn claude_subagent_notification_text(content: &JsonValue) -> Option<String> {
@@ -6801,7 +6912,10 @@ fn room_message_dedupe_key(message: &VioletChatMessage) -> String {
     if message.temporal_gap.is_some() && message.agent_id == "user" {
         return format!("composer:{}", message.id);
     }
-    let normalized = message.legacy_dedupe_hash.clone().unwrap_or_else(|| overflow::dedupe_hash(&message.text));
+    let normalized = message
+        .legacy_dedupe_hash
+        .clone()
+        .unwrap_or_else(|| cached_room_dedupe_hash(&message.id, &message.text));
     let bucket = DateTime::parse_from_rfc3339(&message.timestamp)
         .map(|time| time.timestamp() / 120)
         .unwrap_or(0);
@@ -7517,6 +7631,9 @@ fn write_chathistory_messages_locked(
         events.retain(|event| !is_ignorable_codex_internal_context_event(event));
         let bytes = render_chathistory_events(&events)?;
         write_if_changed(&path, bytes.as_bytes())?;
+        if let Some(stamp) = file_stamp(&path) {
+            store_chathistory_file_mem_cache(&path, stamp, events);
+        }
         changed_paths.push(path);
     }
 
@@ -7696,7 +7813,12 @@ fn write_chathistory_latest_locked(project_root: &Path) -> Result<(), String> {
         events = events.split_off(events.len() - CHATHISTORY_LATEST_LIMIT);
     }
     let bytes = render_chathistory_events(&events)?;
-    write_if_changed(&chathistory_latest_path(project_root), bytes.as_bytes())
+    let latest_path = chathistory_latest_path(project_root);
+    write_if_changed(&latest_path, bytes.as_bytes())?;
+    if let Some(stamp) = file_stamp(&latest_path) {
+        store_chathistory_file_mem_cache(&latest_path, stamp, events);
+    }
+    Ok(())
 }
 
 fn write_chathistory_manifest_locked(project_root: &Path) -> Result<(), String> {
@@ -9170,9 +9292,14 @@ fn read_chathistory_events_for_latest(
 }
 
 fn read_chathistory_event_file(path: &Path) -> Result<Vec<ChathistoryEvent>, String> {
-    if !path.is_file() {
+    let Some(stamp) = file_stamp(path) else {
         return Ok(Vec::new());
+    };
+    if let Some(cached) = load_chathistory_file_mem_cache(path, stamp) {
+        return Ok(cached);
     }
+    #[cfg(test)]
+    CHATHISTORY_FILE_DISK_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let file = fs::File::open(path).map_err(|err| format!("open {}: {err}", path.display()))?;
     let mut reader = std::io::BufReader::new(file);
     let mut events = Vec::new();
@@ -9217,6 +9344,9 @@ fn read_chathistory_event_file(path: &Path) -> Result<Vec<ChathistoryEvent>, Str
             )),
         }
     }
+    if file_stamp(path) == Some(stamp) {
+        store_chathistory_file_mem_cache(path, stamp, events.clone());
+    }
     Ok(events)
 }
 
@@ -9248,9 +9378,14 @@ fn chathistory_event_from_message(
     message: &VioletChatMessage,
     snapshot: Option<&AgentIdentitySnapshot>,
 ) -> ChathistoryEvent {
+    let text = trim_terminal_control_padding(&message.text).to_string();
+    let legacy_dedupe_hash = message
+        .legacy_dedupe_hash
+        .clone()
+        .or_else(|| Some(overflow::dedupe_hash(&text)));
     ChathistoryEvent {
         overflow_path: message.overflow_path.clone(),
-        legacy_dedupe_hash: message.legacy_dedupe_hash.clone(),
+        legacy_dedupe_hash,
         route: message.route.clone(),
         id: message.id.clone(),
         ts: message.timestamp.clone(),
@@ -9261,7 +9396,7 @@ fn chathistory_event_from_message(
         kind: message.kind.clone(),
         display: true,
         agent_visible: message.kind == "message",
-        text: trim_terminal_control_padding(&message.text).to_string(),
+        text,
         source: ChathistorySource {
             session_id: message.session_id.clone(),
             path: message.source_path.clone(),
@@ -9795,7 +9930,15 @@ fn event_to_message(event: NativeEvent) -> VioletChatMessage {
     });
     VioletChatMessage {
         overflow_path: event.overflow_path,
-        legacy_dedupe_hash: event.text_identity.as_ref().map(|identity| identity.room_dedupe_hash.clone()),
+        legacy_dedupe_hash: event
+            .text_identity
+            .as_ref()
+            .map(|identity| identity.room_dedupe_hash.clone())
+            .or_else(|| {
+                Some(overflow::dedupe_hash(trim_terminal_control_padding(
+                    &event.text,
+                )))
+            }),
         route: event.route.clone(),
         temporal_gap: None,
         id,
@@ -10051,14 +10194,195 @@ fn json_bool(value: &JsonValue, path: &[&str]) -> Option<bool> {
     current.as_bool()
 }
 
-fn read_yaml_file(path: &Path) -> Result<Option<YamlValue>, String> {
-    if !path.is_file() {
-        return Ok(None);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
     }
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Some(FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        ino: metadata.ino(),
+    })
+}
+
+const FILE_MEM_CACHE_CAPACITY: usize = 256;
+const ROOM_DEDUPE_LRU_CAPACITY: usize = 4096;
+
+#[cfg(test)]
+static PARSED_EVENT_DISK_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static YAML_FILE_DISK_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static CHATHISTORY_FILE_DISK_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static ROOM_DEDUPE_HASH_COMPUTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DedupeTextTag {
+    len: usize,
+    head: [u8; 16],
+    tail: [u8; 16],
+}
+
+impl DedupeTextTag {
+    fn of(text: &str) -> Self {
+        let bytes = text.as_bytes();
+        let mut head = [0u8; 16];
+        let mut tail = [0u8; 16];
+        let n = bytes.len().min(16);
+        head[..n].copy_from_slice(&bytes[..n]);
+        tail[..n].copy_from_slice(&bytes[bytes.len() - n..]);
+        Self {
+            len: bytes.len(),
+            head,
+            tail,
+        }
+    }
+}
+
+#[derive(Default)]
+struct RoomDedupeLru {
+    order: VecDeque<String>,
+    entries: HashMap<String, (DedupeTextTag, String)>,
+}
+
+fn cached_room_dedupe_hash(message_id: &str, text: &str) -> String {
+    static CACHE: OnceLock<Mutex<RoomDedupeLru>> = OnceLock::new();
+    if message_id.is_empty() {
+        #[cfg(test)]
+        ROOM_DEDUPE_HASH_COMPUTES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return overflow::dedupe_hash(text);
+    }
+    let tag = DedupeTextTag::of(text);
+    let mutex = CACHE.get_or_init(|| Mutex::new(RoomDedupeLru::default()));
+    if let Ok(mut guard) = mutex.lock() {
+        if let Some((cached_tag, cached_hash)) = guard.entries.get(message_id) {
+            if *cached_tag == tag {
+                return cached_hash.clone();
+            }
+        }
+        #[cfg(test)]
+        ROOM_DEDUPE_HASH_COMPUTES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let hash = overflow::dedupe_hash(text);
+        if !guard.entries.contains_key(message_id) {
+            guard.order.push_back(message_id.to_string());
+        }
+        guard.entries.insert(message_id.to_string(), (tag, hash.clone()));
+        while guard.entries.len() > ROOM_DEDUPE_LRU_CAPACITY {
+            let Some(oldest) = guard.order.pop_front() else {
+                break;
+            };
+            guard.entries.remove(&oldest);
+        }
+        return hash;
+    }
+    overflow::dedupe_hash(text)
+}
+
+fn load_parsed_event_mem_cache(path: &Path, stamp: FileStamp) -> Option<Vec<NativeEvent>> {
+    let guard = parsed_event_mem_cache().lock().ok()?;
+    let (cached_stamp, events) = guard.get(path)?;
+    (*cached_stamp == stamp).then(|| events.clone())
+}
+
+fn store_parsed_event_mem_cache(path: &Path, stamp: FileStamp, events: Vec<NativeEvent>) {
+    if let Ok(mut guard) = parsed_event_mem_cache().lock() {
+        if guard.len() >= FILE_MEM_CACHE_CAPACITY && !guard.contains_key(path) {
+            if let Some(first_key) = guard.keys().next().cloned() {
+                guard.remove(&first_key);
+            }
+        }
+        guard.insert(path.to_path_buf(), (stamp, events));
+    }
+}
+
+fn parsed_event_mem_cache() -> &'static Mutex<HashMap<PathBuf, (FileStamp, Vec<NativeEvent>)>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (FileStamp, Vec<NativeEvent>)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn load_chathistory_file_mem_cache(
+    path: &Path,
+    stamp: FileStamp,
+) -> Option<Vec<ChathistoryEvent>> {
+    let guard = chathistory_file_mem_cache().lock().ok()?;
+    let (cached_stamp, events) = guard.get(path)?;
+    (*cached_stamp == stamp).then(|| events.clone())
+}
+
+fn store_chathistory_file_mem_cache(path: &Path, stamp: FileStamp, events: Vec<ChathistoryEvent>) {
+    if let Ok(mut guard) = chathistory_file_mem_cache().lock() {
+        if guard.len() >= FILE_MEM_CACHE_CAPACITY && !guard.contains_key(path) {
+            if let Some(first_key) = guard.keys().next().cloned() {
+                guard.remove(&first_key);
+            }
+        }
+        guard.insert(path.to_path_buf(), (stamp, events));
+    }
+}
+
+fn chathistory_file_mem_cache(
+) -> &'static Mutex<HashMap<PathBuf, (FileStamp, Vec<ChathistoryEvent>)>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (FileStamp, Vec<ChathistoryEvent>)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn load_yaml_file_mem_cache(path: &Path, stamp: FileStamp) -> Option<YamlValue> {
+    let guard = yaml_file_mem_cache().lock().ok()?;
+    let (cached_stamp, parsed) = guard.get(path)?;
+    (*cached_stamp == stamp).then(|| parsed.clone())
+}
+
+fn store_yaml_file_mem_cache(path: &Path, stamp: FileStamp, parsed: YamlValue) {
+    if let Ok(mut guard) = yaml_file_mem_cache().lock() {
+        if guard.len() >= FILE_MEM_CACHE_CAPACITY && !guard.contains_key(path) {
+            if let Some(first_key) = guard.keys().next().cloned() {
+                guard.remove(&first_key);
+            }
+        }
+        guard.insert(path.to_path_buf(), (stamp, parsed));
+    }
+}
+
+fn yaml_file_mem_cache() -> &'static Mutex<HashMap<PathBuf, (FileStamp, YamlValue)>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (FileStamp, YamlValue)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn read_yaml_file(path: &Path) -> Result<Option<YamlValue>, String> {
+    let Some(stamp) = file_stamp(path) else {
+        return Ok(None);
+    };
+    if let Some(cached) = load_yaml_file_mem_cache(path, stamp) {
+        return Ok(Some(cached));
+    }
+    #[cfg(test)]
+    YAML_FILE_DISK_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let text = fs::read_to_string(path).map_err(|err| format!("read {}: {err}", path.display()))?;
-    serde_yaml::from_str::<YamlValue>(&text)
-        .map(Some)
-        .map_err(|err| format!("parse {}: {err}", path.display()))
+    let parsed = serde_yaml::from_str::<YamlValue>(&text)
+        .map_err(|err| format!("parse {}: {err}", path.display()))?;
+    if file_stamp(path) == Some(stamp) {
+        store_yaml_file_mem_cache(path, stamp, parsed.clone());
+    }
+    Ok(Some(parsed))
 }
 
 fn yaml_string(value: &YamlValue, key: &str) -> Option<String> {
@@ -15625,6 +15949,384 @@ done"#;
             ended_at: Some("2026-05-14T10:01:00Z".into()),
         }];
         assert!(is_private_event(&event, &spans));
+    }
+
+    #[test]
+    fn claude_queued_command_attachment_materializes_human_plain_and_pasted_prompts() {
+        let agent = ProjectAgent {
+            agent_id: "agent-synth-alpha".into(),
+            shell: "claude".into(),
+            cwd: PathBuf::from("/tmp/synth-claude-queued-test"),
+            session_id: Some("session-synth-01".into()),
+        };
+        let source = NativeSource {
+            kind: "claude-jsonl".into(),
+            session_id: "session-synth-01".into(),
+            path: PathBuf::from("/tmp/synth-claude-queued-test/rollout.jsonl"),
+            aux_path: None,
+        };
+
+        let plain_queued = serde_json::json!({
+            "type": "attachment",
+            "uuid": "outer-uuid-1",
+            "timestamp": "2026-11-08T01:00:00.000Z",
+            "attachment": {
+                "type": "queued_command",
+                "origin": { "kind": "human" },
+                "prompt": "2. 可以",
+                "delivery_id": "delivery-synth-1",
+                "source_uuid": "source-synth-1",
+                "timestamp": "2026-11-08T01:00:01.250Z"
+            }
+        });
+        let plain_events = parse_claude_line(&agent, &source, 0, plain_queued);
+        assert_eq!(plain_events.len(), 1);
+        assert_eq!(plain_events[0].role, "user");
+        assert_eq!(plain_events[0].kind, "message");
+        assert_eq!(plain_events[0].text, "2. 可以");
+        assert_eq!(
+            plain_events[0].native_event_id.as_deref(),
+            Some("delivery-synth-1")
+        );
+        assert_eq!(plain_events[0].timestamp, "2026-11-08T01:00:01.250+00:00");
+        assert_eq!(plain_events[0].message_origin.as_deref(), Some("user"));
+
+        let fallback_source_uuid = serde_json::json!({
+            "type": "attachment",
+            "uuid": "outer-uuid-2",
+            "timestamp": "2026-11-08T01:00:00.000Z",
+            "attachment": {
+                "type": "queued_command",
+                "origin": { "kind": "human" },
+                "prompt": "fallback id check",
+                "source_uuid": "source-synth-fallback",
+                "timestamp": "2026-11-08T01:00:02.000Z"
+            }
+        });
+        let fallback_events = parse_claude_line(&agent, &source, 1, fallback_source_uuid);
+        assert_eq!(fallback_events.len(), 1);
+        assert_eq!(
+            fallback_events[0].native_event_id.as_deref(),
+            Some("source-synth-fallback")
+        );
+
+        let wrapped_body = "3. 不用管那12条";
+        let pasted_prompt = format!(
+            "\n\n<pasted_content id=\"paste-synth-1\">\n{wrapped_body}\n</pasted_content id=\"paste-synth-1\">\n"
+        );
+        let pasted_queued = serde_json::json!({
+            "type": "attachment",
+            "uuid": "outer-uuid-3",
+            "timestamp": "2026-11-08T01:00:03.000Z",
+            "attachment": {
+                "type": "queued_command",
+                "origin": { "kind": "human" },
+                "prompt": pasted_prompt,
+                "delivery_id": "delivery-synth-3",
+                "source_uuid": "source-synth-3",
+                "timestamp": "2026-11-08T01:00:03.500Z"
+            }
+        });
+        let ordinary_user = serde_json::json!({
+            "type": "user",
+            "uuid": "delivery-synth-3",
+            "timestamp": "2026-11-08T01:00:03.500Z",
+            "origin": { "kind": "human" },
+            "promptSource": "typed",
+            "message": { "role": "user", "content": pasted_prompt }
+        });
+        let queued_pasted_events = parse_claude_line(&agent, &source, 2, pasted_queued);
+        let ordinary_pasted_events = parse_claude_line(&agent, &source, 2, ordinary_user);
+        assert_eq!(queued_pasted_events.len(), 1);
+        assert_eq!(queued_pasted_events[0].text, wrapped_body);
+        assert_eq!(
+            serde_json::to_value(&queued_pasted_events).unwrap(),
+            serde_json::to_value(&ordinary_pasted_events).unwrap()
+        );
+
+        let quote_body = "<KOTA_QUOTE_META v=\"1\">\nsource_id: msg-synth-1\n</KOTA_QUOTE_META>\nquoted follow-up";
+        let wrapped_quote = format!(
+            "\n\n<pasted_content id=\"paste-quote\">\n{quote_body}\n</pasted_content id=\"paste-quote\">\n"
+        );
+        let quote_queued = serde_json::json!({
+            "type": "attachment",
+            "uuid": "outer-uuid-4",
+            "timestamp": "2026-11-08T01:00:04.000Z",
+            "attachment": {
+                "type": "queued_command",
+                "origin": { "kind": "human" },
+                "prompt": wrapped_quote,
+                "delivery_id": "delivery-synth-4",
+                "timestamp": "2026-11-08T01:00:04.000Z"
+            }
+        });
+        let quote_ordinary = serde_json::json!({
+            "type": "user",
+            "uuid": "delivery-synth-4",
+            "timestamp": "2026-11-08T01:00:04.000Z",
+            "origin": { "kind": "human" },
+            "promptSource": "typed",
+            "message": { "role": "user", "content": wrapped_quote }
+        });
+        let queued_quote_events = parse_claude_line(&agent, &source, 3, quote_queued);
+        let ordinary_quote_events = parse_claude_line(&agent, &source, 3, quote_ordinary);
+        assert_eq!(queued_quote_events.len(), 1);
+        assert_eq!(queued_quote_events[0].text, quote_body);
+        assert_eq!(
+            serde_json::to_value(&queued_quote_events).unwrap(),
+            serde_json::to_value(&ordinary_quote_events).unwrap()
+        );
+
+        let bus_with_human_suffix = "<KOTA_MESSAGE id=\"agentbus-synth-quoted\" from=\"agent-synth-beta\" to=\"agent-synth-alpha\" intent=\"handoff\">\nquoted bus body\n</KOTA_MESSAGE>\n按上面这条改";
+        let bus_suffix_queued = serde_json::json!({
+            "type": "attachment",
+            "uuid": "outer-uuid-5",
+            "timestamp": "2026-11-08T01:00:05.000Z",
+            "attachment": {
+                "type": "queued_command",
+                "origin": { "kind": "human" },
+                "prompt": bus_with_human_suffix,
+                "delivery_id": "delivery-synth-5",
+                "timestamp": "2026-11-08T01:00:05.000Z"
+            }
+        });
+        let bus_suffix_ordinary = serde_json::json!({
+            "type": "user",
+            "uuid": "delivery-synth-5",
+            "timestamp": "2026-11-08T01:00:05.000Z",
+            "origin": { "kind": "human" },
+            "promptSource": "typed",
+            "message": { "role": "user", "content": bus_with_human_suffix }
+        });
+        let queued_suffix_events = parse_claude_line(&agent, &source, 4, bus_suffix_queued);
+        let ordinary_suffix_events = parse_claude_line(&agent, &source, 4, bus_suffix_ordinary);
+        assert_eq!(queued_suffix_events.len(), 1);
+        assert_eq!(queued_suffix_events[0].text, bus_with_human_suffix);
+        assert!(!is_internal_agent_bus_envelope_event(&queued_suffix_events[0]));
+        assert_eq!(
+            serde_json::to_value(&queued_suffix_events).unwrap(),
+            serde_json::to_value(&ordinary_suffix_events).unwrap()
+        );
+    }
+
+    #[test]
+    fn claude_queued_command_skips_kota_message_task_notification_and_queue_operation() {
+        let agent = ProjectAgent {
+            agent_id: "agent-synth-alpha".into(),
+            shell: "claude".into(),
+            cwd: PathBuf::from("/tmp/synth-claude-skip-test"),
+            session_id: Some("session-synth-02".into()),
+        };
+        let source = NativeSource {
+            kind: "claude-jsonl".into(),
+            session_id: "session-synth-02".into(),
+            path: PathBuf::from("/tmp/synth-claude-skip-test/rollout.jsonl"),
+            aux_path: None,
+        };
+
+        for bus_prompt in [
+            "  \n<KOTA_MESSAGE id=\"agentbus-synth-1\" from=\"agent-synth-beta\" to=\"agent-synth-alpha\" intent=\"handoff\">\nhello\n</KOTA_MESSAGE>".to_string(),
+            "<KOTA_MESSAGE id=\"lm-synth-1\" from=\"laughing-man-telegram\" to=\"agent-synth-alpha\">\nrelayed\n</KOTA_MESSAGE>".to_string(),
+            "\n\n<pasted_content id=\"paste-bus\">\n<KOTA_MESSAGE id=\"agentbus-synth-2\" from=\"agent-synth-beta\" to=\"agent-synth-alpha\" intent=\"coordination\">\nwrapped bus\n</KOTA_MESSAGE>\n</pasted_content id=\"paste-bus\">\n".to_string(),
+        ] {
+            let line = serde_json::json!({
+                "type": "attachment",
+                "uuid": "outer-bus",
+                "timestamp": "2026-11-08T01:05:00.000Z",
+                "attachment": {
+                    "type": "queued_command",
+                    "origin": { "kind": "human" },
+                    "prompt": bus_prompt,
+                    "delivery_id": "delivery-bus",
+                    "source_uuid": "source-bus",
+                    "timestamp": "2026-11-08T01:05:00.000Z"
+                }
+            });
+            assert!(
+                parse_claude_line(&agent, &source, 0, line).is_empty(),
+                "expected KOTA_MESSAGE queued_command to be skipped"
+            );
+        }
+
+        let task_notification = serde_json::json!({
+            "type": "attachment",
+            "uuid": "outer-task-notif",
+            "timestamp": "2026-11-08T01:06:00.000Z",
+            "attachment": {
+                "type": "queued_command",
+                "origin": { "kind": "task-notification" },
+                "prompt": "<task-notification><summary>done</summary></task-notification>",
+                "delivery_id": "delivery-task",
+                "source_uuid": "source-task",
+                "timestamp": "2026-11-08T01:06:00.000Z"
+            }
+        });
+        assert!(parse_claude_line(&agent, &source, 1, task_notification).is_empty());
+
+        for op in ["enqueue", "dequeue"] {
+            let queue_op = serde_json::json!({
+                "type": "queue-operation",
+                "operation": op,
+                "timestamp": "2026-11-08T01:07:00.000Z",
+                "sessionId": "session-synth-02",
+                "content": "queued text"
+            });
+            assert!(parse_claude_line(&agent, &source, 2, queue_op).is_empty());
+        }
+    }
+
+    #[test]
+    fn room_dedupe_key_matches_across_persisted_hash_and_legacy_lru_fallback() {
+        let mut msg = chat_message(
+            "msg-dedupe-synth-1",
+            "assistant",
+            "message",
+            "2026-11-08T02:00:00Z",
+            "Same Content\nWith   Whitespace\tAnd CASE",
+        );
+        msg.legacy_dedupe_hash = None;
+        let persisted_event = chathistory_event_from_message(&msg, None);
+        assert!(persisted_event.legacy_dedupe_hash.is_some());
+        let new_path_msg = message_from_chathistory_event(persisted_event.clone());
+        assert!(new_path_msg.legacy_dedupe_hash.is_some());
+
+        let mut legacy_event = persisted_event;
+        legacy_event.legacy_dedupe_hash = None;
+        let old_path_msg = message_from_chathistory_event(legacy_event);
+        assert!(old_path_msg.legacy_dedupe_hash.is_none());
+
+        let computes_before = ROOM_DEDUPE_HASH_COMPUTES.load(std::sync::atomic::Ordering::Relaxed);
+        let new_key = room_message_dedupe_key(&new_path_msg);
+        assert_eq!(
+            ROOM_DEDUPE_HASH_COMPUTES.load(std::sync::atomic::Ordering::Relaxed),
+            computes_before
+        );
+
+        let old_key_first = room_message_dedupe_key(&old_path_msg);
+        let computes_after_first =
+            ROOM_DEDUPE_HASH_COMPUTES.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(computes_after_first, computes_before + 1);
+        assert_eq!(new_key, old_key_first);
+
+        let old_key_second = room_message_dedupe_key(&old_path_msg);
+        assert_eq!(
+            ROOM_DEDUPE_HASH_COMPUTES.load(std::sync::atomic::Ordering::Relaxed),
+            computes_after_first
+        );
+        assert_eq!(new_key, old_key_second);
+    }
+
+    #[test]
+    fn parsed_events_chathistory_latest_and_agent_yaml_caches_reuse_unchanged_stamps() {
+        let root = temp_violet_dir("violet-b2-b3-b4-cache");
+        ensure_chathistory_dirs(&root).unwrap();
+
+        // B2: parsed-events cache resident in memory by (path, len, mtime)
+        let parsed_path = root.join("parsed-events.jsonl");
+        let first_event = native_event("assistant", "message", "cached event 1");
+        write_cached_native_events(&parsed_path, std::slice::from_ref(&first_event)).unwrap();
+        let b2_reads_before = PARSED_EVENT_DISK_READS.load(std::sync::atomic::Ordering::Relaxed);
+        let cached_events = read_cached_native_events(&parsed_path).unwrap();
+        assert_eq!(cached_events.len(), 1);
+        assert_eq!(cached_events[0].text, "cached event 1");
+        assert_eq!(
+            PARSED_EVENT_DISK_READS.load(std::sync::atomic::Ordering::Relaxed),
+            b2_reads_before
+        );
+
+        // External/new write invalidates stamp and updates cache
+        let second_event = native_event("assistant", "message", "cached event 2");
+        let raw_two = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first_event).unwrap(),
+            serde_json::to_string(&second_event).unwrap()
+        );
+        fs::write(&parsed_path, raw_two).unwrap();
+        let reloaded = read_cached_native_events(&parsed_path).unwrap();
+        assert_eq!(reloaded.len(), 2);
+        let b2_reads_after_change =
+            PARSED_EVENT_DISK_READS.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(b2_reads_after_change, b2_reads_before + 1);
+        let reloaded_again = read_cached_native_events(&parsed_path).unwrap();
+        assert_eq!(reloaded_again.len(), 2);
+        assert_eq!(
+            PARSED_EVENT_DISK_READS.load(std::sync::atomic::Ordering::Relaxed),
+            b2_reads_after_change
+        );
+
+        // B3: discover_project_agents caches agent.yaml by stamp
+        let agent_dir = root.join(".agent-workspaces").join("agent-synth-cache");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let agent_yaml_path = agent_dir.join("agent.yaml");
+        fs::write(&agent_yaml_path, "id: agent-synth-cache\nshell: codex\n").unwrap();
+        let agents_first = discover_project_agents(&root).unwrap();
+        assert_eq!(agents_first.len(), 1);
+        assert_eq!(agents_first[0].shell, "codex");
+        let b3_reads_after_first = YAML_FILE_DISK_READS.load(std::sync::atomic::Ordering::Relaxed);
+        let agents_second = discover_project_agents(&root).unwrap();
+        assert_eq!(agents_second.len(), 1);
+        assert_eq!(
+            YAML_FILE_DISK_READS.load(std::sync::atomic::Ordering::Relaxed),
+            b3_reads_after_first
+        );
+        fs::write(
+            &agent_yaml_path,
+            "id: agent-synth-cache\nshell: antigravity\nsession-id: ses-new\n",
+        )
+        .unwrap();
+        let agents_updated = discover_project_agents(&root).unwrap();
+        assert_eq!(agents_updated[0].shell, "antigravity");
+        assert_eq!(agents_updated[0].session_id.as_deref(), Some("ses-new"));
+
+        // B4: latest.jsonl cached by stamp
+        let msg1 = chat_message(
+            "msg-b4-1",
+            "assistant",
+            "message",
+            "2026-11-08T02:10:00Z",
+            "hello latest 1",
+        );
+        write_chathistory_messages(&root, std::slice::from_ref(&msg1)).unwrap();
+        let latest_path = chathistory_latest_path(&root);
+        let b4_reads_before =
+            CHATHISTORY_FILE_DISK_READS.load(std::sync::atomic::Ordering::Relaxed);
+        let latest_events = read_chathistory_event_file(&latest_path).unwrap();
+        assert_eq!(latest_events.len(), 1);
+        assert_eq!(latest_events[0].text, "hello latest 1");
+        assert!(latest_events[0].legacy_dedupe_hash.is_some());
+        assert_eq!(
+            CHATHISTORY_FILE_DISK_READS.load(std::sync::atomic::Ordering::Relaxed),
+            b4_reads_before
+        );
+
+        // External modification of latest.jsonl invalidates stamp and re-reads once
+        let mut manual_event = chathistory_event_from_message(
+            &chat_message(
+                "msg-b4-2",
+                "user",
+                "message",
+                "2026-11-08T02:10:05Z",
+                "hello latest 2",
+            ),
+            None,
+        );
+        manual_event.violet_seq = Some(2);
+        let manual_bytes =
+            render_chathistory_events(&[latest_events[0].clone(), manual_event]).unwrap();
+        fs::write(&latest_path, manual_bytes).unwrap();
+        let latest_after_edit = read_chathistory_event_file(&latest_path).unwrap();
+        assert_eq!(latest_after_edit.len(), 2);
+        let b4_reads_after_edit =
+            CHATHISTORY_FILE_DISK_READS.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(b4_reads_after_edit, b4_reads_before + 1);
+        let latest_cached_again = read_chathistory_event_file(&latest_path).unwrap();
+        assert_eq!(latest_cached_again.len(), 2);
+        assert_eq!(
+            CHATHISTORY_FILE_DISK_READS.load(std::sync::atomic::Ordering::Relaxed),
+            b4_reads_after_edit
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

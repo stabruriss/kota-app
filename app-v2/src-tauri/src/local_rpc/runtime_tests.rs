@@ -16,12 +16,65 @@ fn capture() -> Arc<Capture> {
     Arc::new(Capture { notices: Mutex::new(Vec::new()), reject_entries: AtomicBool::new(false) })
 }
 
+fn queued_notification(sequence: u64) -> Notification {
+    Notification {
+        notice: LocalNotice::Event {
+            scope: LocalScope { project_root: PathBuf::from("/tmp/local-projection-fixture"),
+                agent_id: "agent-fable-copper".into(), session_id: "session-fixture".into(), epoch: 1 },
+            event: json!({"sequence":sequence}),
+        },
+        acknowledgement: None,
+        after_recovery: Vec::new(),
+    }
+}
+
+#[test]
+fn projection_enqueue_waits_for_space_and_preserves_order() {
+    let (tx, incoming) = crossbeam_channel::bounded(1);
+    assert!(tx.send(queued_notification(1)).is_ok());
+    let delay = Duration::from_millis(100);
+    let started = Instant::now();
+    let receiver = thread::spawn(move || {
+        thread::sleep(delay);
+        [incoming.recv_timeout(Duration::from_secs(2)).unwrap(),
+            incoming.recv_timeout(Duration::from_secs(2)).unwrap()].map(|notification| {
+            let LocalNotice::Event { event, .. } = notification.notice else { panic!("expected event"); };
+            event["sequence"].as_u64().unwrap()
+        })
+    });
+    enqueue(&tx, queued_notification(2), Duration::from_secs(2)).unwrap();
+    assert!(started.elapsed() >= delay);
+    assert_eq!(receiver.join().unwrap(), [1, 2]);
+}
+
+#[test]
+fn projection_enqueue_times_out_only_after_its_wait() {
+    let (tx, _incoming) = crossbeam_channel::bounded(1);
+    assert!(tx.send(queued_notification(1)).is_ok());
+    let wait = Duration::from_millis(50);
+    let started = Instant::now();
+    let error = enqueue(&tx, queued_notification(2), wait).unwrap_err();
+    assert!(started.elapsed() >= wait);
+    assert_eq!(error.to_string(), "Local projection queue is full or stopped");
+}
+
+#[test]
+fn projection_enqueue_reports_disconnection_without_waiting_for_timeout() {
+    let (tx, incoming) = crossbeam_channel::bounded(1);
+    drop(incoming);
+    let started = Instant::now();
+    let error = enqueue(&tx, queued_notification(1), Duration::from_secs(5)).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(error.to_string(), "Local projection queue is full or stopped");
+}
+
 // A protocol fixture only. The separate Pi integration uses the real extension
 // and loopback fake provider; this fixture can deterministically reorder ACKs.
 const CHILD: &str = r#"
 import sys,json,pathlib,urllib.parse,time
 root=pathlib.Path(sys.argv[1]); session=sys.argv[2]; persist=sys.argv[3]=='save'
 file=root/'entries.json'; entries=json.loads(file.read_text()) if file.exists() else []
+with (root/'launches').open('a') as f: f.write('started\n')
 busy=False; held=[]; drained=[]; attempts={}; model={'provider':'fable','id':'confirmed'}; pending_model=None
 def emit(v): print(json.dumps(v),flush=True)
 def response(r,data=None): emit({'type':'response','id':r['id'],'command':r['type'],'success':True,'data':data})
@@ -48,6 +101,9 @@ for line in sys.stdin:
   if (root/'delay-model').exists(): pending_model=r;(root/'model-applied').write_text('ready')
   else: response(r,model)
  elif kind=='get_entries':
+  with (root/'history-requests').open('a') as f: f.write(json.dumps(r)+'\n')
+  if (root/'invalid-cursor').exists():
+   emit({'type':'response','id':r['id'],'success':False,'error':'invalid cursor'});continue
   values=entries
   if 'since' in r:
    indices=[i for i,e in enumerate(entries) if e['id']==r['since']]
@@ -55,6 +111,19 @@ for line in sys.stdin:
   response(r,{'entries':values,'leafId':entries[-1]['id'] if entries else None})
  elif kind=='prompt':
   msg=r['message']
+  if msg.startswith('/kota-history '):
+   with (root/'history-requests').open('a') as f: f.write(json.dumps(r)+'\n')
+   v=json.loads(msg[len('/kota-history '):])
+   if (root/'history-error').exists():
+    emit({'type':'extension_error','extensionPath':'command:kota-history','event':'command','error':'synthetic sensitive error'})
+    response(r,{'disposition':'handled'});continue
+   result={'schema':1,'requestId':v['requestId'],'result':{'status':'ready','entries':entries,'leafId':entries[-1]['id'] if entries else None}}
+   if (root/'history-large').exists(): result['result']={'status':'too_large'}
+   if (root/'history-bad').exists(): result['schema']=2
+   if (root/'ack-first').exists(): response(r,{'disposition':'handled'})
+   emit({'type':'extension_ui_request','method':'notify','id':'notify-history','message':'kota.history.v1:'+json.dumps(result)})
+   if not (root/'ack-first').exists(): response(r,{'disposition':'handled'})
+   continue
   if msg.startswith('/kota-auth '):
    v=json.loads(msg[len('/kota-auth '):])
    with (root/'auth-refresh.jsonl').open('a') as f: f.write(json.dumps({'operation':v['operation'],'busy':busy})+'\n')
@@ -769,3 +838,6 @@ fn reorder_waits_for_the_inflight_injection_and_stop_cancels_that_wait() {
         runtime.close().unwrap();fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[path = "runtime_history_tests.rs"]
+mod history_tests;

@@ -999,12 +999,13 @@ async fn boot_while_leased(manager: &Manager) -> super::super::ControlLease {
     let lease = manager.0.store.state.control_lease().unwrap();
     manager.bootstrap();
     wait_until(|| manager.status().sync.control_recoverable).await;
+    wait_until(|| manager.0.waiting_control.load(Ordering::Acquire)).await;
     assert_eq!(manager.status().sync.phase, public::Phase::Failed);
     lease
 }
 
 #[tokio::test]
-async fn retry_takes_over_released_lease_and_projects_real_control_fixture() {
+async fn released_lease_automatically_starts_control_and_preserves_busy_ui_actions() {
     let (_root, manager, worker) = recovery_fixture();
     let control = fs::read(manager.0.store.state.control_path()).unwrap();
     let identity = fs::read(manager.0.store.state.identity_path()).unwrap();
@@ -1044,9 +1045,8 @@ async fn retry_takes_over_released_lease_and_projects_real_control_fixture() {
         fs::read(manager.0.store.state.identity_path()).unwrap(),
         identity
     );
-    drop(lease);
     let attempts = manager.0.generation.load(Ordering::Relaxed);
-    // A released lease, status/diagnostic reads and panel reads do not retry.
+    // Status and panel reads cannot spawn additional attempts while blocked.
     for _ in 0..5 {
         assert!(manager.status().sync.control_recoverable);
         let _ = manager.diagnostics();
@@ -1055,7 +1055,7 @@ async fn retry_takes_over_released_lease_and_projects_real_control_fixture() {
     assert_eq!(manager.0.generation.load(Ordering::Relaxed), attempts);
     assert!(worker.requests.lock().unwrap().is_empty());
 
-    manager.start(retry_command()).await.unwrap();
+    drop(lease); // No Action, panel open or timer is needed to take over.
     wait_until(|| {
         let status = manager.status();
         // Only a real heartbeat settles control recovery, not Retry admission.
@@ -1063,6 +1063,8 @@ async fn retry_takes_over_released_lease_and_projects_real_control_fixture() {
             && status.sync.phase == public::Phase::Idle
     })
     .await;
+    assert_eq!(manager.0.generation.load(Ordering::Relaxed), attempts + 1);
+    assert!(!manager.0.waiting_control.load(Ordering::Acquire));
     let recovered = manager.status();
     assert!(!recovered.sync.control_recoverable);
     assert_eq!(recovered.sync.phase, public::Phase::Idle);
@@ -1183,7 +1185,10 @@ async fn retry_rereads_left_or_replaced_membership_instead_of_reviving_snapshot(
         // releasing the lease. The new instance's UI still has the old group.
         super::super::write(&manager.0.store.state.control_path(), &saved).unwrap();
         drop(lease);
-        let error = manager.start(retry_command()).await.unwrap_err();
+        // The command captured the old incarnation while the old owner held
+        // its lock, regardless of whether automatic takeover wins admission.
+        let error = manager.request_action(Some("group-test".into()), Some("member-test".into()),
+            Action::ResumeSync(manager.0.work.epoch())).await.unwrap_err();
         assert_eq!(error.code, "group_context_changed");
         if left {
             wait_until(|| manager.0.worker.lock().unwrap().is_none()).await;
@@ -1213,6 +1218,30 @@ async fn retry_rereads_left_or_replaced_membership_instead_of_reviving_snapshot(
 }
 
 #[tokio::test]
+async fn released_control_waiter_rechecks_membership_and_shutdown_without_actions() {
+    for shutdown in [false, true] {
+        let (_root, manager, worker) = recovery_fixture();
+        let lease = boot_while_leased(&manager).await;
+        let generation = manager.0.generation.load(Ordering::Relaxed);
+        if shutdown {
+            manager.shutdown();
+        } else {
+            let path = manager.0.store.state.control_path();
+            let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            saved["current"] = Value::Null;
+            super::super::write(&path, &saved).unwrap();
+        }
+        drop(lease);
+        wait_until(|| !manager.0.waiting_control.load(Ordering::Acquire)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(manager.0.generation.load(Ordering::Relaxed), generation);
+        assert!(manager.0.worker.lock().unwrap().is_none());
+        assert!(worker.requests.lock().unwrap().is_empty());
+        manager.shutdown();
+    }
+}
+
+#[tokio::test]
 async fn retry_preserves_and_resumes_original_durable_management_request() {
     let (_root, manager, worker) = recovery_fixture();
     let lease = boot_while_leased(&manager).await;
@@ -1233,7 +1262,6 @@ async fn retry_preserves_and_resumes_original_durable_management_request() {
     );
     assert!(worker.requests.lock().unwrap().is_empty());
     drop(lease);
-    manager.start(retry_command()).await.unwrap();
     wait_until(|| {
         manager.status().group.members.len() == 2 && manager.status().sync.error.is_none()
     })
@@ -1256,7 +1284,8 @@ async fn retry_open_errors_fail_closed_without_replacing_identity_or_retrying_in
     for fault in ["missing", "corrupt", "lock_path"] {
         let (_root, manager, worker) = recovery_fixture();
         let lease = boot_while_leased(&manager).await;
-        drop(lease);
+        assert_eq!(manager.diagnostics().last_error.as_deref(), Some("sync_busy"),
+            "the next wait must observe this open's error, not a previous one");
         let identity_path = manager.0.store.state.identity_path();
         match fault {
             "missing" => fs::remove_file(&identity_path).unwrap(),
@@ -1269,6 +1298,12 @@ async fn retry_open_errors_fail_closed_without_replacing_identity_or_retrying_in
         }
         let identity = fs::read(&identity_path).ok();
         let control = fs::read(manager.0.store.state.control_path()).unwrap();
+        drop(lease);
+        wait_until(|| manager.status().sync.control_recoverable
+            && !manager.0.waiting_control.load(Ordering::Acquire)
+            // A previous immediate blocker may remain the displayed recovery
+            // detail; diagnostics still records the actual latest open error.
+            && manager.diagnostics().last_error.as_deref() == Some("sync_unavailable")).await;
         let error = manager.start(retry_command()).await.unwrap_err();
         assert_eq!(
             error.code, "sync_unavailable",
@@ -1399,9 +1434,19 @@ async fn cancelled_retry_does_not_clear_durable_intent_or_start_a_stale_heartbea
         release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
     };
     let factory = blocked.clone();
+    let factory_gate = Arc::new(Mutex::new(None::<std::sync::mpsc::Receiver<()>>));
+    let gate = factory_gate.clone();
+    let factory_entered = Arc::new(AtomicBool::new(false));
+    let entered = factory_entered.clone();
     let manager = Manager::services(
         original.0.store.clone(),
-        Arc::new(move || Box::new(factory.clone())),
+        Arc::new(move || {
+            if let Some(wait) = gate.lock().unwrap().take() {
+                entered.store(true, Ordering::Release);
+                wait.recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+            Box::new(factory.clone())
+        }),
         Arc::new(|| None),
     );
     let lease = boot_while_leased(&manager).await;
@@ -1410,9 +1455,15 @@ async fn cancelled_retry_does_not_clear_durable_intent_or_start_a_stale_heartbea
     saved["pending"] = json!({ "kind":"mutation", "membership":saved["current"],
         "action":{"kind":"rename","name":"Restored name"}, "requestId":"original-durable-request" });
     super::super::write(&manager.0.store.state.control_path(), &saved).unwrap();
-    drop(lease);
+    // Make the explicit Retry own the worker before releasing the old lock.
+    // The new automatic waiter must reuse it, preserving this cancellation race.
+    let (release_open, wait_open) = std::sync::mpsc::channel();
+    *factory_gate.lock().unwrap() = Some(wait_open);
     let retrying = manager.clone();
     let retry = tokio::spawn(async move { retrying.start(retry_command()).await });
+    wait_until(|| factory_entered.load(Ordering::Acquire)).await;
+    drop(lease);
+    release_open.send(()).unwrap();
     wait_until(|| blocked.calls.load(Ordering::Acquire) == 1).await;
     let cancel =
         tokio::time::timeout(Duration::from_millis(100), manager.cancel(retry_command())).await;
@@ -1441,4 +1492,172 @@ async fn cancelled_retry_does_not_clear_durable_intent_or_start_a_stale_heartbea
     );
     manager.shutdown();
     wait_until(|| manager.0.worker.lock().unwrap().is_none()).await;
+}
+
+#[test]
+fn heartbeat_log_projects_attempt_and_safe_code_only() {
+    for attempt in [1, 2] {
+        let value = heartbeat_failure(attempt, "secret-url-or-device-id");
+        assert_eq!(value["attempt"], attempt);
+        assert_eq!(value["stage"], "heartbeat_failed");
+        assert_eq!(value["error"], public::Error::from_code("sync_unavailable").code);
+        assert!(!value.to_string().contains("secret"));
+    }
+}
+
+#[test]
+fn invitation_expiry_is_one_projection_edge_not_a_loop_trigger() {
+    let mut seen = None;
+    assert!(!invitation_expired(Some(100), &mut seen, 99));
+    assert!(invitation_expired(Some(100), &mut seen, 100));
+    for at in 101..200 { assert!(!invitation_expired(Some(100), &mut seen, at)); }
+    assert!(!invitation_expired(Some(300), &mut seen, 250));
+    assert!(invitation_expired(Some(300), &mut seen, 300));
+    assert!(!invitation_expired(None, &mut seen, 350));
+}
+
+#[tokio::test]
+async fn deterministic_heartbeat_rejections_are_not_retried() {
+    #[derive(Clone)]
+    struct Rejected {
+        code: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+    impl Transport for Rejected {
+        fn send(&self, _: &str, url: &str, _: &BTreeMap<String, String>, _: &str)
+            -> Result<RemoteResponse, String> {
+            assert!(url.ends_with("/heartbeat"));
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(self.code.into())
+        }
+    }
+    for code in ["removed", "unauthorized", "control_rejected", "protocol_mismatch", "invalid_worker_response"] {
+        let (_root, manager, _) = recovery_fixture();
+        let rejected = Rejected { code, calls: Default::default() };
+        let mut client = ControlClient::open_existing(manager.0.store.state.clone(), rejected.clone(), None).unwrap();
+        let before = coordinator::now();
+        let (result, next) = manager.heartbeat_cycle(&mut client, "group-test", manager.0.work.epoch());
+        assert_eq!(result.unwrap_err(), code);
+        assert_eq!(rejected.calls.load(Ordering::Relaxed), 1, "{code}");
+        assert_eq!(client.membership().is_none(), matches!(code, "removed" | "unauthorized"));
+        assert!(next >= before + 60_000 && next <= coordinator::now() + 60_000);
+    }
+}
+
+#[tokio::test]
+async fn two_heartbeat_failures_make_exactly_two_requests_then_restore_the_sixty_second_deadline() {
+    #[derive(Clone)]
+    struct Down(Arc<AtomicUsize>);
+    impl Transport for Down {
+        fn send(&self, _: &str, url: &str, _: &BTreeMap<String, String>, _: &str)
+            -> Result<RemoteResponse, String> {
+            assert!(url.ends_with("/heartbeat"));
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Err("worker_unreachable".into())
+        }
+    }
+    let (_root, original, _) = recovery_fixture();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let manager = Manager::services(original.0.store.clone(),
+        Arc::new(move || Box::new(Down(counter.clone()))), Arc::new(|| None));
+    let mut client = ControlClient::open_existing(manager.0.store.state.clone(), Down(calls.clone()), None).unwrap();
+    let before = coordinator::now();
+    let (result, next) = manager.heartbeat_cycle(&mut client, "group-test", manager.0.work.epoch());
+    assert_eq!(result.unwrap_err(), "worker_unreachable");
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert!(next >= before + 60_000 && next <= coordinator::now() + 60_000);
+    assert!(client.membership().is_some());
+    drop(client);
+    manager.bootstrap();
+    wait_until(|| calls.load(Ordering::Relaxed) == 4).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(calls.load(Ordering::Relaxed), 4, "the real control loop stops after its two attempts");
+    manager.shutdown();
+    wait_until(|| manager.0.worker.lock().unwrap().is_none()).await;
+}
+
+#[tokio::test]
+async fn transient_heartbeat_retry_renews_before_a_blocked_projection() {
+    #[derive(Clone)]
+    struct Transient {
+        worker: RecoveryWorker,
+        calls: Arc<AtomicUsize>,
+        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl Transport for Transient {
+        fn send(&self, method: &str, url: &str, headers: &BTreeMap<String, String>, body: &str)
+            -> Result<RemoteResponse, String> {
+            assert!(url.ends_with("/heartbeat"));
+            if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                return Err("worker_unreachable".into());
+            }
+            let (lock, wake) = &*self.release;
+            let mut released = lock.lock().unwrap();
+            while !*released { released = wake.wait(released).unwrap(); }
+            self.worker.send(method, url, headers, body)
+        }
+    }
+    let (_root, original, worker) = recovery_fixture();
+    let transport = Transient { worker: worker.clone(), calls: Default::default(),
+        release: Arc::new((Mutex::new(false), std::sync::Condvar::new())) };
+    let factory = transport.clone();
+    let manager = Manager::services(original.0.store.clone(),
+        Arc::new(move || Box::new(factory.clone())), Arc::new(|| None));
+    let (identity, _, membership, _) = control::inspect_existing(&manager.0.store.state).unwrap().unwrap();
+    let membership = membership.unwrap();
+    let old_until = coordinator::now() + 60_000;
+    let authority = Arc::new(RwLock::new(Authority { membership: membership.clone(), identity,
+        members: worker.members.clone(), valid_until: old_until }));
+    let host = NetworkHost::start().await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    *manager.0.network.lock().unwrap() = Some(Network {
+        fence: GroupFence { group_id: membership.group_id, membership_id: membership.membership_id },
+        _watch: None, authority: authority.clone(), connections: Default::default(), host: host.clone(), tx,
+    });
+    manager.bootstrap();
+    wait_until(|| transport.calls.load(Ordering::Acquire) == 2).await;
+    let lock = manager.0.store.state.content_lock().unwrap();
+    *transport.release.0.lock().unwrap() = true;
+    transport.release.1.notify_all();
+    let renewed = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+    // A failed assertion must not keep the synthetic projection lock held.
+    drop(lock);
+    match renewed.unwrap().unwrap() {
+        coordinator::Command::Members(a, _, _) => {
+            assert!(a.valid_until > old_until);
+            assert!(coordinator::now() < old_until, "no unauthorized gap during this transient failure");
+            assert_eq!(authority.read().unwrap().valid_until, a.valid_until);
+        }
+        _ => panic!("expected refreshed authority"),
+    }
+    wait_until(|| manager.status().sync.error.is_none()).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(transport.calls.load(Ordering::Acquire), 2, "no heartbeat hot loop");
+    manager.shutdown();
+    wait_until(|| manager.0.worker.lock().unwrap().is_none()).await;
+    host.stop_and_wait().await;
+}
+
+#[tokio::test]
+async fn failed_member_projection_arms_one_short_retry_instead_of_the_next_heartbeat() {
+    let (_root, manager, worker) = recovery_fixture();
+    let mut client =
+        ControlClient::open_existing(manager.0.store.state.clone(), worker.clone(), None).unwrap();
+    client.refresh_members(Some("group-test")).unwrap();
+    let mut retry = None;
+    manager.project_or_retry(&client, &mut retry);
+    assert!(retry.is_none(), "a successful projection arms nothing");
+    // A corrupt cache file is a fast, deterministic projection failure.
+    let members = manager.0.store.state.root.join("rosters/members.json");
+    fs::write(&members, b"{").unwrap();
+    let before = coordinator::now();
+    manager.project_or_retry(&client, &mut retry);
+    let at = retry.expect("a failed projection arms one retry");
+    assert!(at >= before + PROJECTION_RETRY_MS && at <= coordinator::now() + PROJECTION_RETRY_MS);
+    // Another failure while armed keeps the first deadline: no retry loop.
+    manager.project_or_retry(&client, &mut retry);
+    assert_eq!(retry, Some(at));
+    fs::remove_file(&members).unwrap();
+    assert!(manager.project(&client));
 }

@@ -23,6 +23,9 @@ use tokio::sync::{oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 // This is a display window only. It neither extends network deadlines nor
 // changes retries. Each unresolved source keeps its first monotonic instant.
 const RECOVERY_DISPLAY_WINDOW: Duration = Duration::from_secs(60);
+// One short retry after a failed member projection, instead of waiting for
+// the next 60 s heartbeat. It is a single extra attempt, not a retry loop.
+const PROJECTION_RETRY_MS: u64 = 5_000;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum RecoverySource {
@@ -173,6 +176,7 @@ struct Inner {
     owner: Arc<dyn Fn() -> Option<OwnerConnection> + Send + Sync>,
     view: Mutex<View>,
     worker: Mutex<Option<Worker>>,
+    waiting_control: AtomicBool,
     network: Mutex<Option<Network>>,
     retired: Mutex<Vec<NetworkHost>>,
     relay: Mutex<Option<super::relay::HttpPool>>,
@@ -191,6 +195,16 @@ struct Inner {
 }
 #[derive(Clone)]
 pub(crate) struct Manager(Arc<Inner>);
+fn heartbeat_failure(attempt: u8, error: &str) -> serde_json::Value {
+    serde_json::json!({"stage":"heartbeat_failed", "attempt":attempt,
+        "error":public::Error::from_code(error).code})
+}
+fn invitation_expired(expiry: Option<u64>, seen: &mut Option<u64>, now: u64) -> bool {
+    let expired = expiry.filter(|expiry| now >= *expiry);
+    let changed = expired != *seen;
+    *seen = expired;
+    changed && expired.is_some()
+}
 // Raw code is deliberately neither Debug nor persisted in this mailbox.
 enum Action {
     Invitation(bool),
@@ -235,6 +249,7 @@ impl Manager {
             owner,
             view: Mutex::new(View::default()),
             worker: Mutex::new(None),
+            waiting_control: AtomicBool::new(false),
             network: Mutex::new(None),
             retired: Mutex::new(Vec::new()),
             relay: Mutex::new(None),
@@ -534,12 +549,54 @@ impl Manager {
                     }
                 }
                 this.emit(false);
+                if result.as_ref().err().map(String::as_str) == Some("control_in_use") {
+                    this.wait_for_control();
+                }
             })
             .map_err(|_| {
                 *slot = None;
                 "sync_runtime_failed".to_owned()
             })?;
         Ok(())
+    }
+    fn wait_for_control(&self) {
+        if self.0.shutdown.load(Ordering::Acquire)
+            || self.0.waiting_control.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        // The account Manager is process-wide. Status reads and repeated UI
+        // actions cannot spawn more waiters. Do not retain the Manager or join
+        // this blocking flock waiter at shutdown.
+        crate::kota_debug_log("[bbs-control] control_in_use_waiting");
+        let weak = Arc::downgrade(&self.0);
+        let store = self.0.store.state.clone();
+        let result = std::thread::Builder::new()
+            .name("kota-bbs-control-wait".into())
+            .spawn(move || {
+                let acquired = store.wait_control_lease();
+                // The controller opens a different fd with LOCK_NB. Release
+                // this fd first; a third instance winning that race simply
+                // causes another blocking wait after its control_in_use.
+                let result = acquired.map(drop);
+                let Some(inner) = weak.upgrade() else { return; };
+                let this = Manager(inner);
+                this.0.waiting_control.store(false, Ordering::Release);
+                if this.0.shutdown.load(Ordering::Acquire) { return; }
+                let result = result.and_then(|_| {
+                    match control::inspect_existing(&store)? {
+                        Some((_, _, membership, pending)) if membership.is_some() || pending => {
+                            this.ensure_worker(false, None)
+                        }
+                        _ => Ok(()),
+                    }
+                });
+                if let Err(error) = result { this.error(&error); }
+            });
+        if result.is_err() {
+            self.0.waiting_control.store(false, Ordering::Release);
+            self.error("sync_runtime_failed");
+        }
     }
     async fn action(
         &self,
@@ -822,6 +879,23 @@ impl Manager {
         .await
         .map_err(|_| roster::public::Error::unavailable())?
     }
+    fn heartbeat_cycle<T: control::Transport>(
+        &self, client: &mut ControlClient<T>, group: &str, epoch: u64,
+    ) -> (Result<(), String>, u64) {
+        let mut result = Ok(());
+        for attempt in 1..=2 {
+            // Each call keeps Transport's existing per-request 20 s budget.
+            result = client.refresh_members(Some(group));
+            match &result {
+                Ok(()) => break,
+                Err(error) => crate::kota_debug_log(&format!("[bbs-control] {}",
+                    heartbeat_failure(attempt, error))),
+            }
+            if !matches!(&result, Err(error) if error == "worker_unreachable")
+                || client.membership().is_none() || self.0.work.epoch() != epoch { break; }
+        }
+        (result, coordinator::now().saturating_add(60_000))
+    }
     fn control_thread(
         &self,
         rx: &Receiver<Message>,
@@ -837,9 +911,10 @@ impl Manager {
             ControlClient::open_existing(self.0.store.state.clone(), transport, owner)
         };
         let mut client = opened?;
+        let mut projection_retry = None;
         // A previous owner may have left or changed groups while holding the
         // lease. Publish the newly loaded state before accepting any request.
-        self.project(&client);
+        self.project_or_retry(&client, &mut projection_retry);
         if tauri::async_runtime::block_on(self.0.roster.recover_staging()).is_err() {
             crate::kota_debug_log("[bbs-roster] staging_recovery_failed");
         }
@@ -847,6 +922,7 @@ impl Manager {
         let mut heartbeat = 0;
         let mut retry = 5_000u64;
         let mut pending_at = 0;
+        let mut expired_invitation = None;
         let mut queued = None;
         let mut work_epoch = self.0.work.epoch();
         loop {
@@ -925,7 +1001,7 @@ impl Manager {
                             pending_at = now + 5_000;
                         }
                     }
-                    self.project(&client);
+                    self.project_or_retry(&client, &mut projection_retry);
                     if result.is_ok() {
                         if let Some(epoch) = resume_epoch {
                             let mut view = self.0.view.lock().unwrap();
@@ -961,21 +1037,30 @@ impl Manager {
                         retry = (retry * 2).min(300_000);
                     }
                 }
+                self.project_or_retry(&client, &mut projection_retry);
+            }
+            if projection_retry.is_some_and(|at| coordinator::now() >= at) {
+                projection_retry = None;
                 self.project(&client);
             }
-            if client.membership().is_some() && now >= heartbeat {
+            if client.membership().is_some() && !client.leaving() && now >= heartbeat {
                 let group = client.membership().unwrap().group_id.clone();
                 let epoch = work_epoch;
-                let refreshed = client.refresh_members(Some(&group));
-                heartbeat = coordinator::now() + 60_000;
-                self.project(&client);
+                let (refreshed, next) = self.heartbeat_cycle(&mut client, &group, epoch);
+                heartbeat = next;
                 match refreshed {
                     Ok(()) => {
                         self.control_recovered(epoch);
                         let signals = client.take_signals();
                         self.network(&client, net_tx.clone(), signals, epoch);
+                        // Renew authority before projection can wait for the
+                        // BBS write lock or invitation regeneration can fail.
+                        self.project_or_retry(&client, &mut projection_retry);
                     }
                     Err(e) => {
+                        // Publish a retired membership before recording its
+                        // rejection: a scope change clears the old recovery.
+                        self.project_or_retry(&client, &mut projection_retry);
                         if client.has_pending() && pending_at <= coordinator::now() {
                             pending_at = coordinator::now().saturating_add(retry);
                         }
@@ -985,6 +1070,20 @@ impl Manager {
                             && matches!(e.as_str(), "removed" | "unauthorized"));
                     }
                 }
+            }
+            let now = coordinator::now();
+            if client.invitation_needs_refresh(now) && now >= pending_at {
+                match client.refresh_invitation() {
+                    Ok(()) => {
+                        retry = 5_000;
+                    }
+                    Err(e) => {
+                        self.error(&e);
+                        pending_at = now.saturating_add(retry);
+                        retry = (retry * 2).min(300_000);
+                    }
+                }
+                self.project_or_retry(&client, &mut projection_retry);
             }
             if client.membership().is_none() {
                 self.stop_network();
@@ -1011,11 +1110,9 @@ impl Manager {
             }
             self.cleanup_retired();
             // Expiry invalidates the public code in memory even when HTTP failed.
-            if client
-                .invitation_expiry()
-                .is_some_and(|expiry| coordinator::now() >= expiry)
-            {
-                self.project(&client);
+            if invitation_expired(client.invitation_expiry(), &mut expired_invitation,
+                coordinator::now()) {
+                self.project_or_retry(&client, &mut projection_retry);
             }
             if client.membership().is_none() && !client.has_pending() {
                 // Admission and shutdown use the same slot lock. No accepted
@@ -1061,13 +1158,36 @@ impl Manager {
             }
         }
     }
-    fn project<T: control::Transport>(&self, client: &ControlClient<T>) {
+    /// Arms at most one short retry for a failed projection. The retry itself
+    /// does not re-arm; a later caller (normally the heartbeat) may.
+    fn project_or_retry<T: control::Transport>(
+        &self,
+        client: &ControlClient<T>,
+        retry: &mut Option<u64>,
+    ) {
+        if !self.project(client) && retry.is_none() {
+            *retry = Some(coordinator::now().saturating_add(PROJECTION_RETRY_MS));
+        }
+    }
+    /// Returns false only when the member projection itself failed.
+    fn project<T: control::Transport>(&self, client: &ControlClient<T>) -> bool {
+        let mut projected = true;
         let members = client.status_memory().and_then(|r| r.members.as_deref());
         if members.is_some() || client.membership().is_none() {
             let members = members.unwrap_or(&[]);
-            if roster::persist_members(&self.0.store.state, client.membership(), members).is_err() {
-                crate::kota_debug_log("[bbs-roster] member_projection_failed");
-                self.0.roster.member_projection_failed();
+            if let Err(error) =
+                roster::persist_members(&self.0.store.state, client.membership(), members)
+            {
+                projected = false;
+                let reason = roster::projection_failure(&error);
+                let kept = self.0.roster.member_projection_failed(
+                    client.membership(),
+                    members,
+                    reason == "group_context_changed",
+                );
+                crate::kota_debug_log(&format!(
+                    "[bbs-roster] member_projection_failed reason={reason} kept={kept}"
+                ));
             } else {
                 self.0.roster.member_projection(
                     client.device_id().unwrap_or_default(),
@@ -1143,6 +1263,7 @@ impl Manager {
         if changed {
             self.emit(false);
         }
+        projected
     }
     fn network<T: control::Transport>(
         &self,

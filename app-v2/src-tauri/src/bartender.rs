@@ -19,18 +19,21 @@ use crate::agent_bus::AgentBusManager;
 use crate::integrations::{agent_launch_spec_is_active, IntegrationManager, WorkspaceProject};
 use crate::pty::PtyManager;
 
+mod live;
+
 #[derive(Default)]
 pub struct BartenderManager {
     sync_lock: Mutex<()>,
     status_compute_lock: Mutex<()>,
-    status_cache: Mutex<Option<CachedBartenderStatus>>,
+    /// The live model of the project the panel shows (perf plan A v2).
+    live: Mutex<Option<live::LiveSlot>>,
     dispatch_watchers: Mutex<HashMap<PathBuf, BartenderDispatchWatch>>,
 }
 
-const BARTENDER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
 const BARTENDER_DISPATCH_SCHEMA: &str = "kota.bartender.dispatch.v1";
 pub const BARTENDER_SYNC_EVENT: &str = "bartender-sync-local";
 pub const BARTENDER_SYNC_PROGRESS_EVENT: &str = "bartender-sync-progress";
+pub const BARTENDER_STATUS_CHANGED_EVENT: &str = "bartender-status-changed";
 const KOTA_HOME_DIR: &str = "Kota";
 const CLI_SYNC_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const CLI_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -47,13 +50,6 @@ struct BartenderStatusCacheKey {
     local_root: String,
     default_branch: String,
     agents: Vec<(String, String)>,
-}
-
-#[derive(Clone, Debug)]
-struct CachedBartenderStatus {
-    key: BartenderStatusCacheKey,
-    checked_at: Instant,
-    status: BartenderStatus,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,7 +102,7 @@ pub struct BartenderRequest {
     pub conflict_prompt: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BartenderDirtyAgent {
     pub agent_id: String,
@@ -115,7 +111,7 @@ pub struct BartenderDirtyAgent {
     pub pending_commit_count: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BartenderStatus {
     pub project_id: String,
@@ -267,21 +263,21 @@ struct PublishOutcome {
 }
 
 impl BartenderManager {
+    /// The watched project answers from its live model; any other one, such as
+    /// the CLI's, is computed once and not kept.
     pub fn status(&self, workspace: &WorkspaceProject) -> Result<BartenderStatus> {
         let key = status_cache_key(workspace);
-        if let Some(status) = self.cached_status(&key)? {
+        if let Some(status) = self.live_status(&key)? {
             return Ok(status);
         }
         let _compute_guard = self
             .status_compute_lock
             .lock()
             .map_err(|_| anyhow!("bartender status compute lock poisoned"))?;
-        if let Some(status) = self.cached_status(&key)? {
+        if let Some(status) = self.live_status(&key)? {
             return Ok(status);
         }
-        let status = compute_status(workspace)?;
-        self.store_status(key, status.clone())?;
-        Ok(status)
+        compute_status(workspace)
     }
 
     pub fn sync_local(&self, workspace: &WorkspaceProject) -> Result<BartenderSyncResult> {
@@ -328,8 +324,7 @@ impl BartenderManager {
         if let Some(progress) = progress {
             progress.emit("preparing", "Preparing local sync");
         }
-        self.invalidate_status_cache()?;
-        let result = sync_local_inner(workspace, progress);
+        let result = sync_local_inner(workspace, progress, &|model| self.settle(workspace, model));
         if let (Some(progress), Err(err)) = (progress, &result) {
             progress.emit("failed", &format!("Sync failed: {err}"));
             crate::kota_debug_log(&format!(
@@ -350,8 +345,9 @@ impl BartenderManager {
                 ));
             }
         }
-        if let Ok(result) = &result {
-            self.store_status(status_cache_key(workspace), result.status.clone())?;
+        if result.is_err() {
+            // A failed sync may have moved part of the room: reconcile it.
+            self.settle_now(workspace);
         }
         result
     }
@@ -377,12 +373,6 @@ impl BartenderManager {
 
         let app_handle = app.clone();
         let project_root_for_callback = project_root.to_path_buf();
-        let last_process = std::sync::Arc::new(Mutex::new(
-            Instant::now()
-                .checked_sub(Duration::from_secs(60))
-                .unwrap_or_else(Instant::now),
-        ));
-        let last_process_for_callback = std::sync::Arc::clone(&last_process);
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 let Ok(event) = res else {
@@ -391,13 +381,7 @@ impl BartenderManager {
                 if event.paths.is_empty() {
                     return;
                 }
-                let now = Instant::now();
-                if let Ok(mut last) = last_process_for_callback.lock() {
-                    if now.duration_since(*last) < Duration::from_millis(250) {
-                        return;
-                    }
-                    *last = now;
-                }
+                // No throttle: rename claims keep concurrent drains idempotent, and a 250 ms throttle dropped follow-up requests.
                 let app_for_process = app_handle.clone();
                 let project_root_for_process = project_root_for_callback.clone();
                 thread::spawn(move || {
@@ -559,13 +543,16 @@ impl BartenderManager {
             .status_compute_lock
             .lock()
             .map_err(|_| anyhow!("bartender status compute lock poisoned"))?;
-        self.invalidate_status_cache()?;
         // The room refreshes upstream every minute; a local project has none to ask.
         if !workspace.is_local() {
             fetch_origin_branch(workspace, &workspace.default_branch)?;
         }
-        let status = compute_status(workspace)?;
-        self.store_status(status_cache_key(workspace), status.clone())?;
+        // The watched project answers from its model. If the fetch moved a remote
+        // ref, the refs/remotes watcher re-reads only the upstream counts.
+        let status = match self.live_status(&status_cache_key(workspace))? {
+            Some(status) => status,
+            None => compute_status(workspace)?,
+        };
         Ok(BartenderFetchResult {
             ok: true,
             message: if workspace.is_local() { LOCAL_ONLY_MESSAGE } else { "Fetched GitHub." }.into(),
@@ -582,7 +569,6 @@ impl BartenderManager {
             .status_compute_lock
             .lock()
             .map_err(|_| anyhow!("bartender status compute lock poisoned"))?;
-        self.invalidate_status_cache()?;
 
         if workspace.is_local() {
             return Ok(BartenderPullResult {
@@ -591,12 +577,12 @@ impl BartenderManager {
                 pulled_commit_count: 0,
                 needs_human_pick: false,
                 conflict: None,
-                status: compute_status(workspace)?,
+                status: self.settle_now(workspace),
             });
         }
         let source = PathBuf::from(&workspace.source_dir);
         fetch_origin_branch(workspace, &workspace.default_branch)?;
-        let before = compute_status(workspace)?;
+        let before = self.settle_now(workspace);
         if before.room_change_count > 0 {
             return Ok(BartenderPullResult {
                 ok: false,
@@ -642,8 +628,7 @@ impl BartenderManager {
                     reset_worktree_to(&target.path, &new_head)?;
                 }
             }
-            let status = compute_status(workspace)?;
-            self.store_status(status_cache_key(workspace), status.clone())?;
+            let status = self.settle_now(workspace);
             return Ok(BartenderPullResult {
                 ok: true,
                 message: format!(
@@ -680,8 +665,7 @@ impl BartenderManager {
                         reset_worktree_to(&target.path, &new_head)?;
                     }
                 }
-                let status = compute_status(workspace)?;
-                self.store_status(status_cache_key(workspace), status.clone())?;
+                let status = self.settle_now(workspace);
                 Ok(BartenderPullResult {
                     ok: true,
                     message: format!(
@@ -695,7 +679,7 @@ impl BartenderManager {
                 })
             }
             Err(err) => {
-                let status = compute_status(workspace)?;
+                let status = self.settle_now(workspace);
                 let conflict = BartenderPullConflict {
                     message: err.to_string(),
                     source_head: local_source_head,
@@ -726,9 +710,8 @@ impl BartenderManager {
             .status_compute_lock
             .lock()
             .map_err(|_| anyhow!("bartender status compute lock poisoned"))?;
-        self.invalidate_status_cache()?;
 
-        let before = compute_status(workspace)?;
+        let before = self.settle_now(workspace);
         // Even with a remote added by hand, a local project never pushes as the default gh account.
         if workspace.is_local() {
             return Ok(BartenderPushResult {
@@ -765,7 +748,7 @@ impl BartenderManager {
             let push_result = git_remote(workspace, &["push", "-u", "origin", &format!("HEAD:{branch}")]);
             if let Err(err) = push_result {
                 let _ = fetch_origin_branch(workspace, &branch);
-                let status = compute_status(workspace)?;
+                let status = self.settle_now(workspace);
                 return Ok(BartenderPushResult {
                     ok: false,
                     message: format!("Initial GitHub push failed: {err}"),
@@ -775,7 +758,7 @@ impl BartenderManager {
             }
 
             let _ = fetch_origin_branch(workspace, &branch);
-            let status = compute_status(workspace)?;
+            let status = self.settle_now(workspace);
             return Ok(BartenderPushResult {
                 ok: true,
                 message: "Initial push to GitHub complete.".into(),
@@ -803,7 +786,7 @@ impl BartenderManager {
 
         if let Err(err) = push_result {
             let _ = fetch_origin_branch(workspace, &workspace.default_branch);
-            let status = compute_status(workspace)?;
+            let status = self.settle_now(workspace);
             if status.github_behind_count > 0 {
                 return Ok(BartenderPushResult {
                     ok: false,
@@ -824,7 +807,7 @@ impl BartenderManager {
         }
 
         let _ = fetch_origin_branch(workspace, &workspace.default_branch);
-        let status = compute_status(workspace)?;
+        let status = self.settle_now(workspace);
         Ok(BartenderPushResult {
             ok: true,
             message: "Pushed to GitHub.".into(),
@@ -832,94 +815,27 @@ impl BartenderManager {
             status,
         })
     }
-
-    fn cached_status(&self, key: &BartenderStatusCacheKey) -> Result<Option<BartenderStatus>> {
-        let cache = self
-            .status_cache
-            .lock()
-            .map_err(|_| anyhow!("bartender status cache lock poisoned"))?;
-        let Some(cached) = cache.as_ref() else {
-            return Ok(None);
-        };
-        if cached.key == *key && cached.checked_at.elapsed() < BARTENDER_STATUS_CACHE_TTL {
-            return Ok(Some(cached.status.clone()));
-        }
-        Ok(None)
-    }
-
-    fn store_status(&self, key: BartenderStatusCacheKey, status: BartenderStatus) -> Result<()> {
-        let mut cache = self
-            .status_cache
-            .lock()
-            .map_err(|_| anyhow!("bartender status cache lock poisoned"))?;
-        *cache = Some(CachedBartenderStatus {
-            key,
-            checked_at: Instant::now(),
-            status,
-        });
-        Ok(())
-    }
-
-    fn invalidate_status_cache(&self) -> Result<()> {
-        let mut cache = self
-            .status_cache
-            .lock()
-            .map_err(|_| anyhow!("bartender status cache lock poisoned"))?;
-        *cache = None;
-        Ok(())
-    }
 }
 
 fn compute_status(workspace: &WorkspaceProject) -> Result<BartenderStatus> {
-    let started = Instant::now();
-    let source = PathBuf::from(&workspace.source_dir);
-    let source_head_sha = git(&source, &["rev-parse", "--verify", "HEAD"])
-        .unwrap_or_else(|_| String::new())
-        .trim()
-        .to_string();
-    let mut dirty_agents = Vec::new();
-    let mut room_changed_paths = BTreeSet::new();
-    let source_changed_paths = changed_paths_against(&source, "HEAD").unwrap_or_default();
-    let source_change_count = source_changed_paths.len();
-    room_changed_paths.extend(source_changed_paths);
+    Ok(live::compute_live(workspace).status())
+}
 
-    for agent in agent_targets(workspace) {
-        if !agent.path.exists() {
-            continue;
-        }
-        let agent_head = source_head(&agent.path).unwrap_or_default();
-        let pending_commits = if source_head_sha.is_empty() {
-            Vec::new()
-        } else {
-            pending_commits_from_room_head(&source_head_sha, &agent.path).unwrap_or_default()
-        };
-        let mut agent_changed_paths =
-            changed_paths_from_commits(&agent.path, &pending_commits).unwrap_or_default();
-        agent_changed_paths.extend(changed_paths_against(&agent.path, "HEAD").unwrap_or_default());
-        if pending_commits.is_empty()
-            && !source_head_sha.is_empty()
-            && agent_head != source_head_sha
-        {
-            agent_changed_paths
-                .extend(changed_paths_against(&agent.path, &source_head_sha).unwrap_or_default());
-        }
-        let change_count = agent_changed_paths.len();
-        let pending_commit_count = pending_commits.len();
-        if change_count > 0 || pending_commit_count > 0 {
-            room_changed_paths.extend(agent_changed_paths);
-            dirty_agents.push(BartenderDirtyAgent {
-                agent_id: agent.agent_id,
-                path: path_string(&agent.path),
-                change_count,
-                pending_commit_count,
-            });
-        }
-    }
-
-    let room_change_count = room_changed_paths.len();
-    let github_change_count = ahead_commit_count(&source, &workspace.default_branch).unwrap_or(0);
-    let github_behind_count = behind_commit_count(&source, &workspace.default_branch).unwrap_or(0);
-    let initial_push = initial_push_status(&source, &workspace.default_branch);
+/// The room's state machine over the counts the live model keeps.
+#[allow(clippy::too_many_arguments)]
+fn room_status(
+    project_id: &str,
+    source_dir: &str,
+    default_branch: &str,
+    room_change_count: usize,
+    source_change_count: usize,
+    dirty_agents: Vec<BartenderDirtyAgent>,
+    github: &live::GithubCounts,
+    checked_at: String,
+) -> BartenderStatus {
+    let github_change_count = github.ahead;
+    let github_behind_count = github.behind;
+    let initial_push = github.initial_push.clone();
     let github_needs_initial_push = initial_push.is_some();
     let github_push_branch = initial_push.as_ref().map(|status| status.branch.clone());
     let github_initial_push_commit_count = initial_push
@@ -970,10 +886,10 @@ fn compute_status(workspace: &WorkspaceProject) -> Result<BartenderStatus> {
         ("idle".into(), "Room is in sync.".into())
     };
 
-    let status = BartenderStatus {
-        project_id: workspace.project_id.clone(),
-        source_dir: workspace.source_dir.clone(),
-        default_branch: workspace.default_branch.clone(),
+    BartenderStatus {
+        project_id: project_id.to_string(),
+        source_dir: source_dir.to_string(),
+        default_branch: default_branch.to_string(),
         room_change_count,
         source_change_count,
         github_change_count,
@@ -982,29 +898,17 @@ fn compute_status(workspace: &WorkspaceProject) -> Result<BartenderStatus> {
         github_push_branch,
         github_initial_push_commit_count,
         dirty_agents,
-        checked_at: Utc::now().to_rfc3339(),
+        checked_at,
         state,
         message,
-    };
-    let elapsed = started.elapsed();
-    if elapsed > Duration::from_millis(3000) {
-        crate::kota_debug_log(&format!(
-            "[bartender] compute_status project={} state={} room={} source={} github={} behind={} elapsed={}ms",
-            status.project_id,
-            status.state,
-            status.room_change_count,
-            status.source_change_count,
-            status.github_change_count,
-            status.github_behind_count,
-            elapsed.as_millis()
-        ));
     }
-    Ok(status)
 }
 
+/// `settle` turns the final full compute into the result status and the live model.
 fn sync_local_inner(
     workspace: &WorkspaceProject,
     progress: Option<&BartenderSyncProgress>,
+    settle: &dyn Fn(live::LiveModel) -> BartenderStatus,
 ) -> Result<BartenderSyncResult> {
     let source = PathBuf::from(&workspace.source_dir);
     if let Some(progress) = progress {
@@ -1023,7 +927,7 @@ fn sync_local_inner(
             published_commit_count: 0,
             published_agents: Vec::new(),
             conflicts: Vec::new(),
-            status: compute_status(workspace)?,
+            status: settle(live::compute_live(workspace)),
         });
     }
 
@@ -1142,7 +1046,7 @@ fn sync_local_inner(
     if let Some(progress) = progress {
         progress.emit("refreshing_status", "Refreshing sync status");
     }
-    let status = compute_status(workspace)?;
+    let status = settle(live::compute_live(workspace));
     let ok = conflicts.is_empty() && reset_failures.is_empty();
     let message = if !reset_failures.is_empty() {
         reset_failure_message(&reset_failures)
@@ -1305,6 +1209,10 @@ fn pending_commits(source: &Path, agent: &Path) -> Result<Vec<String>> {
 
 fn pending_commits_from_room_head(room_head: &str, agent: &Path) -> Result<Vec<String>> {
     let agent_head = source_head(agent)?;
+    pending_commits_between(room_head, &agent_head, agent)
+}
+
+fn pending_commits_between(room_head: &str, agent_head: &str, agent: &Path) -> Result<Vec<String>> {
     if room_head == agent_head {
         return Ok(Vec::new());
     }
@@ -2118,13 +2026,13 @@ mod tests {
             "Kota Bartender|arbitrary-string|Kota Bartender|arbitrary-string");
         let mut workspace = workspace_without_agents(&root, &source);
         workspace.agents = workspace_with_agent(&root, &source, &root.join("agent-cwd"), &agent).agents;
-        let outcome = sync_local_inner(&workspace, None).unwrap();
+        let outcome = sync_local_inner(&workspace, None, &|model| model.status()).unwrap();
         assert!(outcome.ok, "{}", outcome.message);
         assert_eq!(git(&source, &["log", "-1", "--format=%an|%ae|%ce"]).unwrap().trim(),
             "Fable Agent|original@fable.example|arbitrary-string");
         assert_eq!(git(&source, &["show", "-s", "--format=%ae", &initial]).unwrap().trim(), "bartender@kota.local");
         let head = source_head(&source).unwrap();
-        assert!(sync_local_inner(&workspace, None).unwrap().ok);
+        assert!(sync_local_inner(&workspace, None, &|model| model.status()).unwrap().ok);
         assert_eq!(source_head(&source).unwrap(), head);
         crate::project_settings::save_commit_email(&root, None).unwrap();
         fs::write(source.join("after-remove"), "removed").unwrap();
@@ -2160,7 +2068,7 @@ mod tests {
     fn a_machine_without_a_git_email_syncs_agent_commits_as_the_agent_placeholder() {
         let (root, source, workspace) = identity_fixture("identity-missing", "");
         git(&source, &["config", "user.name", ""]).unwrap();
-        let outcome = sync_local_inner(&workspace, None).unwrap();
+        let outcome = sync_local_inner(&workspace, None, &|model| model.status()).unwrap();
         assert!(outcome.ok, "{}", outcome.message);
         let agent_id = &workspace.agents[0].agent_id;
         assert_eq!(git(&source, &["log", "-1", "--format=%an|%ae|%cn|%ce"]).unwrap().trim(),
@@ -2171,7 +2079,7 @@ mod tests {
     #[test]
     fn a_machine_with_a_git_email_keeps_its_own_committer() {
         let (root, source, workspace) = identity_fixture("identity-present", "me@fable.example");
-        let outcome = sync_local_inner(&workspace, None).unwrap();
+        let outcome = sync_local_inner(&workspace, None, &|model| model.status()).unwrap();
         assert!(outcome.ok, "{}", outcome.message);
         let agent_id = &workspace.agents[0].agent_id;
         let committer = git(&source, &["log", "-1", "--format=%ae|%ce"]).unwrap();
@@ -2287,7 +2195,7 @@ mod tests {
         git(&source, &["worktree", "add", "-b", "fable-agent", agent.to_str().unwrap()]).unwrap();
         fs::write(agent.join("agent-change"), "hello").unwrap();
         let workspace = workspace_with_agent(&root, &source, &root.join("agent-cwd"), &agent);
-        let outcome = sync_local_inner(&workspace, None).unwrap();
+        let outcome = sync_local_inner(&workspace, None, &|model| model.status()).unwrap();
         assert!(outcome.ok, "{}", outcome.message);
         assert_eq!(git(&source, &["log", "-1", "--format=%ae|%ce"]).unwrap().trim(),
             "bartender@kota.local|bartender@kota.local");

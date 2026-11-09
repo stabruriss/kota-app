@@ -176,7 +176,12 @@ for line in sys.stdin:
    with (root/'.agent-workspaces/agent-config/SHELL.yaml').open('a') as out: out.write('# external configuration\n')
    (root/'external-write').unlink()
  elif kind=='get_entries': data={'entries':[],'leafId':None}
- elif kind=='prompt': data={'disposition':'handled'}
+ elif kind=='prompt':
+  data={'disposition':'handled'}
+  if r['message'].startswith('/kota-history '):
+   v=json.loads(r['message'][len('/kota-history '):])
+   receipt={'schema':1,'requestId':v['requestId'],'result':{'status':'ready','entries':[],'leafId':None}}
+   print(json.dumps({'type':'extension_ui_request','method':'notify','message':'kota.history.v1:'+json.dumps(receipt)}),flush=True)
  else: data={}
  print(json.dumps({'type':'response','id':r['id'],'success':True,'data':data}),flush=True)
 "#;

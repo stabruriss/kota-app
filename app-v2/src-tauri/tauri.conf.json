@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicholasxjy/tauri-v2-schema/main/schema.json",
   "productName": "Kota",
   "mainBinaryName": "kota-v2",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "identifier": "com.kota.v2",
   "build": {
     "devUrl": "http://localhost:1420",
@@ -17,6 +17,7 @@
     "resources": {
       "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
       "../kota-ext/index.ts": "kota-ext/index.ts",
+      "../kota-ext/history.ts": "kota-ext/history.ts",
       "../kota-ext/bridge.ts": "kota-ext/bridge.ts",
       "../kota-ext/inject.ts": "kota-ext/inject.ts",
       "../kota-ext/tools.ts": "kota-ext/tools.ts",

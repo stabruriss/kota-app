@@ -6,6 +6,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { TavernModal } from '../src/chrome/TavernModal';
 import { ProjectAgentProfileOverlay } from '../src/chrome/ProjectAgentProfileOverlay';
 import { VioletMessageBubble } from '../src/chrome/VioletRoomPanel';
+import { AgentRibbon } from '../src/chrome/AgentRibbon';
+import { AgentWindowsLayer } from '../src/chrome/AgentWindowsLayer';
+import { createAgentGridStore } from '../src/lib/agent-grid-store';
 import iconLocal from '../src/assets/tavern/icons/tavern-entry.svg';
 import iconPi from '../src/assets/tavern/icons/providers/pi.svg';
 import * as pty from '../src/pty-client';
@@ -70,6 +73,46 @@ it('uses the existing Tavern flame in Local status and SHELL choices while keepi
   expect(local.discoverLocal).not.toHaveBeenCalled();
 });
 
+it('renders the dedicated Kota Local default avatar on Tavern hero cards while keeping Pi on Pi cards', async () => {
+  vi.spyOn(pty, 'loadTavernHeroProfiles').mockResolvedValue([
+    {
+      heroId: 'hero-local-fixture',
+      name: 'New Hero II',
+      provider: 'kota-local',
+      model: '',
+      effort: null,
+      avatarId: 'pi',
+      skills: [],
+      ghost: 'Fixture',
+      shell: '',
+      archived: false,
+      dismissed: false,
+      kind: 'custom',
+    },
+    {
+      heroId: 'hero-pi-fixture',
+      name: 'Pi Fixture',
+      provider: 'pi',
+      model: 'default',
+      effort: null,
+      avatarId: 'pi',
+      skills: [],
+      ghost: 'Fixture',
+      shell: '',
+      archived: false,
+      dismissed: false,
+      kind: 'custom',
+    },
+  ]);
+  render(<TavernModal open onClose={() => {}} />);
+  const localCard = await screen.findByRole('button', { name: /New Hero II/i });
+  const piCard = await screen.findByRole('button', { name: /Pi Fixture/i });
+  expect(localCard.querySelector('.tavern-avatar-art')).toHaveClass('provider-kota-local');
+  expect(localCard.querySelector('.tavern-avatar-art')).not.toHaveClass('provider-pi');
+  expect(piCard.querySelector('.tavern-avatar-art')).toHaveClass('provider-pi');
+  expect(piCard.querySelector('.tavern-avatar-art')).not.toHaveClass('provider-kota-local');
+});
+
 it.each([
   ['kota-local', 'Kota Local', 'provider-kota-local', 'provider-pi'],
   ['pi', 'Pi', 'provider-pi', 'provider-kota-local'],
@@ -98,6 +141,9 @@ it('preserves the Tavern SVG colors instead of masking it, without changing the 
   expect(local).toContain('-webkit-mask: none;');
   const pi = css.match(/\.project-agent-shell-provider\.provider-pi,\s*\.project-agent-shell-provider-icon\.provider-pi\s*\{([^}]+)\}/)?.[1];
   expect(pi).toContain('--project-agent-shell-provider-icon: url("../assets/tavern/icons/providers/pi.svg");');
+  const localAvatar = css.match(/\.tavern-avatar-art\.provider-kota-local\s*\{([^}]+)\}/)?.[1];
+  expect(localAvatar).toContain("background-image: url('../assets/tavern/optimized/avatars/kota-local.webp');");
+  expect(css).toContain(".tavern-avatar-art.provider-pi {\n  background-image: url('../assets/tavern/optimized/avatars/pi.webp');\n}");
 });
 
 it.each([
@@ -133,4 +179,67 @@ it.each([
     text: 'Fixture progress.', model: 'k3', effort: 'max', sourcePath: null, nativeEventId: null,
   }} />);
   expect(screen.queryByLabelText('Kota Local')).not.toBeInTheDocument();
+});
+
+it.each([
+  ['kota-local', 'provider-kota-local', 'provider-pi'],
+  ['pi', 'provider-pi', 'provider-kota-local'],
+] as const)('uses %s default avatar class in room bubbles without colliding with the other provider', (provider, expectedClass, otherClass) => {
+  const { container } = render(<VioletMessageBubble humanTargetName="Human Fixture" message={{
+    id: `fixture-avatar-${provider}`, sessionId: 'fixture-session', agentId: `agent-${provider}`,
+    shell: provider, agentProvider: provider, role: 'assistant', kind: 'message',
+    timestamp: '2026-11-06T00:00:00.000Z', text: 'Avatar check.', model: 'k3', effort: 'max',
+    sourcePath: null, nativeEventId: 'fixture-session/fixture-entry:2',
+  }} />);
+  const avatar = container.querySelector('.violet-msg-avatar.tavern-avatar-art');
+  expect(avatar).toHaveClass(expectedClass);
+  expect(avatar).not.toHaveClass(otherClass);
+});
+
+it('uses provider-kota-local in AgentRibbon and AgentWindowsLayer fallbacks without changing provider-pi', () => {
+  const ribbon = render(
+    <AgentRibbon
+      onTable={[
+        { id: 'agent-local', state: 'idle' },
+        { id: 'agent-pi', state: 'idle' },
+      ]}
+      offTable={[]}
+      targetAgent={null}
+      onOpenAgent={vi.fn()}
+      workingHeroes={[
+        { id: 'agent-local', name: 'Local Hero', record: '1 turn', cli: 'kota-local' },
+        { id: 'agent-pi', name: 'Pi Hero', record: '1 turn', cli: 'pi' },
+      ]}
+      shortcutOrder={['agent-local', 'agent-pi']}
+    />,
+  );
+  const chipAvatars = ribbon.container.querySelectorAll('.chip-avatar.tavern-avatar-art');
+  expect(chipAvatars[0]).toHaveClass('provider-kota-local');
+  expect(chipAvatars[0]).not.toHaveClass('provider-pi');
+  expect(chipAvatars[1]).toHaveClass('provider-pi');
+  expect(chipAvatars[1]).not.toHaveClass('provider-kota-local');
+  cleanup();
+
+  const status = new Map([
+    ['agent-local', { agentId: 'agent-local', cli: 'kota-local' as const, cwd: '/tmp', running: true }],
+    ['agent-pi', { agentId: 'agent-pi', cli: 'pi' as const, cwd: '/tmp', running: true }],
+  ]);
+  const windows = render(
+    <AgentWindowsLayer
+      liveAgents={['agent-local', 'agent-pi']}
+      gridStore={createAgentGridStore()}
+      status={status}
+      focusedAgent="agent-local"
+      minimized={new Set()}
+      onFocusAgent={vi.fn()}
+      onMinimizeAgent={vi.fn()}
+      onAgentKey={vi.fn()}
+      projectId="project-fixture"
+    />,
+  );
+  const winAvatars = windows.container.querySelectorAll('.win-title-agent-avatar.tavern-avatar-art');
+  expect(winAvatars[0]).toHaveClass('provider-kota-local');
+  expect(winAvatars[0]).not.toHaveClass('provider-pi');
+  expect(winAvatars[1]).toHaveClass('provider-pi');
+  expect(winAvatars[1]).not.toHaveClass('provider-kota-local');
 });

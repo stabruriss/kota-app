@@ -1583,6 +1583,21 @@ impl AgentTerminalPty {
             .and_then(|process| process.child_pid)
     }
 
+    fn running_session_id(&self) -> Option<String> {
+        if let Some(id) = self
+            .inner
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(id.to_string());
+        }
+        let mut ownership = self.inner.ownership.lock().ok()?;
+        let _ = ownership.check();
+        ownership.bound_id()
+    }
+
     /// Submit-only liveness guard. A dead provider child can leave a stale
     /// `process` entry whose master fd still accepts writes silently, so
     /// `write()` would "succeed" into a dead PTY and the agent-bus recovery
@@ -2650,7 +2665,15 @@ impl AgentTerminalPty {
         thread::Builder::new()
             .name(format!("kota-agent-pty-wait-{}", state.agent_id))
             .spawn(move || {
-                let exit_code = child.wait().ok().and_then(exit_status_code);
+                let status = child.wait().ok();
+                let exit_code = status.as_ref().cloned().and_then(exit_status_code);
+                crate::kota_debug_log(&format!(
+                    "[agent:{}] wait thread exit pid={} code={:?} status={:?}",
+                    state.agent_id,
+                    child_pid.map_or_else(|| "none".to_string(), |pid| pid.to_string()),
+                    exit_code,
+                    status,
+                ));
                 if state.generation.load(Ordering::SeqCst) != generation || state.inputs.is_closed()
                 {
                     return;
@@ -2744,7 +2767,13 @@ impl AgentTerminalPty {
     /// registry on respawn so the frontend's exit listener (which is
     /// keyed by agent_id, same topic for old and new) doesn't see a
     /// phantom exit and clear `liveAgents`.
-    fn stop_for_replacement(&self) -> Result<()> {
+    fn stop_for_replacement(&self, reason: &str) -> Result<()> {
+        let child_pid = self.child_pid();
+        crate::kota_debug_log(&format!(
+            "[agent:{}] stop_for_replacement pid={} reason={reason}",
+            self.inner.agent_id,
+            child_pid.map_or_else(|| "none".to_string(), |pid| pid.to_string()),
+        ));
         let lost = self
             .inner
             .inputs
@@ -2766,6 +2795,47 @@ impl AgentTerminalPty {
         }
         process.take();
         Ok(())
+    }
+
+    fn emit_reused_state(&self, app: &AppHandle) {
+        let decoder = self
+            .inner
+            .process
+            .lock()
+            .expect("agent process poisoned")
+            .as_ref()
+            .map(|process| Arc::clone(&process.decoder));
+        if let Some(decoder) = decoder {
+            let snapshot = {
+                let dec = match decoder.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        decoder.clear_poison();
+                        poisoned.into_inner()
+                    }
+                };
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.snapshot())).ok()
+            };
+            if let Some(snapshot) = snapshot {
+                let _ = app.emit(
+                    &self.inner.route.output_event,
+                    AgentOutputEvent {
+                        agent_id: self.inner.agent_id.clone(),
+                        snapshot,
+                    },
+                );
+            }
+        }
+        self.emit_status_detail(
+            app,
+            true,
+            Some(AgentStatusPhase::FirstBytes),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
     }
 
     fn emit_status(&self, app: &AppHandle, running: bool) {
@@ -3021,6 +3091,36 @@ struct Replacement {
     epoch: AtomicU64,
 }
 
+fn replacement_reason(previous: &AgentTerminalPty, req: &AgentSpawnRequest) -> Result<Option<&'static str>> {
+    if !previous.is_running() || previous.submit_child_is_dead() {
+        return Ok(Some("dead"));
+    }
+    if req.takeover {
+        return Ok(Some("takeover"));
+    }
+    let configured_cli = crate::shell_switch::Launch::target_cli(req).map_err(|e| anyhow!(e))?;
+    if req.cli != previous.inner.cli || configured_cli != previous.inner.cli {
+        return Ok(Some("shell_switch"));
+    }
+    if req.fresh_session
+        || req.args.iter().any(|arg| arg == "--fork-session" || arg == "--fork")
+        || req.args.first().is_some_and(|arg| arg == "fork")
+    {
+        return Ok(Some("fresh"));
+    }
+    if let Some(requested) = req
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if previous.running_session_id().as_deref() != Some(requested) {
+            return Ok(Some("session_changed"));
+        }
+    }
+    Ok(None)
+}
+
 impl AgentRegistry {
     fn replacement(&self, agent: &str) -> Arc<Replacement> {
         self.replacements
@@ -3039,12 +3139,53 @@ impl AgentRegistry {
         self.spawn_serial(app, req, &replacement, epoch, None)
     }
 
-    fn spawn_serial(&self, app: &AppHandle, mut req: AgentSpawnRequest, replacement: &Replacement, epoch: u64, expected_cli: Option<AgentCli>) -> Result<AgentRoute> {
+    fn spawn_serial(&self, app: &AppHandle, req: AgentSpawnRequest, replacement: &Replacement, epoch: u64, expected_cli: Option<AgentCli>) -> Result<AgentRoute> {
+        self.spawn_serial_with(
+            req,
+            replacement,
+            epoch,
+            expected_cli,
+            |previous| previous.emit_reused_state(app),
+            |pty| pty.init(app),
+            |root| crate::agent_bus::AgentBusManager::retry_after_terminal_spawn(app, root),
+        )
+    }
+
+    fn spawn_serial_with(
+        &self,
+        mut req: AgentSpawnRequest,
+        replacement: &Replacement,
+        epoch: u64,
+        expected_cli: Option<AgentCli>,
+        on_reuse: impl FnOnce(&AgentTerminalPty),
+        init_pty: impl FnOnce(&AgentTerminalPty) -> Result<()>,
+        after_spawn: impl FnOnce(&Path),
+    ) -> Result<AgentRoute> {
         let agent_id = req.agent_id.clone();
         let previous = self.lookup(&agent_id).ok();
         if previous.as_ref().is_some_and(|p| p.inner.project_root.canonicalize().ok() != Path::new(&req.project_root).canonicalize().ok()) {
             return Err(anyhow!("agent launch project does not match the registered incarnation"));
         }
+        let replace_reason = match previous.as_ref() {
+            Some(previous) => match replacement_reason(previous, &req)? {
+                Some(reason) => Some(reason),
+                None => {
+                    local::ensure_expected_cli(previous.inner.cli, expected_cli)?;
+                    if replacement.epoch.load(Ordering::SeqCst) != epoch {
+                        return Err(anyhow!("agent startup cancelled or superseded"));
+                    }
+                    crate::kota_debug_log(&format!(
+                        "[agent:{agent_id}] spawn reused running process pid={}",
+                        previous
+                            .child_pid()
+                            .map_or_else(|| "none".to_string(), |pid| pid.to_string()),
+                    ));
+                    on_reuse(previous);
+                    return Ok(previous.route());
+                }
+            },
+            None => None,
+        };
         let live = previous.as_ref().filter(|p| p.is_running() && !p.submit_child_is_dead())
             .map(|p| p.inner.cli)
             .or_else(|| live_provider_for(Path::new(&req.project_root), &agent_id,
@@ -3071,12 +3212,12 @@ impl AgentRegistry {
             return Err(anyhow!("agent startup cancelled or superseded"));
         }
         if let Some(lease) = foreign { terminate_foreign_agent_session(&lease); }
-        if let Some(previous) = previous { previous.stop_for_replacement()?; }
+        if let Some(previous) = previous { previous.stop_for_replacement(replace_reason.unwrap_or("replace"))?; }
         self.stop_local_for_terminal(&agent_id)?;
         self.ptys.lock().expect("agent registry poisoned").insert(agent_id.clone(), pty.clone());
         let result = (|| {
             if replacement.epoch.load(Ordering::SeqCst) != epoch { return Err(anyhow!("agent startup cancelled or superseded")); }
-            pty.init(app)?;
+            init_pty(&pty)?;
             if replacement.epoch.load(Ordering::SeqCst) != epoch { return Err(anyhow!("agent startup cancelled or superseded")); }
             let now = Utc::now().to_rfc3339();
             write_agent_session_lease(&lease_path, &AgentSessionLease {
@@ -3088,7 +3229,7 @@ impl AgentRegistry {
             Ok(pty.route())
         })();
         if let Err(error) = result {
-            let stop_error = pty.stop_for_replacement().err();
+            let stop_error = pty.stop_for_replacement("startup_failed").err();
             let rollback_error = launch.as_mut().and_then(|launch| launch.rollback().err());
             let mut ptys = self.ptys.lock().expect("agent registry poisoned");
             // A failed kill must retain its owner so a later close/retry can
@@ -3100,7 +3241,7 @@ impl AgentRegistry {
                 stop_error.map(|e| format!("; new process cleanup failed: {e}")).unwrap_or_default(),
                 rollback_error.map(|e| format!("; projection rollback failed: {e}")).unwrap_or_default()));
         }
-        crate::agent_bus::AgentBusManager::retry_after_terminal_spawn(app, Path::new(&req.project_root));
+        after_spawn(Path::new(&req.project_root));
         result
     }
 
@@ -4056,5 +4197,139 @@ mod tests {
         let second = terminal_query_responses(DEVICE_ATTRIBUTES_QUERY, &mut state, (1, 1), 0);
         assert_eq!(first, DEVICE_ATTRIBUTES_RESPONSE);
         assert!(second.is_empty());
+    }
+
+    #[test]
+    fn spawn_reuses_healthy_matching_process_and_replaces_on_takeover_fresh_cli_or_session_change() {
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Clone, Debug)]
+        struct RecordingKiller(Arc<AtomicUsize>);
+        impl portable_pty::ChildKiller for RecordingKiller {
+            fn kill(&mut self) -> std::io::Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+                Box::new(self.clone())
+            }
+        }
+
+        let temp = std::env::temp_dir().join(format!(
+            "kota-spawn-reuse-guard-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+
+        let registry = AgentRegistry::default();
+        let reused_count = AtomicUsize::new(0);
+        let init_count = AtomicUsize::new(0);
+        let base_pid = std::process::id();
+
+        let run_spawn = |req: AgentSpawnRequest| {
+            let replacement = registry.replacement(&req.agent_id);
+            let epoch = replacement.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            let _guard = replacement.serial.lock().unwrap();
+            let mut killer = None;
+            let route = registry
+                .spawn_serial_with(
+                    req,
+                    &replacement,
+                    epoch,
+                    None,
+                    |_| {
+                        reused_count.fetch_add(1, Ordering::SeqCst);
+                    },
+                    |pty| {
+                        init_count.fetch_add(1, Ordering::SeqCst);
+                        let kills = Arc::new(AtomicUsize::new(0));
+                        let size = *pty.inner.size.lock().unwrap();
+                        let pair = native_pty_system().openpty(size).unwrap();
+                        let writer = pair.master.take_writer().unwrap();
+                        let decoder = Arc::new(Mutex::new(AnsiLineDecoder::new(size.cols, size.rows)));
+                        pty.inner.inputs.release_start();
+                        *pty.inner.process.lock().unwrap() = Some(AgentProcess {
+                            master: pair.master,
+                            writer: Arc::new(Mutex::new(writer)),
+                            killer: Box::new(RecordingKiller(Arc::clone(&kills))),
+                            decoder,
+                            // The test process stays live; RecordingKiller never signals it.
+                            child_pid: Some(base_pid),
+                        });
+                        killer = Some(kills);
+                        Ok(())
+                    },
+                    |_| {},
+                )
+                .unwrap();
+            (route, killer)
+        };
+
+        let base_req = AgentSpawnRequest {
+            agent_id: "agent-cedar-reuse".into(),
+            cli: AgentCli::Codex,
+            cwd: temp.display().to_string(),
+            project_root: temp.display().to_string(),
+            worktree_root: None,
+            shared_dir: Some(temp.join("project-memory").display().to_string()),
+            rules_dir: None,
+            adapter_path: None,
+            args: Vec::new(),
+            session_id: Some("session-alpha".into()),
+            project_id: Some("cedar-project".into()),
+            project_remote: None,
+            project_base_ref: None,
+            takeover: false,
+            fresh_session: false,
+        };
+
+        let (route1, first_killer) = run_spawn(base_req.clone());
+        let first_killer = first_killer.unwrap();
+        let first_inner = Arc::clone(&registry.lookup(&base_req.agent_id).unwrap().inner);
+        let lease_path = agent_session_lease_path(&base_req);
+        let initial_lease = fs::read(&lease_path).unwrap();
+        assert_eq!(reused_count.load(Ordering::SeqCst), 0);
+
+        let mut unspecified_session = base_req.clone();
+        unspecified_session.session_id = None;
+        for req in [base_req.clone(), unspecified_session] {
+            let (route, new_killer) = run_spawn(req);
+            let current = registry.lookup(&base_req.agent_id).unwrap();
+            assert_eq!(route, route1);
+            assert!(Arc::ptr_eq(&first_inner, &current.inner));
+            assert_eq!(current.child_pid(), Some(base_pid));
+            assert!(new_killer.is_none(), "reuse must not initialize another PTY");
+            assert_eq!(first_killer.load(Ordering::SeqCst), 0);
+            assert_eq!(fs::read(&lease_path).unwrap(), initial_lease);
+        }
+        assert_eq!(init_count.load(Ordering::SeqCst), 1);
+        assert_eq!(reused_count.load(Ordering::SeqCst), 2);
+
+        let mut takeover_req = base_req.clone();
+        takeover_req.takeover = true;
+        let mut fresh_req = base_req.clone();
+        fresh_req.fresh_session = true;
+        let mut claude_req = base_req.clone();
+        claude_req.cli = AgentCli::Claude;
+        let mut session_req = claude_req.clone();
+        session_req.session_id = Some("session-beta".into());
+        let mut killers = vec![first_killer];
+        for req in [takeover_req, fresh_req, claude_req, session_req] {
+            let previous_inner = Arc::clone(&registry.lookup(&base_req.agent_id).unwrap().inner);
+            let (_, new_killer) = run_spawn(req);
+            assert_eq!(killers.last().unwrap().load(Ordering::SeqCst), 1);
+            let current = registry.lookup(&base_req.agent_id).unwrap();
+            assert!(!Arc::ptr_eq(&previous_inner, &current.inner));
+            let new_killer = new_killer.unwrap();
+            assert_eq!(new_killer.load(Ordering::SeqCst), 0);
+            killers.push(new_killer);
+        }
+        assert_eq!(init_count.load(Ordering::SeqCst), 5);
+        assert_eq!(reused_count.load(Ordering::SeqCst), 2);
+        for killer in &killers[..4] {
+            assert_eq!(killer.load(Ordering::SeqCst), 1, "each replacement stops once");
+        }
+
+        let _ = fs::remove_dir_all(&temp);
     }
 }

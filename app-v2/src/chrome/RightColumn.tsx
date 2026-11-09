@@ -68,6 +68,7 @@ import {
   emberScheduleSave,
   emberScheduleState,
   hasTauriRuntime,
+  onBartenderStatusChangedEvent,
   onBartenderSyncEvent,
   onBartenderSyncProgressEvent,
   onEmberSchedulesChanged,
@@ -106,6 +107,8 @@ import {
 } from '../bbs-post-versions';
 import { BbsSyncScope, BbsSyncControlButton, BbsSyncActivity, BbsThreadSharing } from './BbsSyncControls';
 import { LaughingManSettings } from './LaughingManSettings';
+import { LaughingManCloudflareWarning } from './LaughingManCloudflareWarning';
+import { cloudflareSummary } from '../lib/lm-cloudflare';
 import { PuppeteerDanceCard } from './PuppeteerDanceCard';
 import type { DanceController } from '../lib/dance-settings';
 import { MarkdownText } from './VioletRoomPanel';
@@ -1336,6 +1339,7 @@ export function RightColumn({
   const [bbsUserIdentity, setBbsUserIdentity] = useState<AccountUserIdentity | null>(null);
   // Laughing Man (Telegram bridge)
   const [lm, setLm] = useState<LmStatus | null>(null);
+  const lmCloudflare = lm?.standby?.cloudflare ?? null;
   const [lmHistoryOpen, setLmHistoryOpen] = useState(false);
   const [lmSetupOpen, setLmSetupOpen] = useState(false);
   const [lmLog, setLmLog] = useState<LmLogEntry[]>([]);
@@ -2684,6 +2688,16 @@ export function RightColumn({
     setBusyAction(null);
   }, []);
 
+  const applyBartenderStatus = useCallback((next: BartenderStatus) => {
+    setStatus(next);
+    setActionMessage((prev) => {
+      if (!prev) return prev;
+      if (next.state === 'idle') return null;
+      if (prev.startsWith('Could not refresh') && next.roomChangeCount === 0) return null;
+      return prev;
+    });
+  }, []);
+
   const refreshBartender = useCallback(async () => {
     if (!canUseBartender) {
       setStatus(null);
@@ -2696,13 +2710,7 @@ export function RightColumn({
     try {
       const next = await bartenderStatus(bartenderRequest);
       if (latestBartenderProjectRootRef.current !== requestProjectRoot) return;
-      setStatus(next);
-      setActionMessage((prev) => {
-        if (!prev) return prev;
-        if (next.state === 'idle') return null;
-        if (prev.startsWith('Could not refresh') && next.roomChangeCount === 0) return null;
-        return prev;
-      });
+      applyBartenderStatus(next);
     } catch (err) {
       if (latestBartenderProjectRootRef.current !== requestProjectRoot) return;
       setActionMessage(String(err));
@@ -2711,7 +2719,7 @@ export function RightColumn({
         bartenderRefreshInFlightRef.current = null;
       }
     }
-  }, [bartenderProjectRoot, bartenderRequest, canUseBartender]);
+  }, [applyBartenderStatus, bartenderProjectRoot, bartenderRequest, canUseBartender]);
 
   const applyExternalBartenderSyncEvent = useCallback((payload: BartenderSyncEvent) => {
     if (payload.phase === 'started') {
@@ -2777,14 +2785,47 @@ export function RightColumn({
   }, [updateExternalSyncActivity]);
   syncProgressEventHandlerRef.current = applyBartenderSyncProgress;
 
+  // Bartender keeps a live model and pushes every change, so the panel never polls.
+  // The first call builds the model and later calls only read it. Archiving,
+  // calling back or hiring an agent changes this key, and Bartender reconciles.
+  const bartenderAgentsKey = useMemo(() => (
+    (workspace?.agents ?? [])
+      .map((agent) => [
+        agent.agentId,
+        agent.worktreeRoot ?? '',
+        agentMeta?.[agent.agentId as AgentId]?.lifecycleStatus ?? '',
+      ].join(':'))
+      .join('|')
+  ), [agentMeta, workspace?.agents]);
+
   useEffect(() => {
     void refreshBartender();
-    if (!canUseBartender) return;
-    const timer = window.setInterval(() => {
-      void refreshBartender();
-    }, 12000);
-    return () => window.clearInterval(timer);
-  }, [canUseBartender, refreshBartender]);
+  }, [bartenderAgentsKey, refreshBartender]);
+
+  const bartenderStatusPushRef = useRef<(payload: BartenderStatus) => void>(() => {});
+  bartenderStatusPushRef.current = (payload) => {
+    if (!canUseBartender || payload.projectId !== bartenderProjectId) return;
+    applyBartenderStatus(payload);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void onBartenderStatusChangedEvent((payload) => {
+      if (cancelled) return;
+      bartenderStatusPushRef.current(payload);
+    }).then((nextUnlisten) => {
+      if (cancelled) {
+        void nextUnlisten();
+        return;
+      }
+      unlisten = nextUnlisten;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) void unlisten();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -3037,7 +3078,7 @@ export function RightColumn({
   }, []);
 
   // Latest values the silent-sync tick reads, kept in a ref so the 15s interval
-  // below never has to rebuild. (status is refreshed every 12s; when it was an
+  // below never has to rebuild. (status changes on every Bartender push; when it was an
   // effect dep, the 15s timer got cleared+recreated before it could ever fire —
   // that was the auto-sync-never-runs bug.) Updating this ref does NOT rebuild
   // the timer; only autoSyncEnabled/canUseBartender do.
@@ -3861,7 +3902,7 @@ export function RightColumn({
           {danceController && <PuppeteerDanceCard controller={danceController} owner={workspace?.displayName || workspace?.repoFullName || workspace?.projectId || 'This project'} seedTarget={danceSeedTarget}
             agents={roomAgents.map(id => ({ id, name: agentMeta?.[id]?.name ?? id, avatarId: agentMeta?.[id]?.avatarId }))} />}
           <div
-            className={`lm-card ${lm?.lastError ? 'error' : ''} ${lm?.selected?.muted ? 'muted' : ''}`}
+            className={`lm-card ${lm?.lastError ? 'error' : ''} ${lmCloudflare || lm?.selected?.muted ? 'muted' : ''}`}
             role="button"
             tabIndex={0}
             aria-label="Laughing Man Telegram bridge"
@@ -3886,7 +3927,7 @@ export function RightColumn({
                 {lm?.botUsername && (
                   <span
                     className={`lm-dot ${
-                      lm.lastError ? 'err' : !lm.ownerUserId ? 'awaiting' : lm.running ? 'on' : ''
+                      lm.lastError ? 'err' : !lm.ownerUserId ? 'awaiting' : lmCloudflare || lm.running ? 'on' : ''
                     }`}
                   />
                 )}
@@ -3900,6 +3941,8 @@ export function RightColumn({
                         ? 'error'
                         : !lm.ownerUserId
                           ? 'awaiting owner'
+                          : lmCloudflare
+                            ? 'standby unavailable'
                           : lm.selected?.muted
                             ? 'muted'
                             : lm.running
@@ -3982,7 +4025,8 @@ export function RightColumn({
             ) : (
               <div className="lm-latest-text muted">No messages yet — talk to the bot from your phone.</div>
             )}
-            {lm?.selected?.muted && !lm.lastError && (
+            {lmCloudflare && <div className="lm-muted-note">{cloudflareSummary(lmCloudflare)}</div>}
+            {lm?.selected?.muted && !lm.lastError && !lmCloudflare && (
               <div className="lm-muted-note">Telegram Messaging Paused</div>
             )}
           </div>
@@ -4763,6 +4807,7 @@ export function RightColumn({
               </svg>
             </button>
           </header>
+          {lmCloudflare && <LaughingManCloudflareWarning error={lmCloudflare} />}
           <div className="lm-tabs">
             <button
               type="button"

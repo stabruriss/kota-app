@@ -6,6 +6,12 @@ const imageCache = new Map<string, string>();
 const BBS_IMAGE_PATH_RE = /(?:^|[\s("'`])((?:~\/|\/)?[^\s)"'`]*(?:attachments|images?|screenshots?)[^\s)"'`]*\.(?:png|jpe?g|gif|webp)|(?:~\/|\/)[^\s)"'`]+\.(?:png|jpe?g|gif|webp))/gi;
 const isImage = (path: string) => /\.(png|jpe?g|gif|webp)$/i.test(path);
 
+function attachmentSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
 function bodyImages(body: string, baseRoot: string | null): { path: string; available: boolean }[] {
   const paths: string[] = [];
   for (const match of body.matchAll(BBS_IMAGE_PATH_RE)) {
@@ -59,12 +65,13 @@ export function BbsAttachments({ body, baseRoot, postId, attachments = [] }: {
 }) {
   const entries = useMemo(() => attachments.filter((item) => isBbsAttachment(item, postId)).slice(0, 9), [attachments, postId]);
   const images = useMemo(() => {
-    const declared = entries.filter((item) => isImage(item.path)).map((item) => ({
+    const declared = entries.filter((item) => isImage(item.path) && (item.available || !item.syncState)).map((item) => ({
       path: item.localPath, name: item.name, available: item.available,
       // A promoted Fork can reuse the resident path with different bytes.
       cacheKey: JSON.stringify([item.localPath, item.sha256]),
     }));
-    const seen = new Set(declared.map((item) => item.path));
+    // A body reference must not bypass an unverified registered attachment.
+    const seen = new Set(entries.map((item) => item.localPath));
     for (const { path, available } of bodyImages(body, baseRoot)) {
       if (seen.has(path)) continue;
       seen.add(path);
@@ -76,14 +83,31 @@ export function BbsAttachments({ body, baseRoot, postId, attachments = [] }: {
   const previewed = new Set(images.map((item) => item.path));
   const files = entries.filter((item) => !isImage(item.path) || !previewed.has(item.localPath));
   return <>
+    {entries.some((item) => !item.available && item.syncState === 'pending') && <p className="bbs-attachments-pending" role="status">
+      <span aria-hidden="true" />Attachments pending
+    </p>}
     {images.length > 0 && <div className="bbs-post-images">
       {images.map((item) => <BbsInlineImage key={item.cacheKey} {...item} />)}
     </div>}
     {files.length > 0 && <ul className="bbs-post-files" aria-label="Attachments">
-      {files.map((item) => <li key={item.id}>
-        <span>{item.name}{!item.available && <small> · File unavailable</small>}</span>
-        <code>{item.localPath}</code>
-      </li>)}
+      {files.map((item) => {
+        const syncState = item.available ? undefined : item.syncState;
+        return <li key={item.id} className={syncState ? 'bbs-post-file-sync' : undefined}>
+          <svg className="bbs-post-file-icon" viewBox="0 0 16 20" aria-hidden="true">
+            <path d="M2 1h7l5 5v13H2z M9 1v5h5 M5 10h6 M5 13h6" />
+          </svg>
+          <div>
+            <div className="bbs-post-file-line">
+              <span>{item.name}{!item.available && !syncState && <small> · File unavailable</small>}</span>
+              <small className="bbs-post-file-size">{attachmentSize(item.sizeBytes)}</small>
+            </div>
+            {syncState === 'paused' && <span className="bbs-attachment-paused">
+              <span aria-hidden="true">!</span>Verification failed. Sync paused.
+            </span>}
+            {!syncState && <code>{item.localPath}</code>}
+          </div>
+        </li>;
+      })}
     </ul>}
   </>;
 }

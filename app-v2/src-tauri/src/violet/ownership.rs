@@ -653,6 +653,10 @@ fn prepare_launch_with(
 }
 
 impl RunningSession {
+    pub(crate) fn bound_id(&self) -> Option<String> {
+        self.bound.clone()
+    }
+
     pub(crate) fn check(&mut self) -> anyhow::Result<()> {
         self.check_with(verify_id, |agent, started| {
             let mut fresh = agent.clone();

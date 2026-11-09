@@ -10,6 +10,7 @@ import {
   listAccountSkills,
   loadProjectAgentDetail,
   openAccountSkillFolder,
+  openProjectAgentNotes,
   refreshProviderModelOptions,
   saveProjectAgentDetail,
   supportedShellsStatus,
@@ -99,6 +100,7 @@ export function ProjectAgentProfileOverlay({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [openingNotes, setOpeningNotes] = useState(false);
   const inviteInFlight = useRef(false);
   const saveInFlight = useRef(false);
   const [reload, setReload] = useState(0);
@@ -237,6 +239,19 @@ export function ProjectAgentProfileOverlay({
       await openAccountSkillFolder(skill.id);
     } catch (err) {
       setError(String(err));
+    }
+  };
+
+  const openNotes = async () => {
+    if (!detail?.notes?.exists || openingNotes) return;
+    setOpeningNotes(true);
+    setError(null);
+    try {
+      await openProjectAgentNotes({ agentId, projectRoot });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setOpeningNotes(false);
     }
   };
 
@@ -698,17 +713,25 @@ export function ProjectAgentProfileOverlay({
                   {ghost.trim() || 'No GHOST configured.'}
                 </button>
               )}
-              <div className="tavern-profile-actions">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (ghostExpanded) void save({ closeGhost: true });
-                    else setGhostExpanded(true);
-                  }}
-                  disabled={ghostExpanded && busy != null}
-                >
-                  {ghostExpanded ? 'Save GHOST' : 'Edit GHOST'}
-                </button>
+              <div className="project-agent-ghost-footer">
+                <div className="tavern-profile-actions">
+                  <button type="button"
+                    onClick={() => {
+                      if (ghostExpanded) void save({ closeGhost: true });
+                      else setGhostExpanded(true);
+                    }}
+                    disabled={ghostExpanded && busy != null}>
+                    {ghostExpanded ? 'Save GHOST' : 'Edit GHOST'}
+                  </button>
+                </div>
+                <div className="project-agent-notes-entry">
+                  <button type="button" className="tavern-user-dreams"
+                    disabled={!detail?.notes?.exists || openingNotes || busy === 'load'}
+                    title="Open notes in your default app" onClick={() => void openNotes()}>
+                    View notes
+                  </button>
+                  {detail?.notes && !detail.notes.exists && <span>No notes yet</span>}
+                </div>
               </div>
             </section>
           </section>

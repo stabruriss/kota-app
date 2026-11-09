@@ -124,6 +124,7 @@ import avatarAntigravity from '../assets/tavern/optimized/avatars/antigravity.we
 import avatarLaughingMan from '../assets/tavern/optimized/avatars/laughing-man.webp';
 import avatarMagi from '../assets/tavern/optimized/avatars/magi.webp';
 import avatarKimi from '../assets/tavern/optimized/avatars/kimi.webp';
+import avatarKotaLocal from '../assets/tavern/optimized/avatars/kota-local.webp';
 import avatarOpencode from '../assets/tavern/optimized/avatars/opencode.webp';
 import avatarPi from '../assets/tavern/optimized/avatars/pi.webp';
 import avatarPuppeteer from '../assets/tavern/optimized/avatars/puppeteer.webp';
@@ -309,6 +310,7 @@ const TAVERN_PRELOAD_ASSETS = [
   avatarOpencode,
   avatarPi,
   avatarKimi,
+  avatarKotaLocal,
   avatarMagi,
   avatarViolet,
   avatarEmber,
@@ -340,6 +342,7 @@ const TAVERN_CRITICAL_PRELOAD_ASSETS = [
   avatarOpencode,
   avatarPi,
   avatarKimi,
+  avatarKotaLocal,
   avatarUserDefault,
   roomClassic,
 ];
@@ -538,7 +541,7 @@ const PROVIDERS: Record<ProviderId, ProviderSpec> = {
   },
   'kota-local': {
     id: 'kota-local', name: 'Kota Local', cli: 'kota-local', icon: PROVIDER_ICONS['kota-local'].svg,
-    installUrl: 'https://pi.dev', defaultModel: '', defaultAvatarId: 'pi', beta: true,
+    installUrl: 'https://pi.dev', defaultModel: '', defaultAvatarId: 'kota-local', beta: true,
   },
 };
 

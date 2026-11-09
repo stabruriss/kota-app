@@ -9,12 +9,16 @@ import { createFakeProvider } from './fake-provider/server.mjs';
 import { createTestSession } from './fake-provider/rpc-client.mjs';
 import { envelope, extensionPath, injectCommand } from './fixtures.mjs';
 
-const packageRoot = fileURLToPath(new URL('../', import.meta.url));
 const temporaryRoot = fileURLToPath(new URL('.tmp/', import.meta.url));
 const probePath = fileURLToPath(new URL('fixtures/tool-probe.ts', import.meta.url));
-const runtimeFiles = ['index.ts', 'bridge.ts', 'inject.ts', 'cli.ts', 'tool-command.ts', 'tools.ts', 'auth.ts', 'auth-protocol.ts',
-  'auto-route.ts', 'auto-route-core.ts', 'jev.ts', 'puppeteer-prompts.ts', 'puppeteer-prompts-core.ts', 'puppeteer-prompts.json',
-  'capabilities.ts', 'mcp-status.ts', 'shadow-clone.ts', 'package.json'];
+const bundleConfigUrl = new URL('../../src-tauri/tauri.conf.json', import.meta.url);
+// Copy exactly what Tauri packages, so omitted runtime imports fail this fixture.
+const runtimeFiles = Object.entries(JSON.parse(await readFile(bundleConfigUrl, 'utf8')).bundle.resources)
+  .filter(([, destination]) => destination.startsWith('kota-ext/'))
+  .map(([source, destination]) => ({
+    source: fileURLToPath(new URL(source, bundleConfigUrl)),
+    name: destination.slice('kota-ext/'.length),
+  }));
 const names = ['kota_agent_bus', 'kota_bbs', 'kota_ember', 'kota_bartender', 'kota_my_soul'];
 const goldenCopy = [
   ['kota_agent_bus', 'Agent Bus', "Send a message to a teammate in the current project. Use the teammate's AKA or agent ID in to. The body is sent unchanged. A successful result means the local dispatch was recorded, not that the teammate has replied."],
@@ -65,8 +69,8 @@ async function fixture(t, steps, { probe = false, readonly = false } = {}) {
   if (readonly) {
     resourceDirectory = join(directory, 'kota-ext');
     await mkdir(resourceDirectory);
-    for (const name of runtimeFiles) {
-      await copyFile(join(packageRoot, name), join(resourceDirectory, name));
+    for (const {source, name} of runtimeFiles) {
+      await copyFile(source, join(resourceDirectory, name));
       await chmod(join(resourceDirectory, name), 0o444);
     }
     await chmod(resourceDirectory, 0o555);
@@ -82,7 +86,7 @@ async function fixture(t, steps, { probe = false, readonly = false } = {}) {
     } finally {
       if (resourceDirectory) {
         await chmod(resourceDirectory, 0o700);
-        for (const name of runtimeFiles) await chmod(join(resourceDirectory, name), 0o600);
+        for (const {name} of runtimeFiles) await chmod(join(resourceDirectory, name), 0o600);
       }
       await rm(directory, { recursive: true, force: true });
     }

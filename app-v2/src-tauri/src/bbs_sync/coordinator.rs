@@ -514,6 +514,7 @@ impl Actor {
     fn tick_work(&mut self, now: u64) {
         if self.work.serial() != self.seen_change {
             self.seen_change = self.work.serial();
+            self.engine.local_changed();
             self.broadcast_changed = true;
             self.schedule.changed(now);
         }

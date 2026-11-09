@@ -90,12 +90,16 @@ impl ContentStore {
         Ok(())
     }
     pub(crate) fn locations(&self, thread: &str) -> Result<Vec<PostLocation>> {
+        self.locations_tracked(thread, &mut Deps::untracked())
+    }
+    pub(in crate::bbs) fn locations_tracked(&self, thread: &str, deps: &mut Deps) -> Result<Vec<PostLocation>> {
         let relative = Self::thread_relative(thread)?;
         let mut result = Vec::new();
-        let resident = self.managed(&relative.join("posts"), false)?;
-        if resident.is_dir() {
-            for entry in fs::read_dir(resident)? {
+        let resident = self.managed_tracked(&relative.join("posts"), false, deps)?;
+        if deps.is_dir(&resident) {
+            for entry in deps.read_dir(&resident)? {
                 let entry = entry?;
+                deps.stat(&entry.path());
                 if !entry.file_type()?.is_file() {
                     continue;
                 }
@@ -112,10 +116,11 @@ impl ContentStore {
                 }
             }
         }
-        let versions = self.managed(&relative.join("versions"), false)?;
-        if versions.is_dir() {
-            for entry in fs::read_dir(versions)? {
+        let versions = self.managed_tracked(&relative.join("versions"), false, deps)?;
+        if deps.is_dir(&versions) {
+            for entry in deps.read_dir(&versions)? {
                 let entry = entry?;
+                deps.stat(&entry.path());
                 if !entry.file_type()?.is_dir() {
                     continue;
                 }
@@ -123,8 +128,9 @@ impl ContentStore {
                 if bbs_sync::safe_id(&post).is_err() {
                     continue;
                 }
-                for version in fs::read_dir(entry.path())? {
+                for version in deps.read_dir(&entry.path())? {
                     let version = version?;
+                    deps.stat(&version.path());
                     if !version.file_type()?.is_dir() {
                         continue;
                     }
@@ -133,7 +139,8 @@ impl ContentStore {
                         continue;
                     }
                     let path =
-                        self.managed(&Self::post_relative(thread, &post, Some(&hash))?, false)?;
+                        self.managed_tracked(&Self::post_relative(thread, &post, Some(&hash))?, false, deps)?;
+                    deps.stat(&path);
                     if current_stamp(&path)?.is_some() {
                         result.push(PostLocation {
                             path,
@@ -154,6 +161,16 @@ impl ContentStore {
         a: &AttachmentRef,
         create: bool,
     ) -> Result<PathBuf> {
+        self.attachment_path_tracked(thread, location, a, create, &mut Deps::untracked())
+    }
+    pub(super) fn attachment_path_tracked(
+        &self,
+        thread: &str,
+        location: &PostLocation,
+        a: &AttachmentRef,
+        create: bool,
+        deps: &mut Deps,
+    ) -> Result<PathBuf> {
         bbs_sync::safe_id(&a.id).map_err(anyhow::Error::msg)?;
         if !reconcile::valid_extension(&a.ext) {
             bail!("invalid_attachment_extension");
@@ -168,13 +185,14 @@ impl ContentStore {
                 .join("attachments")
                 .join(&location.post)
         };
-        self.managed(
+        self.managed_tracked(
             &base.join(if a.ext.is_empty() {
                 a.id.clone()
             } else {
                 format!("{}.{}", a.id, a.ext)
             }),
             create,
+            deps,
         )
     }
     /// Cache hits require the exact inode/size/nanosecond mtime+ctime stamp.
@@ -203,9 +221,19 @@ impl ContentStore {
         fence: &GroupFence,
         io: &mut LocalIo,
     ) -> Result<Vec<reconcile::Issue>> {
+        self.refresh_tracked(fence, io, &mut Deps::untracked())
+    }
+    pub(crate) fn refresh_tracked(
+        &self,
+        fence: &GroupFence,
+        io: &mut LocalIo,
+        deps: &mut Deps,
+    ) -> Result<Vec<reconcile::Issue>> {
         let roots = {
             let lock = acquire_write_lock(&self.root)?;
+            deps.stat(&self.state.control_path());
             self.check_fence(&lock, fence)?;
+            deps.stat(&self.state.state_path());
             self.state_locked(&lock)?
                 .groups
                 .get(&fence.group_id)
@@ -215,7 +243,7 @@ impl ContentStore {
         let mut issues = Vec::new();
         for root in roots {
             io.check()?;
-            match self.refresh_root(&root, Some(fence), io) {
+            match self.refresh_root_tracked(&root, Some(fence), io, deps) {
                 Ok(items) => issues.extend(items),
                 Err(_) => issues.push(reconcile::Issue {
                     code: "local_thread_unavailable".into(),
@@ -234,6 +262,15 @@ impl ContentStore {
         fence: Option<&GroupFence>,
         io: &mut LocalIo,
     ) -> Result<Vec<reconcile::Issue>> {
+        self.refresh_root_tracked(thread, fence, io, &mut Deps::untracked())
+    }
+    fn refresh_root_tracked(
+        &self,
+        thread: &str,
+        fence: Option<&GroupFence>,
+        io: &mut LocalIo,
+        deps: &mut Deps,
+    ) -> Result<Vec<reconcile::Issue>> {
         let old = {
             let lock = acquire_write_lock(&self.root)?;
             if let Some(fence) = fence {
@@ -243,7 +280,7 @@ impl ContentStore {
         };
         let mut issues = Vec::new();
         let record_path =
-            self.managed(&Self::thread_relative(thread)?.join("thread.yaml"), false)?;
+            self.managed_tracked(&Self::thread_relative(thread)?.join("thread.yaml"), false, deps)?;
         let record = match (|| -> Result<_> {
             if current_stamp(&record_path)?.is_none() {
                 return Ok(None);
@@ -280,7 +317,7 @@ impl ContentStore {
                 }
             }
         }
-        for mut location in self.locations(thread)? {
+        for mut location in self.locations_tracked(thread, deps)? {
             io.check()?;
             let inspected = (|| -> Result<_> {
                 let observed =
@@ -366,10 +403,12 @@ impl ContentStore {
                     {
                         bail!("source_changed");
                     }
-                    let destination = self.managed(
+                    let destination = self.managed_tracked(
                         &Self::post_relative(thread, &p.post_id, Some(&p.version_id))?,
                         false,
+                        deps,
                     )?;
+                    deps.stat(destination.parent().unwrap());
                     if destination.parent().unwrap().exists() {
                         bail!("version_container_already_exists");
                     }
@@ -382,19 +421,19 @@ impl ContentStore {
                     body_stamp =
                         current_stamp(&location.path)?.ok_or_else(|| anyhow!("source_changed"))?;
                 }
-                let mut origin = self.read_origin(thread, &p.post_id, &p.version_id)?;
+                let mut origin = self.read_origin_tracked(thread, &p.post_id, &p.version_id, deps)?;
                 if origin.is_none() {
                     // An edit of a received post inherits its source sidecar;
                     // a coincident local hero ID must never substitute for it.
                     let previous = previous_extra
                         .as_ref()
-                        .and_then(|v| self.read_origin(thread, &p.post_id, v).ok().flatten())
+                        .and_then(|v| self.read_origin_tracked(thread, &p.post_id, v, deps).ok().flatten())
                         .or_else(|| {
                             old.ledger
                                 .values()
                                 .filter(|r| r.thread_id == thread && r.post_id == p.post_id)
                                 .filter_map(|r| {
-                                    self.read_origin(thread, &p.post_id, &r.version_id)
+                                    self.read_origin_tracked(thread, &p.post_id, &r.version_id, deps)
                                         .ok()
                                         .flatten()
                                 })
@@ -424,7 +463,7 @@ impl ContentStore {
                 let existing = old.ledger.get(&key);
                 let mut attachments = BTreeMap::new();
                 for a in &mut p.attachments {
-                    let path = self.attachment_path(thread, &location, a, false)?;
+                    let path = self.attachment_path_tracked(thread, &location, a, false, deps)?;
                     let cached = existing
                         .and_then(|r| r.attachments.get(&a.id))
                         .filter(|s| {
@@ -448,9 +487,10 @@ impl ContentStore {
                         let ResourceKind::Avatar { ext, .. } = &r.identity else {
                             unreachable!()
                         };
-                        let path = self.managed(
+                        let path = self.managed_tracked(
                             &Path::new("avatars").join(format!("{}.{}", r.sha256, ext)),
                             false,
+                            deps,
                         )?;
                         verify_path(
                             &path,
@@ -490,6 +530,10 @@ impl ContentStore {
             self.check_fence(&lock, fence)?;
         }
         let mut fresh = self.state_locked(&lock)?;
+        // Compare with the current rows before clearing their old proofs.
+        let previous_rows: BTreeMap<_, _> = fresh.ledger.iter()
+            .filter(|(_, row)| row.thread_id == thread)
+            .map(|(key, row)| (key.clone(), row.clone())).collect();
         // Never replace a stale full snapshot: merge only inspected resources
         // into state freshly loaded under the CLI/App/content short flock.
         for row in fresh.ledger.values_mut().filter(|r| r.thread_id == thread) {
@@ -538,9 +582,14 @@ impl ContentStore {
                     a.available = false;
                 }
             }
-            fresh
-                .ledger
-                .insert(row.key().map_err(anyhow::Error::msg)?, row);
+            let key = row.key().map_err(anyhow::Error::msg)?;
+            if let Some(previous) = previous_rows.get(&key) {
+                let changed_at = std::mem::replace(&mut row.updated_at, previous.updated_at.clone());
+                if &row != previous {
+                    row.updated_at = changed_at;
+                }
+            }
+            fresh.ledger.insert(key, row);
         }
         self.save_locked(&lock, &fresh)?;
         Ok(issues)

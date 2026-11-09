@@ -424,3 +424,29 @@ async fn healthy_catalog_can_prepare_in_exchange_backoff_but_unconfirmed_outbox_
     assert!(!r.actor.recovery[&r.peer].early.used);
     // Metadata future is deliberately not polled: no real DNS/HTTP.
 }
+
+#[tokio::test]
+async fn local_loss_causes_distinguish_boot_instance_and_wake_without_ids() {
+    let mut r = Rig::new().await;
+    let wake = "b".repeat(64);
+    for (case, cause) in [(0, "boot_changed"), (1, "instance_changed"), (2, "wake_replaced")] {
+        let mut snapshot = ready_snapshot(&r, now(), &wake, false, true);
+        let item = snapshot.items.get_mut(&r.peer).unwrap();
+        match case {
+            0 => snapshot.boot = "replacement-boot".into(),
+            1 => item.announcement.as_mut().unwrap().instance = "replacement-instance".into(),
+            _ => item.current_wake = Some("c".repeat(64)),
+        }
+        r.actor.snapshot = Some(snapshot);
+        r.actor.attempts.insert(r.peer.clone(), pending_attempt(&r, &wake, true));
+        assert_eq!(r.actor.drive_attempt(&r.peer), Err(Error::RelaySessionLost));
+        assert_eq!(r.actor.failure_cause(&r.peer, Error::RelaySessionLost), Some(cause));
+        let trace = &r.actor.attempts[&r.peer].trace;
+        let value = trace.failure_value(Error::RelaySessionLost, Some(cause));
+        assert_eq!(value["cause"], cause);
+        let text = value.to_string();
+        for private in [r.peer.as_str(), wake.as_str(), "replacement-boot", "replacement-instance"] {
+            assert!(!text.contains(private));
+        }
+    }
+}

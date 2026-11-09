@@ -184,3 +184,20 @@ fn roster_avatar_reuses_image_limits_but_retains_unknown_builtin_for_text_fallba
         );
     }
 }
+
+#[test]
+fn projection_failure_codes_are_fixed_and_never_echo_paths_or_os_text() {
+    for (message, code) in [
+        ("bbs_busy", "bbs_busy"),
+        ("group_context_changed", "group_context_changed"),
+        ("unsafe_roster_directory", "unsafe_roster_directory"),
+        ("invalid_roster_member", "invalid_roster_members"),
+        ("invalid SHA-256", "invalid_roster_members"),
+        ("invalid private state JSON", "invalid_private_state"),
+        ("read private state: /Users/someone/Kota/bbs-sync/rosters/members.json", "io"),
+    ] {
+        assert_eq!(projection_failure(&anyhow::anyhow!(message.to_string())), code);
+    }
+    let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied /private/path");
+    assert_eq!(projection_failure(&anyhow::Error::from(denied)), "io");
+}

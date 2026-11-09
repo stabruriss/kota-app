@@ -407,10 +407,13 @@ pub struct ControlClient<T: Transport> {
 /// creates a device nor touches Worker. The caller owns the short content lock
 /// when using the value to authorize a mutation.
 pub(crate) fn read_membership(store: &StateStore) -> Result<Option<Membership>, String> {
-    load(&store.control_path(), |state: ControlState| {
+    read_membership_tracked(store, &mut crate::bbs::cache::Deps::untracked())
+}
+pub(crate) fn read_membership_tracked(store: &StateStore, deps: &mut crate::bbs::cache::Deps) -> Result<Option<Membership>, String> {
+    super::load_tracked(&store.control_path(), |state: ControlState| {
         state.validate()?;
         Ok(state)
-    })
+    }, deps)
     .map(|state| state.and_then(|s| s.current))
 }
 
@@ -1032,6 +1035,18 @@ impl<T: Transport> ControlClient<T> {
             }
             Err(error) => return Err(error),
         }
+        Ok(())
+    }
+    pub(crate) fn invitation_needs_refresh(&self, now: u64) -> bool {
+        self.membership().is_some_and(|m| m.role == Role::Owner)
+            && !self.has_pending() && self.cached.is_some()
+            && self.invitation_generation(now).is_none()
+    }
+    /// Run after the heartbeat has renewed the network lease. Failure belongs
+    /// to invitation maintenance and retains the existing durable retry intent.
+    pub(crate) fn refresh_invitation(&mut self) -> Result<(), String> {
+        if !self.invitation_needs_refresh(now_ms()?) { return Ok(()); }
+        let member = self.data.current.clone().ok_or("not_joined")?;
         if member.role == Role::Owner && !self.has_pending() {
             // A normal heartbeat contains everything needed to retain the
             // locally held code. Only consumption/expiry needs a new mutation.

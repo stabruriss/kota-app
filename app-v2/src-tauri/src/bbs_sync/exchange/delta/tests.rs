@@ -78,6 +78,7 @@ async fn cancelled_streaming_cache_write_cleans_temp_and_releases_real_file_work
     c.members(peers.clone());
     let catalog = large_catalog(20_000);
     let s = Snapshot {
+        inputs: Arc::new(crate::bbs::cache::Deps::new()),
         revision: catalog.revision(),
         cache_bytes: cache_bytes(&catalog),
         catalog: Arc::new(catalog),
@@ -181,6 +182,7 @@ fn peer(seed: u8, membership: &str) -> PeerIdentity {
 fn snapshot() -> Snapshot {
     let catalog = Catalog::default();
     Snapshot {
+        inputs: Arc::new(crate::bbs::cache::Deps::new()),
         revision: catalog.revision(),
         cache_bytes: cache_bytes(&catalog),
         catalog: Arc::new(catalog),
@@ -293,7 +295,7 @@ async fn manual_daily_membership_and_late_completion_cannot_bypass_full_repair()
         .start(&p.remote_device_id, checkpoint.clone(), now + FULL_INTERVAL)
         .unwrap()
         .checkpoint
-        .is_none());
+        .is_some());
     let in_flight = c
         .start(&p.remote_device_id, checkpoint.clone(), now)
         .unwrap();
@@ -362,4 +364,61 @@ async fn cache_write_failure_and_budget_eviction_only_cost_full_manifests() {
         assert!(!c.due(&p.remote_device_id, now)); // no immediate retry storm on cache failure
     }
     host.stop();
+}
+
+async fn durable_baseline() -> (Root, StateStore, NetworkHost, Cache, PeerIdentity, Instant) {
+    let root = root();
+    let store = StateStore::at(&root.0);
+    let host = NetworkHost::start().await.unwrap();
+    let peer = peer(20, "remote-member");
+    let at = Instant::now();
+    let mut cache = Cache::default();
+    cache.members([peer.clone()]);
+    let start = cache.start(&peer.remote_device_id, Some(snapshot().revision), at).unwrap();
+    cache.complete(&start, snapshot(), true, at);
+    flush(&mut cache, &store, &host).await;
+    (root, store, host, cache, peer, at + FULL_INTERVAL)
+}
+
+#[tokio::test]
+async fn expired_full_repair_starts_with_the_acknowledged_delta() {
+    let (_root, _store, host, mut cache, peer, at) = durable_baseline().await;
+    assert!(cache.due(&peer.remote_device_id, at));
+    let snapshot = snapshot();
+    let start = cache.start(&peer.remote_device_id, Some(snapshot.revision.clone()), at).unwrap();
+    assert!(start.checkpoint.is_some());
+    assert!(start.select(&snapshot, Some(&snapshot.revision)).1);
+    assert!(cache.due(&peer.remote_device_id, at), "starting a delta does not consume repair");
+    host.stop_and_wait().await;
+}
+
+#[tokio::test]
+async fn successful_delta_schedules_full_repair_for_the_following_round() {
+    let (_root, store, host, mut cache, peer, at) = durable_baseline().await;
+    let delta = cache.start(&peer.remote_device_id, Some(snapshot().revision), at).unwrap();
+    cache.complete(&delta, snapshot(), false, at);
+    flush(&mut cache, &store, &host).await;
+    let full = cache.start(&peer.remote_device_id, Some(snapshot().revision), at).unwrap();
+    assert!(full.checkpoint.is_none());
+    assert!(!full.select(&snapshot(), Some(&snapshot().revision)).1);
+    cache.complete(&full, snapshot(), true, at);
+    assert!(!cache.due(&peer.remote_device_id, at));
+    host.stop_and_wait().await;
+}
+
+#[tokio::test]
+async fn failed_full_repair_returns_to_delta_without_losing_the_baseline() {
+    let (_root, store, host, mut cache, peer, at) = durable_baseline().await;
+    let delta = cache.start(&peer.remote_device_id, Some(snapshot().revision), at).unwrap();
+    cache.complete(&delta, snapshot(), false, at);
+    flush(&mut cache, &store, &host).await;
+    let failed = cache.start(&peer.remote_device_id, Some(snapshot().revision), at).unwrap();
+    assert!(failed.checkpoint.is_none());
+    // No completion is delivered for the failed round. Its durable candidate
+    // and checkpoint remain usable on the very next attempt.
+    let retry = cache.start(&peer.remote_device_id, Some(snapshot().revision), at).unwrap();
+    assert!(retry.checkpoint.is_some());
+    assert!(retry.select(&snapshot(), Some(&snapshot().revision)).1);
+    assert!(cache.due(&peer.remote_device_id, at));
+    host.stop_and_wait().await;
 }

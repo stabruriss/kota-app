@@ -11,6 +11,7 @@ import { BbsEditor, BBS_ATTACHMENT_MAX_BYTES, type BbsEditorHandle, type BbsEdit
 import { InputBar, escapePromptPath, type InputBarHandle } from '../src/chrome/InputBar';
 import { RightColumn } from '../src/chrome/RightColumn';
 import { AGENTS } from '../src/mock/fixtures';
+import attachmentStates from './fixtures/bbs-attachment-states.json';
 
 vi.mock('mermaid', () => ({ default: {
   initialize: vi.fn(),
@@ -113,6 +114,59 @@ describe('BBS-only serialization and input', () => {
 });
 
 describe('BBS attachment presentation', () => {
+  const stateFixture = (name: keyof typeof attachmentStates) => attachmentStates[name] as {
+    postId: string; body: string; attachments: client.BbsAttachment[];
+  };
+
+  it('keeps pending files and images in the list without reading body references to the same files', () => {
+    const fixture = stateFixture('pending');
+    const load = vi.spyOn(client, 'fileImageDataUrl');
+    const view = render(<BbsAttachments {...fixture} baseRoot={null}
+      body={fixture.body + '\n' + fixture.attachments[1].localPath} />);
+    expect(screen.getByRole('status')).toHaveTextContent('Attachments pending');
+    for (const item of fixture.attachments) expect(screen.getByText(item.name)).toBeInTheDocument();
+    expect(screen.getByText('474.0 MB')).toBeInTheDocument();
+    expect(view.container.querySelector('a, button, img')).toBeNull();
+    expect(screen.queryByText(/unavailable/i)).not.toBeInTheDocument();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('keeps pause wording beside only the failed attachment and omits a pending summary for paused-only work', () => {
+    const fixture = stateFixture('paused');
+    render(<BbsAttachments {...fixture} baseRoot={null} />);
+    const failed = screen.getByText(fixture.attachments[0].name).closest('li')!;
+    const ready = screen.getByText(fixture.attachments[1].name).closest('li')!;
+    expect(within(failed).getByText('Verification failed. Sync paused.')).toBeInTheDocument();
+    expect(within(ready).queryByText(/paused/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Attachments pending')).not.toBeInTheDocument();
+    expect(screen.getByText(fixture.attachments[1].localPath)).toBeInTheDocument();
+  });
+
+  it('shows both states when mixed and clears them on the next verified snapshot', async () => {
+    const fixture = stateFixture('mixed');
+    const load = vi.spyOn(client, 'fileImageDataUrl').mockResolvedValue('data:image/png;base64,dGVzdA==');
+    const view = render(<BbsAttachments {...fixture} baseRoot={null} />);
+    expect(screen.getByText('Attachments pending')).toBeInTheDocument();
+    expect(screen.getByText('Verification failed. Sync paused.')).toBeInTheDocument();
+    expect(load).not.toHaveBeenCalled();
+    view.rerender(<BbsAttachments {...fixture} baseRoot={null} attachments={fixture.attachments.map(
+      ({ syncState: _syncState, ...item }) => ({ ...item, available: true })
+    )} />);
+    expect(screen.queryByText('Attachments pending')).not.toBeInTheDocument();
+    expect(screen.queryByText('Verification failed. Sync paused.')).not.toBeInTheDocument();
+    expect(await screen.findByRole('img', { name: fixture.attachments[1].name })).toBeInTheDocument();
+    expect(load).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledWith(fixture.attachments[1].localPath);
+  });
+
+  it('preserves unavailable wording for a missing local file with no received sync state', () => {
+    render(<BbsAttachments postId="post-one" body="" baseRoot={null}
+      attachments={[{ ...attachment('att-local-missing', 'pdf'), available: false }]} />);
+    expect(screen.getByText('· File unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Attachments pending')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Sync paused/)).not.toBeInTheDocument();
+  });
+
   it('waits without a false error, then renders the existing image style', async () => {
     const task = deferred<string>();
     vi.spyOn(client, 'fileImageDataUrl').mockReturnValueOnce(task.promise);

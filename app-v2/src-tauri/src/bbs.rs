@@ -1,6 +1,8 @@
 pub(crate) mod sync;
 pub mod mentions;
 pub(crate) mod notify;
+pub(crate) mod cache;
+mod view_cache;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{SecondsFormat, Utc};
@@ -47,6 +49,10 @@ pub struct BbsAttachmentView {
     attachment: BbsAttachment,
     local_path: String,
     available: bool,
+    /// Received and not yet verified here: "pending", or "paused" after a
+    /// failed verification or a source refusal. Absent for local posts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sync_state: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -628,6 +634,7 @@ fn attachment_views(
                 .display()
                 .to_string(),
                 available,
+                sync_state: None,
             })
         })
         .collect()
@@ -670,12 +677,18 @@ pub fn install_cli_shim() -> Result<PathBuf> {
 }
 
 pub fn snapshot(project_id: &str, project_display_name: Option<&str>) -> Result<BbsSnapshot> {
-    ensure_account_layout()?;
-    snapshot_at(
-        &sync::ContentStore::account(),
-        project_id,
-        project_display_name,
-    )
+    let started = Instant::now();
+    let result = (|| {
+        ensure_account_layout()?;
+        snapshot_at(&sync::ContentStore::account(), project_id, project_display_name)
+    })();
+    let elapsed_ms = started.elapsed().as_millis();
+    if elapsed_ms >= 100 || result.is_err() {
+        crate::kota_debug_log(&format!(
+            "[bbs] snapshot elapsed_ms={} ok={}", elapsed_ms, result.is_ok()
+        ));
+    }
+    result
 }
 
 fn snapshot_at(
@@ -683,137 +696,7 @@ fn snapshot_at(
     project_id: &str,
     project_display_name: Option<&str>,
 ) -> Result<BbsSnapshot> {
-    let root = content.root().to_path_buf();
-    let sync_state = content
-        .state
-        .load_state()
-        .map_err(anyhow::Error::msg)?
-        .unwrap_or_default();
-    let membership =
-        crate::bbs_sync::control::read_membership(&content.state).map_err(anyhow::Error::msg)?;
-    let state = load_project_state(&root, project_id)?;
-    let mut threads = Vec::new();
-    let mut new_count = 0usize;
-    let mut avatar_cache = BTreeMap::new();
-    for thread_id in read_thread_ids(&root)? {
-        let Ok((meta, mut posts)) = load_thread(&root, &thread_id) else {
-            continue;
-        };
-        posts.retain(|p| {
-            !crate::bbs_sync::reconcile::suppressed(
-                &sync_state,
-                &thread_id,
-                &p.meta.post_id,
-                &p.version_id,
-            )
-        });
-        let real_posts = posts.iter().map(|p| p.meta.post_id.clone()).collect();
-        let unavailable_posts = content
-            .unavailable_views(&thread_id, &sync_state, &real_posts)
-            .unwrap_or_default();
-        if !posts.iter().any(|p| p.meta.kind == "topic") && unavailable_posts.is_empty() {
-            continue;
-        }
-        let relevant = thread_relevant(&meta, &posts, project_id);
-        let mut post_views = Vec::new();
-        let mut thread_is_new = false;
-        for post in posts {
-            let external = post.meta.project_id != project_id;
-            let state_label = if state.processed_posts.contains_key(&post.meta.post_id) {
-                "processed"
-            } else if state.ignored_posts.contains_key(&post.meta.post_id) {
-                "ignored"
-            } else if relevant && external {
-                thread_is_new = true;
-                "new"
-            } else {
-                "none"
-            };
-            let preview_body = if post.body.trim().is_empty() {
-                post.meta
-                    .attachments
-                    .iter()
-                    .map(|item| item.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            } else {
-                post.body.clone()
-            };
-            let sync_avatar = content.avatar_view(
-                &thread_id,
-                &post.meta.post_id,
-                &post.version_id,
-                Some(&sync_state),
-            );
-            let agent_avatar = if sync_avatar.is_none() {
-                post_agent_avatar(&root, &post.meta, &mut avatar_cache)
-            } else {
-                None
-            };
-            post_views.push(BbsPostView {
-                post_id: post.meta.post_id.clone(),
-                version_id: post.version_id.clone(),
-                sync_avatar,
-                thread_id: post.meta.thread_id.clone(),
-                project_id: post.meta.project_id.clone(),
-                project_display_name: display_project_name_with_fallback(
-                    &post.meta.project_id,
-                    Some(&post.meta.project_display_name),
-                ),
-                agent_id: post.meta.agent_id.clone(),
-                agent_display_name: post.meta.agent_display_name.clone(),
-                agent_avatar,
-                created_at: post.meta.created_at.clone(),
-                kind: post.meta.kind.clone(),
-                preview: preview_markdown(&preview_body),
-                attachments: content.attachment_views(&post, Some(&sync_state)),
-                body: post.body,
-                state: state_label.into(),
-                external,
-            });
-        }
-        if thread_is_new {
-            new_count += 1;
-        }
-        threads.push(BbsThreadView {
-            thread_id: meta.thread_id.clone(),
-            visibility: meta.visibility.clone(),
-            project_tag_labels: meta
-                .project_tags
-                .iter()
-                .map(|id| display_project_name_with_fallback(id, None))
-                .collect(),
-            project_tags: meta.project_tags.clone(),
-            created_by_project_label: display_project_name_with_fallback(
-                &meta.created_by_project,
-                None,
-            ),
-            created_by_project: meta.created_by_project,
-            updated_at: meta.updated_at,
-            latest_post_id: meta.latest_post_id,
-            is_new: thread_is_new,
-            relevant,
-            sharing_group_id: membership
-                .as_ref()
-                .filter(|m| {
-                    sync_state
-                        .groups
-                        .get(&m.group_id)
-                        .is_some_and(|g| g.shared_threads.contains(&thread_id))
-                })
-                .map(|m| m.group_id.clone()),
-            posts: post_views,
-            unavailable_posts,
-        });
-    }
-    threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(BbsSnapshot {
-        project_id: project_id.to_string(),
-        project_display_name: display_project_name_with_fallback(project_id, project_display_name),
-        root: root.display().to_string(),
-        new_count,
-        threads,
-    })
+    view_cache::load(content, project_id, project_display_name)
 }
 
 pub fn mark_processed(project_id: &str, post_id: &str) -> Result<()> {
@@ -1210,9 +1093,16 @@ fn render_thread_scoped(content: &sync::ContentStore, thread_id: &str) -> Result
                 attachment.attachment.sha256,
                 attachment.local_path,
                 if attachment.available {
-                    ""
+                    String::new()
                 } else {
-                    " [missing]"
+                    // A started transfer is not missing; print its partial
+                    // length as is, even between slice boundaries.
+                    content
+                        .receiving_bytes(&attachment.attachment.sha256, attachment.attachment.size_bytes)
+                        .map_or_else(
+                            || " [missing]".to_string(),
+                            |bytes| format!(" [receiving: {bytes} / {} bytes]", attachment.attachment.size_bytes),
+                        )
                 },
             ));
         }
@@ -1447,17 +1337,20 @@ fn read_stdin_body(has_attachments: bool) -> Result<String> {
 }
 
 fn read_thread_ids(root: &Path) -> Result<Vec<String>> {
+    read_thread_ids_tracked(root, &mut cache::Deps::untracked())
+}
+fn read_thread_ids_tracked(root: &Path, deps: &mut cache::Deps) -> Result<Vec<String>> {
     let board_path = root.join("board.json");
-    let mut ids = fs::read(&board_path)
+    let mut ids = deps.read(&board_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<BbsBoardIndex>(&bytes).ok())
         .map(|board| board.threads)
         .unwrap_or_default();
     let threads_dir = root.join("threads");
-    if threads_dir.is_dir() {
-        for entry in fs::read_dir(threads_dir)? {
+    if deps.is_dir(&threads_dir) {
+        for entry in deps.read_dir(&threads_dir)? {
             let entry = entry?;
-            if !entry.path().is_dir() {
+            if !deps.is_dir(&entry.path()) {
                 continue;
             }
             if let Some(name) = entry.file_name().to_str() {
@@ -1471,11 +1364,14 @@ fn read_thread_ids(root: &Path) -> Result<Vec<String>> {
 }
 
 fn load_thread(root: &Path, thread_id: &str) -> Result<(BbsThreadMeta, Vec<LoadedPost>)> {
+    load_thread_tracked(root, thread_id, &mut cache::Deps::untracked())
+}
+fn load_thread_tracked(root: &Path, thread_id: &str, deps: &mut cache::Deps) -> Result<(BbsThreadMeta, Vec<LoadedPost>)> {
     if !safe_component(thread_id) {
         bail!("invalid BBS thread id");
     }
     let dir = thread_dir(root, thread_id);
-    let mut meta = read_thread_meta(&dir.join("thread.yaml"))?;
+    let mut meta = read_thread_meta_tracked(&dir.join("thread.yaml"), deps)?;
     if meta.thread_id != thread_id {
         bail!("BBS thread metadata ID mismatch");
     }
@@ -1483,8 +1379,8 @@ fn load_thread(root: &Path, thread_id: &str) -> Result<(BbsThreadMeta, Vec<Loade
     // account state are constructed by the snapshot loader.
     let paths = sync::ContentStore::at(root.into(), root.join(".unused-view-state"));
     let mut posts = Vec::new();
-    for location in paths.locations(thread_id)? {
-        if let Ok(post) = read_post(&location.path) {
+    for location in paths.locations_tracked(thread_id, deps)? {
+        if let Ok(post) = read_post_tracked(&location.path, deps) {
             if post.meta.thread_id == thread_id
                 && post.meta.post_id == location.post
                 && matches!(post.meta.kind.as_str(), "topic" | "reply")
@@ -1527,7 +1423,10 @@ fn load_thread(root: &Path, thread_id: &str) -> Result<(BbsThreadMeta, Vec<Loade
 }
 
 fn read_thread_meta(path: &Path) -> Result<BbsThreadMeta> {
-    let meta = serde_yaml::from_slice::<BbsThreadMeta>(&fs::read(path)?)?;
+    read_thread_meta_tracked(path, &mut cache::Deps::untracked())
+}
+fn read_thread_meta_tracked(path: &Path, deps: &mut cache::Deps) -> Result<BbsThreadMeta> {
+    let meta = serde_yaml::from_slice::<BbsThreadMeta>(&deps.read(path)?)?;
     if meta.schema != THREAD_SCHEMA {
         bail!("unsupported BBS thread schema in {}", path.display());
     }
@@ -1539,7 +1438,19 @@ fn write_thread_meta(path: &Path, meta: &BbsThreadMeta) -> Result<()> {
 }
 
 fn read_post(path: &Path) -> Result<LoadedPost> {
-    let raw = fs::read_to_string(path)?;
+    read_post_tracked(path, &mut cache::Deps::untracked())
+}
+static POSTS: cache::Memo<PathBuf, LoadedPost> = cache::Memo::new(2048, 16 * 1024 * 1024);
+fn read_post_tracked(path: &Path, deps: &mut cache::Deps) -> Result<LoadedPost> {
+    // Failed parses are not cached, but the enclosing thread still depends on
+    // that file: repairing it must make the next snapshot reconsider the post.
+    deps.stat(path);
+    let cached = POSTS.get(path.to_path_buf(), |post_deps| parse_post(path, post_deps))?;
+    deps.inherit_value(&cached.deps);
+    Ok((*cached.value).clone())
+}
+fn parse_post(path: &Path, deps: &mut cache::Deps) -> Result<LoadedPost> {
+    let raw = deps.read_to_string(path)?;
     let rest = raw
         .strip_prefix("---\n")
         .ok_or_else(|| anyhow!("missing frontmatter start in {}", path.display()))?;
@@ -1624,14 +1535,17 @@ fn thread_relevant(meta: &BbsThreadMeta, posts: &[LoadedPost], project_id: &str)
 }
 
 fn load_project_state(root: &Path, project_id: &str) -> Result<BbsProjectState> {
+    load_project_state_tracked(root, project_id, &mut cache::Deps::untracked())
+}
+fn load_project_state_tracked(root: &Path, project_id: &str, deps: &mut cache::Deps) -> Result<BbsProjectState> {
     let path = project_state_path(root, project_id);
-    if !path.is_file() {
+    if !deps.is_file(&path) {
         return Ok(BbsProjectState {
             project_id: project_id.to_string(),
             ..Default::default()
         });
     }
-    let mut state = serde_json::from_slice::<BbsProjectState>(&fs::read(&path)?)?;
+    let mut state = serde_json::from_slice::<BbsProjectState>(&deps.read(&path)?)?;
     if state.project_id.trim().is_empty() {
         state.project_id = project_id.to_string();
     }
@@ -1733,7 +1647,10 @@ pub fn agent_avatar_from_yaml(path: &Path) -> Option<String> {
 }
 
 fn agent_yaml_string(path: &Path, keys: &[&str]) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
+    agent_yaml_string_tracked(path, keys, &mut cache::Deps::untracked())
+}
+fn agent_yaml_string_tracked(path: &Path, keys: &[&str], deps: &mut cache::Deps) -> Option<String> {
+    let text = deps.read_to_string(path).ok()?;
     let yaml = serde_yaml::from_str::<serde_yaml::Value>(&text).ok()?;
     keys.iter().find_map(|key| {
         yaml.get(*key)
@@ -1749,6 +1666,14 @@ fn post_agent_avatar(
     meta: &BbsPostMeta,
     cache: &mut BTreeMap<(String, String), Option<String>>,
 ) -> Option<String> {
+    post_agent_avatar_tracked(root, meta, cache, &mut cache::Deps::untracked())
+}
+fn post_agent_avatar_tracked(
+    root: &Path,
+    meta: &BbsPostMeta,
+    cache: &mut BTreeMap<(String, String), Option<String>>,
+    deps: &mut cache::Deps,
+) -> Option<String> {
     if meta.agent_avatar.is_some() || meta.agent_id == "human" {
         return meta.agent_avatar.clone();
     }
@@ -1758,12 +1683,16 @@ fn post_agent_avatar(
         return avatar.clone();
     }
 
-    let avatar = project_agent_avatar_from_yaml(root, &meta.project_id, &meta.agent_id);
+    let avatar = project_agent_avatar_from_yaml_tracked(root, &meta.project_id, &meta.agent_id, deps);
     cache.insert(key, avatar.clone());
     avatar
 }
 
+#[cfg(test)]
 fn project_agent_avatar_from_yaml(root: &Path, project_id: &str, agent_id: &str) -> Option<String> {
+    project_agent_avatar_from_yaml_tracked(root, project_id, agent_id, &mut cache::Deps::untracked())
+}
+fn project_agent_avatar_from_yaml_tracked(root: &Path, project_id: &str, agent_id: &str, deps: &mut cache::Deps) -> Option<String> {
     let workspaces_root = root.parent()?;
     let project_id = project_id.trim();
     let agent_id = agent_id.trim();
@@ -1794,7 +1723,7 @@ fn project_agent_avatar_from_yaml(root: &Path, project_id: &str, agent_id: &str)
 
     candidates
         .into_iter()
-        .find_map(|path| agent_avatar_from_yaml(&path))
+        .find_map(|path| agent_yaml_string_tracked(&path, &["avatar-id", "avatarId"], deps))
 }
 
 pub fn display_project_name_with_fallback(project_id: &str, fallback: Option<&str>) -> String {
@@ -2102,6 +2031,35 @@ mod tests {
             copy_attachment_stream(&mut io::Cursor::new(b"12345678"), &mut Vec::new(), 8).unwrap();
         assert_eq!(count, 8);
         assert_eq!(hash, format!("{:x}", Sha256::digest(b"12345678")));
+    }
+
+    #[test]
+    fn show_reports_a_started_receive_by_its_partial_length_until_verified() {
+        let board = TestBoard::new();
+        let thread = board
+            .post("", &[board.source("file.pdf", b"document")])
+            .unwrap();
+        let (_, posts) = load_thread(&board.0, &thread).unwrap();
+        let attachment = &posts[0].meta.attachments[0];
+        let file = thread_dir(&board.0, &thread).join(&attachment.path);
+        fs::remove_file(&file).unwrap();
+        let staging = board.0.join(".sync-staging");
+        fs::create_dir_all(&staging).unwrap();
+        let partial = staging.join(crate::bbs_sync::transport::resumable_partial_name(
+            &attachment.sha256,
+            attachment.size_bytes,
+        ));
+        for written in [3usize, 5] {
+            // Printed as is, not rounded to a slice boundary.
+            fs::write(&partial, &b"document"[..written]).unwrap();
+            let shown = render_thread_at(&board.0, &thread).unwrap();
+            assert!(shown.contains(&format!(" [receiving: {written} / 8 bytes]")), "{shown}");
+            assert!(!shown.contains("[missing]"));
+        }
+        fs::remove_file(&partial).unwrap();
+        fs::write(&file, b"document").unwrap();
+        let shown = render_thread_at(&board.0, &thread).unwrap();
+        assert!(!shown.contains("[receiving") && !shown.contains("[missing]"), "{shown}");
     }
 
     #[test]

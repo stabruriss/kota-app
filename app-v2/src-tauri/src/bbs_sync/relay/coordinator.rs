@@ -27,7 +27,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::{pending, Future},
     pin::Pin,
-    sync::{atomic::Ordering, Arc, Mutex, RwLock, Weak},
+    sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex, RwLock, Weak},
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
@@ -54,6 +54,7 @@ struct ServiceBackoff {
 type Flight<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 enum FileDone {
     Prepared(Result<Option<Intent>>),
+    Inspected(Result<bool>),
     Confirmed(Result<Completion>),
 }
 enum Op {
@@ -63,8 +64,8 @@ enum Op {
     Open(String, String),
 }
 enum MetaDone {
-    Poll(Result<Snapshot>),
-    Response(Op, Result<Reply>),
+    Poll(std::result::Result<Snapshot, (Error, Option<String>)>),
+    Response(Op, std::result::Result<Reply, (Error, Option<String>)>),
 }
 struct Attempt {
     tag: String,
@@ -99,6 +100,10 @@ pub(crate) struct Actor {
     engine: Arc<Engine>,
     authority: Arc<RwLock<Authority>>,
     initial: Authority,
+    lapse_at: Arc<AtomicU64>,
+    members_at: u64,
+    meta_started_at: Option<u64>,
+    file_started_at: Option<u64>,
     connections: Arc<Mutex<Vec<Weak<Connection>>>>,
     observe: Observe,
     work: Arc<Work>,
@@ -122,6 +127,7 @@ pub(crate) struct Actor {
     losses: BTreeMap<String, u8>,
     progress: BTreeMap<String, u64>,
     snapshot: Option<Snapshot>,
+    snapshot_at: u64,
     discovery_stale: bool,
     activity: Option<Activity>,
     meta: Option<Flight<MetaDone>>,
@@ -132,6 +138,7 @@ pub(crate) struct Actor {
     confirm: Option<(Intent, Receipt)>,
     announcing: bool,
     needs_refresh: bool,
+    needs_inspection: bool,
     refresh_at: u64,
     poll_at: u64,
     // Local queue/byte backpressure retries admission, not another discovery
@@ -186,7 +193,8 @@ impl Actor {
             }),
         );
         Arc::get_mut(&mut engine).ok_or(Error::Runtime)?.roster = Some(roster);
-        let auth = Self::scope_check(live.clone(), authority.clone(), work.clone(), epoch);
+        let lapse_at = Arc::new(AtomicU64::new(0));
+        let auth = Self::scope_check(live.clone(), authority.clone(), work.clone(), epoch, lapse_at.clone());
         let outbox = Outbox::new(
             &store.state,
             Scope::new(&authority.membership, &authority.identity)?,
@@ -213,6 +221,10 @@ impl Actor {
             engine,
             authority: live,
             initial: authority,
+            lapse_at,
+            members_at: now(),
+            meta_started_at: None,
+            file_started_at: None,
             connections,
             observe,
             serial: work.serial(),
@@ -234,6 +246,7 @@ impl Actor {
             losses: BTreeMap::new(),
             progress: BTreeMap::new(),
             snapshot: None,
+            snapshot_at: 0,
             discovery_stale: false,
             activity: None,
             meta: None,
@@ -244,6 +257,7 @@ impl Actor {
             confirm: None,
             announcing: false,
             needs_refresh: true,
+            needs_inspection: false,
             refresh_at: now() + HEARTBEAT_MS,
             poll_at: now(),
             admission_at: None,
@@ -257,13 +271,16 @@ impl Actor {
         expected: Authority,
         work: Arc<Work>,
         epoch: u64,
+        lapse_at: Arc<AtomicU64>,
     ) -> MembershipCheck {
         Arc::new(move || {
             work.epoch() == epoch
                 && live.read().ok().is_some_and(|a| {
                     a.membership == expected.membership
                         && a.identity == expected.identity
-                        && now() < a.valid_until
+                        && a.members.iter().any(|m| m.public_key == a.identity.public_key
+                            && m.membership_id == a.membership.membership_id && m.role == a.membership.role)
+                        && Self::lease_active(&a, &lapse_at)
                 })
         })
     }
@@ -273,7 +290,14 @@ impl Actor {
             self.initial.clone(),
             self.work.clone(),
             self.epoch,
+            self.lapse_at.clone(),
         )
+    }
+    fn lease_active(a: &Authority, lapse_at: &AtomicU64) -> bool {
+        let at = now();
+        if at < a.valid_until { return true; }
+        lapse_at.fetch_max(at, Ordering::AcqRel);
+        false
     }
     fn peer_check(&self, peer: &PeerIdentity) -> MembershipCheck {
         let live = self.authority.clone();
@@ -282,6 +306,7 @@ impl Actor {
         let identity = self.initial.identity.clone();
         let work = self.work.clone();
         let epoch = self.epoch;
+        let lapse_at = self.lapse_at.clone();
         // Validate/key-bind once when creating the capability. Every use still
         // checks the current rows, incarnation, identity, epoch and expiry.
         // Re-deriving the Ed25519 key on every TLS/frame step blocks this owner.
@@ -298,7 +323,6 @@ impl Actor {
                 && live.read().ok().is_some_and(|a| {
                     a.membership == membership
                         && a.identity == identity
-                        && now() < a.valid_until
                         && a.members.iter().any(|m| {
                             m.device_id == expected.local_device_id
                                 && m.membership_id == expected.local_membership_id
@@ -310,6 +334,7 @@ impl Actor {
                                 && m.membership_id == expected.remote_membership_id
                                 && Some(&m.public_key) == public.as_ref()
                         })
+                        && Self::lease_active(&a, &lapse_at)
                 })
         })
     }
@@ -434,6 +459,8 @@ impl Actor {
         }
         self.meta = None;
         self.file = None;
+        self.meta_started_at = None;
+        self.file_started_at = None;
         self.round = None;
         self.activity = None;
     }
@@ -457,6 +484,7 @@ impl Actor {
         self.confirm = None;
         self.announcing = false;
         self.needs_refresh = false;
+        self.needs_inspection = false;
         self.manual_until = None;
         self.manual_queued = None;
         self.admission_at = None;
@@ -466,13 +494,65 @@ impl Actor {
         // marker/wake can immediately start it again.
         self.poll_at = now().saturating_add(IDLE_POLL_MS);
     }
+    fn lease_failure(&self, error: Error, cause: Option<&str>, started_at: Option<u64>,
+        peer: Option<&PeerIdentity>) -> bool {
+        if error != Error::Unauthorized || cause.is_some_and(|v| v.starts_with("worker:"))
+            || !started_at.is_some_and(|start| self.lapse_at.load(Ordering::Acquire) >= start)
+            || self.work.epoch() != self.epoch { return false; }
+        self.authority.read().ok().is_some_and(|a| {
+            a.membership == self.initial.membership && a.identity == self.initial.identity
+                && a.members.iter().any(|m| m.device_id == self.local
+                    && m.membership_id == a.membership.membership_id
+                    && m.public_key == a.identity.public_key && m.role == a.membership.role)
+                && peer.is_none_or(|peer| PeerIdentity::current(&a.membership, &a.members,
+                    &a.identity, &peer.remote_device_id).ok().as_ref() == Some(peer))
+        })
+    }
+    fn lease_renewed(&self) -> bool {
+        self.authority.read().ok().is_some_and(|a| now() < a.valid_until)
+    }
+    fn failure_cause(&self, id: &str, error: Error) -> Option<&'static str> {
+        if error != Error::RelaySessionLost { return None; }
+        let a = self.attempts.get(id)?;
+        let snapshot = self.snapshot.as_ref()?;
+        if a.passive_boot.as_ref().is_some_and(|boot| boot != &snapshot.boot) {
+            return Some("boot_changed");
+        }
+        let item = snapshot.items.get(id)?;
+        if item.announcement.as_ref().is_some_and(|v|
+            v.instance != a.instance || v.membership != a.peer.remote_membership_id) {
+            return Some("instance_changed");
+        }
+        if a.wake.is_some() && (item.current_wake != a.wake
+            || item.wake.as_ref().is_none_or(|w| w.expires_at <= now())
+            || item.handshake.as_ref().is_none_or(|h| h.closed)) {
+            return Some("wake_replaced");
+        }
+        None
+    }
     fn fail(&mut self, id: &str, error: Error) {
+        self.fail_with_cause(id, error, None);
+    }
+    fn fail_with_cause(&mut self, id: &str, error: Error, cause: Option<&str>) {
+        let origin = self.attempts.get(id).map(|a| (a.trace.started_at, &a.peer))
+            .or_else(|| self.connected.get(id).map(|c| (c.trace.started_at, &c.peer)));
+        let lease_lapsed = self.lease_failure(error, cause, origin.map(|v| v.0), origin.map(|v| v.1));
+        let cause = if lease_lapsed { Some("lease_lapsed") }
+            else { cause.or_else(|| self.failure_cause(id, error)) };
         if let Some(a) = self.attempts.get(id) {
-            a.trace.event("failed", Some(error), 0);
+            a.trace.failed(error, cause);
         } else if let Some(c) = self.connected.get(id) {
-            c.trace.event("failed", Some(error), 0);
+            c.trace.failed(error, cause);
         }
         self.remove(id);
+        if lease_lapsed {
+            if self.lease_renewed() {
+                self.schedule.occupied(id, now());
+                self.poll_at = self.poll_at.min(now() + POLL_MS);
+            }
+            if let Some(peer) = self.schedule.peers.get_mut(id) { peer.needed = true; }
+            return;
+        }
         if error == Error::Cancelled {
             return;
         }
@@ -517,6 +597,18 @@ impl Actor {
         self.service_backoff[task as usize] = ServiceBackoff::default();
     }
     fn service_error(&mut self, task: ServiceTask, error: Error) {
+        self.service_error_at(task, error, None, None);
+    }
+    fn service_error_at(&mut self, task: ServiceTask, error: Error,
+        started_at: Option<u64>, cause: Option<&str>) {
+        if self.lease_failure(error, cause, started_at, None) {
+            Trace::service_lapse(match task {
+                ServiceTask::Poll => "poll", ServiceTask::Announce => "announce",
+                ServiceTask::Catalog => "catalog", ServiceTask::Exchange => "exchange",
+            });
+            if self.lease_renewed() { self.poll_at = self.poll_at.min(now() + POLL_MS); }
+            return;
+        }
         if error == Error::Cancelled {
             return;
         }
@@ -552,16 +644,14 @@ impl Actor {
     }
     fn metadata_submitted(&mut self, op: Op, call: Call, deadline: Instant, first: Option<PendingHttp>) {
         self.announcing = matches!(&op, Op::Announce(_));
+        self.meta_started_at = Some(now());
         self.meta = Some(Box::pin(async move {
             let mut delay = Duration::from_millis(250);
             let mut first = first;
             let result = loop {
-                let result = match first.take() {
-                    Some(pending) => call.complete(pending).await,
-                    None => call.execute().await,
-                };
+                let result = call.diagnosed(first.take()).await;
                 match result {
-                    Err(Error::Busy | Error::Closed) if Instant::now() + delay < deadline => {
+                    Err((Error::Busy | Error::Closed, _)) if Instant::now() + delay < deadline => {
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(Duration::from_secs(1));
                     }
@@ -591,8 +681,9 @@ impl Actor {
             } else {
                 IDLE_POLL_MS + jitter
             };
+        self.meta_started_at = Some(at);
         self.meta = Some(Box::pin(async move {
-            MetaDone::Poll(client.poll(at, Instant::now() + PROGRESS_TIMEOUT).await)
+            MetaDone::Poll(client.poll_diagnosed(at, Instant::now() + PROGRESS_TIMEOUT).await)
         }));
         Ok(())
     }
@@ -602,6 +693,8 @@ impl Actor {
         let cancel = self.cancel.clone();
         let instance = self.instance.clone();
         self.needs_refresh = false;
+        self.needs_inspection = false;
+        self.file_started_at = Some(now());
         self.file = Some(Box::pin(async move {
             FileDone::Prepared(
                 async {
@@ -614,11 +707,41 @@ impl Actor {
             )
         }));
     }
+    fn inspect(&mut self) {
+        let engine = self.engine.clone();
+        let cancel = self.cancel.clone();
+        self.needs_inspection = false;
+        self.file_started_at = Some(now());
+        self.file = Some(Box::pin(async move {
+            FileDone::Inspected(engine.inspect_idle(&cancel).await)
+        }));
+    }
     fn file_done(&mut self, done: FileDone) {
+        let started_at = self.file_started_at.take();
         match done {
+            FileDone::Inspected(Ok(changed)) => {
+                self.service_ok(ServiceTask::Catalog);
+                if changed {
+                    self.needs_refresh = true;
+                }
+                self.refresh_needed();
+            }
+            FileDone::Inspected(Err(e)) => {
+                self.needs_inspection = true;
+                self.service_error_at(ServiceTask::Catalog, e, started_at, None);
+            }
             FileDone::Prepared(Ok(intent)) => {
                 self.service_ok(ServiceTask::Catalog);
+                // Marker/rescan hints may concern unshared content. Only a
+                // changed publication target (including an unconfirmed one)
+                // owes peers a local round after the refreshed catalog.
+                if intent.is_some() {
+                    self.forced.extend(self.schedule.peers.keys().cloned());
+                }
                 self.pending = intent;
+                // take_changed also set needed before this refresh; discard
+                // that hint when no local, remote or recovery work remains.
+                self.refresh_needed();
             }
             FileDone::Confirmed(Ok(Completion::Confirmed)) => {
                 self.service_ok(ServiceTask::Catalog);
@@ -634,7 +757,7 @@ impl Actor {
             }
             FileDone::Prepared(Err(e)) | FileDone::Confirmed(Err(e)) => {
                 self.needs_refresh = true;
-                self.service_error(ServiceTask::Catalog, e);
+                self.service_error_at(ServiceTask::Catalog, e, started_at, None);
             }
         }
     }
@@ -659,7 +782,7 @@ impl Actor {
                     // close handshake; it does not create failed content work.
                     self.remove(&id);
                 } else {
-                    self.fail(&id, Error::RelaySessionLost);
+                    self.fail_with_cause(&id, Error::RelaySessionLost, Some("boot_changed"));
                 }
             }
         }
@@ -680,10 +803,17 @@ impl Actor {
             .map(|(id, _)| id.clone())
             .collect();
         for id in changed {
-            self.fail(&id, Error::RelaySessionLost);
+            self.fail_with_cause(&id, Error::RelaySessionLost, Some("instance_changed"));
         }
-        for (id, item) in &value.items {
-            if id == &self.own() {
+        self.snapshot = Some(value);
+        self.snapshot_at = now();
+        self.discovery_stale = false;
+        self.refresh_needed();
+    }
+    fn refresh_needed(&mut self) {
+        let Some(snapshot) = &self.snapshot else { return; };
+        for (id, item) in &snapshot.items {
+            if id == &self.local {
                 continue;
             }
             let Some(peer) = self.schedule.peers.get_mut(id) else {
@@ -716,18 +846,22 @@ impl Actor {
                 peer.needed = false;
             }
         }
-        self.snapshot = Some(value);
-        self.discovery_stale = false;
     }
     fn meta_done(&mut self, done: MetaDone) -> Result<()> {
+        let started_at = self.meta_started_at.take();
         match done {
             MetaDone::Poll(Ok(value)) => {
                 self.service_ok(ServiceTask::Poll);
                 self.adopt_snapshot(value);
             }
-            MetaDone::Poll(Err(e)) => self.service_error(ServiceTask::Poll, e),
+            MetaDone::Poll(Err((e, cause))) =>
+                self.service_error_at(ServiceTask::Poll, e, started_at, cause.as_deref()),
             MetaDone::Response(Op::Announce(intent), result) => {
                 self.announcing = false;
+                let (result, cause) = match result {
+                    Ok(reply) => (Ok(reply), None),
+                    Err((error, cause)) => (Err(error), cause),
+                };
                 match self
                     .http
                     .checked(result.and_then(|r| Receipt::decode(r.json()?)))
@@ -737,7 +871,7 @@ impl Actor {
                     }
                     Err(e) => {
                         self.pending = Some(intent);
-                        self.service_error(ServiceTask::Announce, e);
+                        self.service_error_at(ServiceTask::Announce, e, started_at, cause.as_deref());
                     }
                 }
             }
@@ -751,6 +885,10 @@ impl Actor {
                 if !self.attempts.get(&id).is_some_and(|a| a.tag == tag) {
                     return Ok(());
                 }
+                let (result, cause) = match result {
+                    Ok(reply) => (Ok(reply), None),
+                    Err((error, cause)) => (Err(error), cause),
+                };
                 let result = result.and_then(|r| {
                     self.attempts.get_mut(&id).unwrap().waiting_poll = true;
                     let bytes = r.json()?;
@@ -790,7 +928,7 @@ impl Actor {
                     Ok(())
                 });
                 if let Err(e) = self.http.checked(result) {
-                    self.fail(&id, e);
+                    self.fail_with_cause(&id, e, cause.as_deref());
                 }
             }
         }
@@ -975,24 +1113,31 @@ impl Actor {
     }
     fn finished(&mut self, id: &str, result: &exchange::Outcome) {
         self.schedule.completed(id, now());
-        let okay = result.failures.is_empty() && result.omitted == 0
-            && !result.more && result.completed == result.total;
+        // Item failures are isolated: reported, retried by the next full
+        // catalog or Manual round, and never a reason to back off this peer.
+        let okay = result.settled();
         if okay {
             self.forced.remove(id);
             self.verification.remove(id);
             self.service_ok(ServiceTask::Exchange);
             self.recovery.remove(id);
             self.manual_queued = None;
-            if let Some(c) = self.connected.get(id) {
-                c.trace.event("completed", None, 0);
-            }
+        } else {
+            // A refresh may match the last successful checkpoint even while
+            // this round has unfinished work. Preserve that work explicitly.
+            self.verification.insert(id.into());
         }
-        if result.completed > 0
-            || (result.failures.is_empty()
-                && result.omitted == 0
-                && !result.more
-                && result.completed == result.total)
-        {
+        if let Some(c) = self.connected.get(id) {
+            if okay {
+                c.trace.completed(result);
+            }
+            let wake = c.wake.clone();
+            // Finish already consumed this wake. A poll/catalog refresh can
+            // finish before the close handshake retires the connection; it
+            // must not mistake that same wake for a new round in that gap.
+            self.retired(id, &wake);
+        }
+        if result.completed > 0 || okay {
             self.losses.remove(id);
         }
         self.progress.remove(id);
@@ -1003,12 +1148,7 @@ impl Actor {
         if result.completed > 0 {
             self.schedule.changed(now());
         }
-        if !result.failures.is_empty() || result.omitted > 0 {
-            self.schedule.failed(id, now());
-            // An incomplete content result is not evidence for bypassing any
-            // backoff; retain the spent credit, but remove the old error hint.
-            self.record_failure(id, Error::InvalidResource);
-        } else if result.more {
+        if result.more {
             if let Some(p) = self.schedule.peers.get_mut(id) {
                 p.needed = true;
             }
@@ -1034,7 +1174,10 @@ impl Actor {
             return;
         }
         match &event {
-            exchange::Event::Changed(_) => self.schedule.changed(now()),
+            // The Link already marked its in-flight attachment pull to stop at
+            // the next slice boundary. The side whose content changed opens
+            // the next round as in v4; reacting here would make both announce.
+            exchange::Event::Changed(_) => {}
             exchange::Event::Started(_) => {
                 self.schedule.busy(&id, now());
                 self.manual_until = None;
@@ -1098,13 +1241,17 @@ impl Actor {
                     }
                 }
             }
-            Err(Failure::Transport(error) | Failure::Response { error, .. }) => {
+            Err(failure) => {
+                let (error, cause) = match failure {
+                    Failure::Transport(error) => (error, None),
+                    Failure::Response { error, cause, .. } => (error, cause),
+                };
                 let ids: Vec<_> = self.connected.keys().cloned().collect();
                 for id in ids {
                     if self.connected[&id].finished {
                         self.remove(&id);
                     } else {
-                        self.fail(&id, error);
+                        self.fail_with_cause(&id, error, cause.as_deref());
                     }
                 }
                 self.activity = None;
@@ -1134,16 +1281,30 @@ impl Actor {
         if self.work.serial() != self.serial {
             self.serial = self.work.serial();
             self.schedule.changed(at);
+            self.engine.local_changed();
+            // v5 only: an attachment pull in flight on either side stops at its
+            // next slice boundary, so this new body is not queued behind it.
+            for link in self.connected.values().filter_map(|c| c.link.clone()) {
+                if link.connection.exchange_version() == crate::bbs_sync::transport::ExchangeVersion::V5 {
+                    tokio::spawn(async move {
+                        let _ = link.changed().await;
+                    });
+                }
+            }
         }
         if self.schedule.take_changed(at) {
             self.cancelled_until = None;
             self.needs_refresh = true;
-            self.forced.extend(self.schedule.peers.keys().cloned());
         }
         if at >= self.refresh_at {
-            self.cancelled_until = None;
+            if self.cancelled_until.take().is_some() {
+                // Cancel changed our instance; retain the existing automatic
+                // resume/publication boundary once its quiet period expires.
+                self.needs_refresh = true;
+            } else {
+                self.needs_inspection = true;
+            }
             self.refresh_at = at + HEARTBEAT_MS;
-            self.needs_refresh = true;
         }
         let expired: Vec<_> = self
             .attempts
@@ -1168,6 +1329,7 @@ impl Actor {
             let (intent, receipt) = self.confirm.take().unwrap();
             let outbox = self.outbox.clone();
             let cancel = self.cancel.clone();
+            self.file_started_at = Some(at);
             self.file = Some(Box::pin(async move {
                 FileDone::Confirmed(outbox.complete(&intent, receipt, now(), &cancel).await)
             }));
@@ -1186,8 +1348,12 @@ impl Actor {
         if !active_allowed && !passive_allowed {
             return Ok(());
         }
-        if self.file.is_none() && self.needs_refresh && !self.opening_or_syncing() {
-            self.prepare();
+        if self.file.is_none() && !self.opening_or_syncing() {
+            if self.needs_refresh {
+                self.prepare();
+            } else if self.needs_inspection {
+                self.inspect();
+            }
         }
         // A pending refresh/outbox write cannot be bypassed by a newly started
         // round. Existing Activity keeps moving concurrently with this owner.
@@ -1208,9 +1374,26 @@ impl Actor {
                     Ok(call) => self.metadata_call(Op::Announce(intent), call, deadline),
                     Err(e) => {
                         self.pending = Some(intent);
-                        self.service_error(ServiceTask::Announce, e);
+                        self.service_error_at(ServiceTask::Announce, e, Some(at), None);
                     }
                 }
+            }
+        }
+        // A new attempt cannot use a snapshot older than the active poll period.
+        // Refresh only when work is ready to start; idle peers keep their usual
+        // cadence. If another metadata call owns the slot, retry this gate when
+        // it completes, without queuing a duplicate poll behind an active read.
+        if self.snapshot.is_some()
+            && at.saturating_sub(self.snapshot_at) > POLL_MS
+            && (self.discovery_stale
+                || (self.attempts.len() + self.connected.len() < 4
+                    && self.candidates(at).iter().any(|id| {
+                        !self.attempts.contains_key(id) && !self.connected.contains_key(id)
+                    })))
+        {
+            self.discovery_stale = true;
+            if self.meta.is_none() {
+                self.poll_at = self.poll_at.min(at);
             }
         }
         self.due_poll(at)?;
@@ -1310,6 +1493,11 @@ impl Actor {
         {
             return Err(Error::Unauthorized);
         }
+        let at = now();
+        if at < a.valid_until && self.lapse_at.load(Ordering::Acquire) > self.members_at {
+            self.poll_at = self.poll_at.min(at + POLL_MS);
+        }
+        self.members_at = at;
         let replaced: Vec<_> = self
             .initial
             .members

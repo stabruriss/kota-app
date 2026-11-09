@@ -29,6 +29,7 @@ export default defineConfig({
   },
   test: {
     environment: 'happy-dom',
+    poolOptions: { forks: { execArgv: ['--no-experimental-webstorage'] } },
     setupFiles: ['./tests/setup.ts'],
     globals: true,
     include: ['tests/**/*.test.{ts,tsx}', 'src/**/*.test.{ts,tsx}'],

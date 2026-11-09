@@ -23,6 +23,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 
+#[path = "laughing_man_cloudflare.rs"]
+mod cloudflare;
+pub use cloudflare::LmCloudflareError;
+
 const STATE_SCHEMA: &str = "kota.laughing-man.state.v1";
 const LOG_SCHEMA: &str = "kota.laughing-man.log.v1";
 const POLL_TIMEOUT_SECS: u64 = 50;
@@ -31,7 +35,7 @@ const STANDBY_LOOP_SECS: u64 = 30;
 const STANDBY_PULL_LIMIT: usize = 20;
 const STANDBY_SEEN_RING_MAX: usize = 600;
 pub(crate) const STANDBY_PROTOCOL: &str = "kota-lm-standby.v1";
-pub(crate) const STANDBY_RECOMMENDED_VERSION: &str = "0.1.4";
+pub(crate) const STANDBY_RECOMMENDED_VERSION: &str = "0.1.5";
 const API_BASE: &str = "https://api.telegram.org";
 const MAX_TELEGRAM_TEXT_CHARS: usize = 3_800;
 const MAX_LOG_ENTRIES: usize = 500;
@@ -134,6 +138,8 @@ pub struct LmStandbyConfig {
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
+    pub cloudflare: Option<LmCloudflareError>,
+    #[serde(default)]
     pub queue_count: usize,
 }
 
@@ -145,6 +151,7 @@ pub struct LmStandbyStatus {
     pub last_heartbeat_at: Option<String>,
     pub last_sync_at: Option<String>,
     pub last_error: Option<String>,
+    pub cloudflare: Option<LmCloudflareError>,
     pub relay_version: Option<String>,
     pub protocol_version: Option<String>,
     pub recommended_version: String,
@@ -472,12 +479,17 @@ fn standby_status_from_config(config: &LmStandbyConfig) -> LmStandbyStatus {
         .relay_version
         .as_deref()
         .is_some_and(|version| version != STANDBY_RECOMMENDED_VERSION);
+    let mut cloudflare = config.cloudflare.clone();
+    if let Some(error) = &mut cloudflare {
+        error.expire_reset(chrono::Utc::now());
+    }
     LmStandbyStatus {
         worker_url: config.worker_url.clone(),
         live: config.live,
         last_heartbeat_at: config.last_heartbeat_at.clone(),
         last_sync_at: config.last_sync_at.clone(),
         last_error: config.last_error.clone(),
+        cloudflare,
         relay_version: config.relay_version.clone(),
         protocol_version: config.protocol_version.clone(),
         recommended_version: STANDBY_RECOMMENDED_VERSION.into(),
@@ -993,7 +1005,7 @@ fn worker_get_json(worker_url: &str, path: &str, timeout_secs: u64) -> Result<Js
             .map_err(|err| anyhow!("standby {path}: parse json: {err}")),
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            bail!("standby {path}: http {code}: {}", log_preview(&text))
+            Err(worker_response_error(path, code, &text))
         }
         Err(err) => bail!("standby {path}: {err}"),
     }
@@ -1020,10 +1032,16 @@ fn worker_post_json(
             .map_err(|err| anyhow!("standby {path}: parse json: {err}")),
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            bail!("standby {path}: http {code}: {}", log_preview(&text))
+            Err(worker_response_error(path, code, &text))
         }
         Err(err) => bail!("standby {path}: {err}"),
     }
+}
+
+fn worker_response_error(path: &str, code: u16, text: &str) -> anyhow::Error {
+    cloudflare::classify(text, chrono::Utc::now())
+        .map(anyhow::Error::new)
+        .unwrap_or_else(|| anyhow!("standby {path}: http {code}: {}", log_preview(text)))
 }
 
 fn set_webhook(token: &str, worker_url: &str, webhook_secret: &str) -> Result<()> {
@@ -1865,6 +1883,7 @@ fn standby_loop(
     deliver: std::sync::Arc<InboundDeliverFn>,
 ) {
     crate::kota_debug_log("[laughing-man] standby loop started");
+    let mut backoff = cloudflare::Backoff::default();
     while !stop.load(Ordering::Acquire) {
         let state = load_state();
         if !state.enabled {
@@ -1882,6 +1901,7 @@ fn standby_loop(
             15,
         ) {
             Ok(response) => {
+                backoff.reset();
                 let relay_version = response
                     .get("relayVersion")
                     .and_then(JsonValue::as_str)
@@ -1897,9 +1917,8 @@ fn standby_loop(
                 update_state(|state| {
                     sync_selected_from_standby_response(state, &response);
                     if let Some(standby) = state.standby.as_mut() {
-                        standby.live = true;
+                        cloudflare::recovered(standby);
                         standby.last_heartbeat_at = Some(now_iso());
-                        standby.last_error = None;
                         standby.queue_count = queue_count;
                         if relay_version.is_some() {
                             standby.relay_version = relay_version.clone();
@@ -1911,27 +1930,44 @@ fn standby_loop(
                 });
             }
             Err(err) => {
-                let preview = log_preview(&err.to_string());
-                update_state(|state| {
-                    if let Some(standby) = state.standby.as_mut() {
-                        standby.live = false;
-                        standby.last_error = Some(preview.clone());
-                    }
-                });
+                record_standby_failure(&config, &token, &err);
                 crate::kota_debug_log(&format!("[laughing-man] standby heartbeat: {err}"));
-                sleep_standby_interval(&stop);
+                sleep_standby_interval(&stop, backoff.failed(err.is::<LmCloudflareError>()));
                 continue;
             }
         }
 
-        pull_standby_updates(&app, &token, &config, &list_projects, &deliver);
-        sleep_standby_interval(&stop);
+        let delay = match pull_standby_updates(&app, &token, &config, &list_projects, &deliver) {
+            Ok(()) => STANDBY_LOOP_SECS,
+            Err(err) => {
+                record_standby_failure(&config, &token, &err);
+                crate::kota_debug_log(&format!("[laughing-man] standby pull: {err}"));
+                backoff.failed(err.is::<LmCloudflareError>())
+            }
+        };
+        sleep_standby_interval(&stop, delay);
     }
     crate::kota_debug_log("[laughing-man] standby loop stopped");
 }
 
-fn sleep_standby_interval(stop: &std::sync::Arc<AtomicBool>) {
-    for _ in 0..STANDBY_LOOP_SECS {
+fn record_standby_failure(config: &LmStandbyConfig, token: &str, error: &anyhow::Error) {
+    let notification = update_state(|state| {
+        let owner = state.owner_chat_id;
+        let current = state.standby.as_mut()?;
+        if current.worker_url != config.worker_url || current.device_id != config.device_id {
+            return None;
+        }
+        cloudflare::record_failure(current, error, chrono::Utc::now(), owner)
+    });
+    if let Some((chat_id, text)) = notification {
+        if let Err(err) = send_text(token, chat_id, &text, None) {
+            crate::kota_debug_log(&format!("[laughing-man] standby notice: {err}"));
+        }
+    }
+}
+
+fn sleep_standby_interval(stop: &std::sync::Arc<AtomicBool>, seconds: u64) {
+    for _ in 0..seconds {
         if stop.load(Ordering::Acquire) {
             return;
         }
@@ -1945,27 +1981,14 @@ fn pull_standby_updates(
     config: &LmStandbyConfig,
     list_projects: &std::sync::Arc<ProjectListFn>,
     deliver: &std::sync::Arc<InboundDeliverFn>,
-) {
-    let response = match worker_post_json(
+) -> Result<()> {
+    let response = worker_post_json(
         &config.worker_url,
         "desktop/pull",
         &json!({ "limit": STANDBY_PULL_LIMIT }),
         Some(&config.desktop_secret),
         20,
-    ) {
-        Ok(response) => response,
-        Err(err) => {
-            let preview = log_preview(&err.to_string());
-            update_state(|state| {
-                if let Some(standby) = state.standby.as_mut() {
-                    standby.live = false;
-                    standby.last_error = Some(preview.clone());
-                }
-            });
-            crate::kota_debug_log(&format!("[laughing-man] standby pull: {err}"));
-            return;
-        }
-    };
+    )?;
     let queue_count = response
         .get("queueCount")
         .and_then(JsonValue::as_u64)
@@ -2061,6 +2084,7 @@ fn pull_standby_updates(
             standby.queue_count = queue_count;
         }
     });
+    Ok(())
 }
 
 fn remember_processed_update(update_id: i64) {
@@ -3980,6 +4004,7 @@ pub fn connect_standby(request: LmStandbyConnectRequest) -> Result<LmState> {
         last_heartbeat_at: Some(now_iso()),
         last_sync_at: None,
         last_error: None,
+        cloudflare: None,
         queue_count: health
             .get("queueCount")
             .and_then(JsonValue::as_u64)
@@ -4157,6 +4182,25 @@ mod tests {
     }
 
     #[test]
+    fn standby_http_errors_preserve_typed_cloudflare_and_ordinary_worker_paths() {
+        let edge = worker_response_error("desktop/heartbeat", 500, "error code: 1101");
+        assert!(edge.is::<LmCloudflareError>());
+        assert!(!edge.to_string().contains("http 500"));
+        let ordinary = worker_response_error("desktop/pull", 401, r#"{"error":"unauthorized"}"#);
+        assert!(!ordinary.is::<LmCloudflareError>());
+        assert_eq!(ordinary.to_string(), r#"standby desktop/pull: http 401: {"error":"unauthorized"}"#);
+    }
+
+    #[test]
+    fn standby_status_hides_expired_reset_without_changing_saved_cycle() {
+        let error = cloudflare::classify("error code: 1027",
+            chrono::DateTime::parse_from_rfc3339("2000-01-01T12:00:00Z").unwrap().with_timezone(&chrono::Utc)).unwrap();
+        let config = LmStandbyConfig { cloudflare: Some(error), ..Default::default() };
+        assert!(standby_status_from_config(&config).cloudflare.unwrap().reset_at.is_none());
+        assert!(config.cloudflare.unwrap().reset_at.is_some());
+    }
+
+    #[test]
     fn standby_upgrade_tracks_old_and_bundled_worker_releases() {
         let mut config = LmStandbyConfig {
             relay_version: Some("0.1.2".into()),
@@ -4165,7 +4209,7 @@ mod tests {
         };
         let old = standby_status_from_config(&config);
         assert!(old.update_available);
-        assert_eq!(old.recommended_version, "0.1.4");
+        assert_eq!(old.recommended_version, "0.1.5");
         // Same update performed by the existing heartbeat loop after an upgrade.
         config.relay_version = Some(STANDBY_RECOMMENDED_VERSION.into());
         assert!(!standby_status_from_config(&config).update_available);

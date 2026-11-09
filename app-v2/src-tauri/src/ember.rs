@@ -316,12 +316,6 @@ impl EmberManager {
 
         let app_handle = app.clone();
         let project_root_for_callback = project_root.to_path_buf();
-        let last_process = std::sync::Arc::new(Mutex::new(
-            Instant::now()
-                .checked_sub(Duration::from_secs(60))
-                .unwrap_or_else(Instant::now),
-        ));
-        let last_process_for_callback = std::sync::Arc::clone(&last_process);
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 let Ok(event) = res else {
@@ -330,13 +324,7 @@ impl EmberManager {
                 if event.paths.is_empty() {
                     return;
                 }
-                let now = Instant::now();
-                if let Ok(mut last) = last_process_for_callback.lock() {
-                    if now.duration_since(*last) < Duration::from_millis(250) {
-                        return;
-                    }
-                    *last = now;
-                }
+                // No throttle: rename claims keep concurrent drains idempotent, and a 250 ms throttle dropped follow-up schedules.
                 let app_for_process = app_handle.clone();
                 let project_root_for_process = project_root_for_callback.clone();
                 thread::spawn(move || {

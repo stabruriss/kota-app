@@ -7,7 +7,7 @@ use crate::bbs_sync::transport::{
     control_channel::ControlChannel,
     data_channel::DataPipe,
     protocol::Frame,
-    Cancellation, Connection, Context, Delivery, Limits, MembershipCheck, CONTROL_WINDOW,
+    Cancellation, Connection, Context, Delivery, ExchangeVersion, Limits, MembershipCheck, CONTROL_WINDOW,
     DATA_WINDOW, MAX_FRAME,
 };
 use std::sync::Arc;
@@ -31,6 +31,7 @@ pub(super) struct Channels {
     pub(super) incoming: mpsc::Receiver<Delivery>,
     cancel: Option<Cancellation>,
     authorized: MembershipCheck,
+    exchange_version: ExchangeVersion,
 }
 impl Drop for Channels {
     fn drop(&mut self) {
@@ -52,6 +53,7 @@ impl Channels {
             self.data.clone(),
             cancel,
             self.authorized.clone(),
+            self.exchange_version,
         )?;
         self.cancel = None;
         Ok(connection)
@@ -115,6 +117,7 @@ impl Framing {
         if !tls.handshake_complete()? {
             return Err(Error::Busy);
         }
+        let exchange_version = tls.exchange_version()?;
         let permit = context.limits.connection()?;
         let (control, control_port) = Channel::relay(CONTROL_WINDOW, wake.clone());
         let (data, data_port) = Channel::relay(DATA_WINDOW + 2, wake);
@@ -138,6 +141,7 @@ impl Framing {
                 incoming,
                 cancel: Some(cancel.clone()),
                 authorized: authorized.clone(),
+                exchange_version,
             },
             Self {
                 control: control_port,

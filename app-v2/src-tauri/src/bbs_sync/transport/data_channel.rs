@@ -28,6 +28,9 @@ pub(crate) struct DataPipe {
     authorized: MembershipCheck,
     #[cfg(test)]
     pub(crate) pause_after_ready: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Flip one received byte of the next resumable slice before it is written.
+    #[cfg(test)]
+    pub(crate) corrupt_next_slice: AtomicBool,
     #[cfg(test)]
     pub(crate) pause_after_write: Mutex<
         Option<(
@@ -91,6 +94,8 @@ impl DataPipe {
             pause_after_ready: Mutex::new(None),
             #[cfg(test)]
             pause_after_write: Mutex::new(None),
+            #[cfg(test)]
+            corrupt_next_slice: AtomicBool::new(false),
         });
         let task = pipe.clone();
         tokio::spawn(async move {
@@ -167,10 +172,22 @@ impl DataPipe {
     /// Begin only after the receiver has registered this exact resource via
     /// expect_file. A source path comes from the local BBS resolver, never wire.
     pub(crate) async fn send_file(&self, resource: Resource, source: &Path) -> Result<()> {
+        let end = resource.size_bytes;
+        self.send_range(resource, source, 0, end).await
+    }
+    /// One v5 attachment slice uses the same frames as a whole file. Offsets
+    /// are absolute; Finish/Complete mark the slice end, not the file end.
+    pub(crate) async fn send_range(
+        &self,
+        resource: Resource,
+        source: &Path,
+        start: u64,
+        end: u64,
+    ) -> Result<()> {
         resource.validate()?;
         let mut file = tokio::time::timeout(
             PROGRESS_TIMEOUT,
-            self.io.read(resource.clone(), source, &self.cancel),
+            self.io.read_range(resource.clone(), source, start, end, &self.cancel),
         )
         .await
         .map_err(|_| Error::Timeout)??;
@@ -186,7 +203,7 @@ impl DataPipe {
             return Err(Error::Protocol);
         }
         drop(ready);
-        let mut window = SendWindow::new();
+        let mut window = SendWindow::starting_at(start);
         let mut burst = 0;
         loop {
             while !window.writable() {
@@ -225,7 +242,7 @@ impl DataPipe {
         while !window.drained() {
             self.ack(id, &mut window, self.next().await?).await?;
         }
-        if window.sent != resource.size_bytes {
+        if window.sent != end {
             return Err(Error::Integrity);
         }
         self.send(Data::Finish {
@@ -234,7 +251,7 @@ impl DataPipe {
         })
         .await?;
         let complete = self.next().await?;
-        if !matches!(protocol::decode_data(&complete.bytes)?, Data::Complete{id:actual, offset, hash} if actual == id && offset == resource.size_bytes && hash == resource.sha256)
+        if !matches!(protocol::decode_data(&complete.bytes)?, Data::Complete{id:actual, offset, hash} if actual == id && offset == end && hash == resource.sha256)
         {
             return Err(Error::Integrity);
         }
@@ -336,6 +353,163 @@ impl IncomingFile {
                         .await?;
                     self.active.completed = true;
                     return Ok(verified);
+                }
+                _ => return Err(Error::Protocol),
+            }
+        }
+    }
+}
+
+/// A v5 attachment receive. The deterministic partial outlives a lost link;
+/// each slice is one control Get and only a slice end is fsynced.
+pub(crate) struct ResumableFile {
+    pipe: Arc<DataPipe>,
+    writer: Option<FileWriter>,
+    resource: Resource,
+    offset: u64,
+}
+pub(crate) enum Slice {
+    Partial(u64),
+    Verified(VerifiedFile),
+}
+impl DataPipe {
+    /// No PROGRESS_TIMEOUT here: after a restart, restoring a long prefix hash
+    /// is paced local work. The link watchdog observes it as file work.
+    pub(crate) async fn resume_file(
+        self: &Arc<Self>,
+        resource: Resource,
+        staging: &Path,
+    ) -> Result<ResumableFile> {
+        resource.validate()?;
+        let writer = self.io.resume(resource.clone(), staging, &self.cancel).await?;
+        Ok(ResumableFile {
+            pipe: self.clone(),
+            offset: writer.start(),
+            writer: Some(writer),
+            resource,
+        })
+    }
+}
+impl ResumableFile {
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
+    }
+    /// Arm one slice before its Get is sent, as expect_file does for a file.
+    pub(crate) fn expect(&mut self, length: u64) -> Result<IncomingSlice<'_>> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .filter(|end| length > 0 && *end <= self.resource.size_bytes)
+            .ok_or(Error::Protocol)?;
+        let active = self.pipe.acquire()?;
+        Ok(IncomingSlice {
+            file: self,
+            end,
+            active,
+        })
+    }
+}
+pub(crate) struct IncomingSlice<'a> {
+    file: &'a mut ResumableFile,
+    end: u64,
+    active: Active,
+}
+impl IncomingSlice<'_> {
+    /// Only after an explicit control rejection, before any Begin was accepted.
+    pub(crate) fn declined(mut self) {
+        self.active.completed = true;
+    }
+    /// A local write failure or a final hash mismatch fails this item only:
+    /// the slice is still drained and completed, so the link stays usable.
+    pub(crate) async fn finish(mut self) -> Result<Slice> {
+        let pipe = self.file.pipe.clone();
+        let first = pipe.next().await?;
+        let id = match protocol::decode_data(&first.bytes)? {
+            Data::Begin { id, resource } if resource == self.file.resource => id,
+            _ => return Err(Error::InvalidResource),
+        };
+        drop(first);
+        pipe.send(Data::Ready(id)).await?;
+        #[cfg(test)]
+        if let Some(gate) = pipe.pause_after_ready.lock().await.take() {
+            tokio::select! {_=gate=>{},_=pipe.cancel.cancelled()=>return Err(Error::Cancelled)}
+        }
+        let mut written = self.file.offset;
+        let mut failed = None;
+        loop {
+            let frame = pipe.next().await?;
+            match protocol::decode_data(&frame.bytes)? {
+                Data::Chunk {
+                    id: actual,
+                    offset,
+                    bytes,
+                } if actual == id
+                    && offset == written
+                    && offset + bytes.len() as u64 <= self.end =>
+                {
+                    let next = offset + bytes.len() as u64;
+                    #[allow(unused_mut)]
+                    let mut bytes = BytesMut::from(bytes);
+                    drop(frame);
+                    #[cfg(test)]
+                    if pipe.corrupt_next_slice.swap(false, Ordering::Relaxed) {
+                        bytes[0] ^= 0xff;
+                    }
+                    if failed.is_none() {
+                        let writer = self.file.writer.as_mut().ok_or(Error::Closed)?;
+                        match tokio::time::timeout(PROGRESS_TIMEOUT, writer.write(offset, bytes))
+                            .await
+                            .map_err(|_| Error::Timeout)?
+                        {
+                            Ok(done) if done == next => {}
+                            Ok(_) => return Err(Error::Protocol),
+                            Err(Error::Io) => failed = Some(Error::Io),
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    written = next;
+                    pipe.send(Data::Ack { id, offset: written }).await?;
+                }
+                Data::Finish { id: actual, hash }
+                    if actual == id && written == self.end && hash == self.file.resource.sha256 =>
+                {
+                    drop(frame);
+                    let slice = match failed {
+                        Some(error) => Err(error),
+                        None if written == self.file.resource.size_bytes => {
+                            let writer = self.file.writer.take().ok_or(Error::Closed)?;
+                            match tokio::time::timeout(PROGRESS_TIMEOUT, writer.finish(hash.clone()))
+                                .await
+                                .map_err(|_| Error::Timeout)?
+                            {
+                                Ok(verified) => Ok(Slice::Verified(verified)),
+                                Err(error @ (Error::Integrity | Error::Io)) => Err(error),
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        None => {
+                            let writer = self.file.writer.as_mut().ok_or(Error::Closed)?;
+                            match tokio::time::timeout(PROGRESS_TIMEOUT, writer.checkpoint())
+                                .await
+                                .map_err(|_| Error::Timeout)?
+                            {
+                                Ok(_) => Ok(Slice::Partial(written)),
+                                Err(Error::Io) => Err(Error::Io),
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    };
+                    pipe.send(Data::Complete {
+                        id,
+                        offset: written,
+                        hash,
+                    })
+                    .await?;
+                    self.active.completed = true;
+                    if slice.is_ok() {
+                        self.file.offset = written;
+                    }
+                    return slice;
                 }
                 _ => return Err(Error::Protocol),
             }

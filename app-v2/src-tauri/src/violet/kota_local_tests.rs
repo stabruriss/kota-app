@@ -163,6 +163,25 @@ fn assistant_entry(id: &str, parent: &str, timestamp: &str, text: &str) -> JsonV
 }
 
 #[test]
+fn history_image_only_tool_row_remains_a_cursor_and_parent_after_projection() {
+    let project = LocalProject::new("history-empty-tool");
+    let input = custom_entry("input", None, "kota.user", json!("Visible input"),
+        kota_input_details("image-history", "2026-10-02T00:05:00Z", false));
+    let entries = vec![input, json!({"id":"empty-tool","parentId":"input","type":"message",
+        "timestamp":"2026-10-02T00:05:01Z","message":{"role":"toolResult","toolName":"read","content":[]}})];
+    let mut read = full_read(&entries, "empty-tool"); read.recovery = true;
+    let outcome = ingest_entries(&project.scope(1), &read).unwrap();
+    assert_eq!(outcome.examined, 2);
+    assert_eq!(outcome.cursor.as_deref(), Some("empty-tool"));
+    assert_eq!(entries[1]["message"]["content"], json!([]));
+    let reply = vec![assistant_entry("reply", "empty-tool", "2026-10-02T00:05:02Z", "Reply after image")];
+    ingest_entries(&project.scope(1), &since_read(&reply, "reply", "empty-tool")).unwrap();
+    assert!(project.texts().contains(&"Reply after image".into()));
+    ingest_entries(&project.scope(1), &since_read(&reply, "reply", "empty-tool")).unwrap();
+    assert_eq!(project.texts().iter().filter(|text| text.as_str() == "Reply after image").count(), 1);
+}
+
+#[test]
 fn long_local_endturn_saves_full_markdown_once_with_bounded_history() {
     let project = LocalProject::new("overflow");
     let full = format!("{}LOCAL_FULL_TAIL", "文🙂".repeat(11_000));

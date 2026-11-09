@@ -23,6 +23,7 @@ impl Drop for DreamFixture {
 fn inbox_entry(home: &Path, root: &Path, agent: &str, text: Option<&str>) -> crate::dream_entry::Entry {
     fs::create_dir_all(root).unwrap();
     let env = crate::soul::cli::Env {
+        project_root: None,
         agent_cwd: root.join(".agent-workspaces").join(agent), kota_home: home.to_path_buf(),
         agent_id: agent.into(), project: None, jev_ready: Some(false),
     };

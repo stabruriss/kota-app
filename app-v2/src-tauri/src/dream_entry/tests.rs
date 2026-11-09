@@ -24,6 +24,7 @@ impl Fixture {
             kota_home: self.home(),
             agent_id: "agent-fixture".into(),
             project: Some("project-fixture".into()),
+            project_root: None,
             jev_ready: Some(false),
         }
     }

@@ -4,21 +4,62 @@
 use super::*;
 use crate::bbs_sync::{
     self, reconcile,
-    transport::{Cancellation, LocalIo, Resource, ResourceKind, VerifiedFile},
+    transport::{resumable_partial_name, Cancellation, LocalIo, Resource, ResourceKind, VerifiedFile},
     AttachmentRef, AttachmentState, AvatarSidecar, FileStamp, LedgerEntry, Manifest, ManifestPhase,
     PostVersion, StateStore, SyncState, ThreadRecord, ThreadRecordItem, Tombstone, UnavailablePost,
     UnavailableReason,
 };
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::sync::{Arc, Mutex};
+use super::cache::Deps;
 
 mod deletions;
 mod inventory;
 mod mutations;
 mod unavailable;
+mod state_cache;
 pub use unavailable::UnavailableView;
 pub(super) use unavailable::PLACEHOLDER_TEXT;
 #[cfg(test)]
 mod tests;
+
+/// Memory only: received attachments whose last attempt failed verification or
+/// was refused by the source. They show as paused until the next full catalog
+/// or Manual round retries them; any other outcome shows as pending.
+static PAUSED_ATTACHMENTS: std::sync::Mutex<BTreeSet<String>> =
+    std::sync::Mutex::new(BTreeSet::new());
+fn paused_key(post: &str, version: &str, attachment: &str, sha256: &str) -> String {
+    format!("{post}/{version}/{attachment}/{sha256}")
+}
+pub(crate) fn mark_attachment_paused(resource: &Resource, paused: bool) {
+    let ResourceKind::Attachment { post_id, version_id, attachment_id, .. } = &resource.identity
+    else {
+        return;
+    };
+    let key = paused_key(post_id, version_id, attachment_id, &resource.sha256);
+    if let Ok(mut set) = PAUSED_ATTACHMENTS.lock() {
+        if paused {
+            set.insert(key);
+        } else {
+            set.remove(&key);
+        }
+    }
+}
+pub(crate) fn attachment_paused(post: &str, version: &str, attachment: &str, sha256: &str) -> bool {
+    PAUSED_ATTACHMENTS
+        .lock()
+        .is_ok_and(|set| set.contains(&paused_key(post, version, attachment, sha256)))
+}
+/// Applied whenever views are read, never inside a file-dependency cache.
+pub(super) fn apply_paused(post: &str, version: &str, views: &mut [BbsAttachmentView]) {
+    for view in views {
+        if view.sync_state == Some("pending")
+            && attachment_paused(post, version, &view.attachment.id, &view.attachment.sha256)
+        {
+            view.sync_state = Some("paused");
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ContentStore {
@@ -26,6 +67,7 @@ pub(crate) struct ContentStore {
     pub(crate) state: StateStore,
     account: PathBuf,
     receiving_peer: Option<String>,
+    state_cache: Arc<Mutex<state_cache::StateCache>>,
 }
 impl ContentStore {
     pub(crate) fn at(root: PathBuf, account: PathBuf) -> Self {
@@ -34,6 +76,7 @@ impl ContentStore {
             root,
             account,
             receiving_peer: None,
+            state_cache: Arc::new(Mutex::new(state_cache::StateCache::default())),
         }
     }
     pub(crate) fn account() -> Self {
@@ -61,6 +104,10 @@ impl ContentStore {
     /// Every relative component is constructed from a validated logical ID or
     /// a fixed BBS directory name. Existing symlinks are never followed.
     pub(super) fn managed(&self, relative: &Path, parents: bool) -> Result<PathBuf> {
+        self.managed_tracked(relative, parents, &mut Deps::untracked())
+    }
+    pub(super) fn managed_tracked(&self, relative: &Path, parents: bool, deps: &mut Deps) -> Result<PathBuf> {
+        deps.stat(&self.root);
         let mut path = self.root.canonicalize()?;
         let components = relative.components().collect::<Vec<_>>();
         for (index, component) in components.iter().enumerate() {
@@ -69,6 +116,7 @@ impl ContentStore {
             };
             path.push(name);
             let parent = index + 1 < components.len();
+            deps.stat(&path);
             match fs::symlink_metadata(&path) {
                 Ok(meta) if meta.file_type().is_symlink() || (parent && !meta.is_dir()) => {
                     bail!("unsafe_sync_path")
@@ -123,13 +171,20 @@ impl ContentStore {
             .join(format!("{version}.json")))
     }
     pub(super) fn state_locked(&self, _lock: &BbsWriteLock) -> Result<SyncState> {
-        self.state
-            .load_state()
-            .map_err(anyhow::Error::msg)
-            .map(Option::unwrap_or_default)
+        Ok(self.state_cache.lock().unwrap().read(&self.state)?.unwrap_or_default())
     }
     pub(super) fn save_locked(&self, _lock: &BbsWriteLock, state: &SyncState) -> Result<()> {
-        self.state.save_state(state).map_err(anyhow::Error::msg)
+        let mut cache = self.state_cache.lock().unwrap();
+        // The caller holds the same cross-process content flock as every
+        // mutation. Reconcile external replacements before comparing content.
+        if cache.matches(&self.state, state)? {
+            return Ok(());
+        }
+        self.state.save_state(state).map_err(anyhow::Error::msg)?;
+        // Refill on the next read, pairing bytes and a pre-read stamp. A stat
+        // after writing must not attach a manual replacement's stamp to ours.
+        cache.saved();
+        Ok(())
     }
 }
 
@@ -430,8 +485,18 @@ impl ContentStore {
         post: &LoadedPost,
         state: Option<&SyncState>,
     ) -> Vec<BbsAttachmentView> {
+        let mut views = self.attachment_views_tracked(post, state, &mut Deps::untracked());
+        apply_paused(&post.meta.post_id, &post.version_id, &mut views);
+        views
+    }
+    pub(super) fn attachment_views_tracked(
+        &self,
+        post: &LoadedPost,
+        state: Option<&SyncState>,
+        deps: &mut Deps,
+    ) -> Vec<BbsAttachmentView> {
         let received = self
-            .read_origin(&post.meta.thread_id, &post.meta.post_id, &post.version_id)
+            .read_origin_tracked(&post.meta.thread_id, &post.meta.post_id, &post.version_id, deps)
             .map(|o| o.is_some_and(|o| o.origin == "received"))
             .unwrap_or(true);
         let extra = (post.path.file_name().and_then(|s| s.to_str()) == Some("post.md"))
@@ -457,8 +522,9 @@ impl ContentStore {
             .zip(refs)
             .filter_map(|(entry, a)| {
                 let path = self
-                    .attachment_path(&post.meta.thread_id, &location, &a, false)
+                    .attachment_path_tracked(&post.meta.thread_id, &location, &a, false, deps)
                     .ok()?;
+                deps.stat(&path);
                 let observed = current_stamp(&path).ok().flatten();
                 let available = if received {
                     state
@@ -477,13 +543,24 @@ impl ContentStore {
                 } else {
                     observed.is_some_and(|m| m.len == a.size_bytes)
                 };
+                // File-derived, so safe in a tracked cache. The paused mark
+                // is memory only; `apply_paused` overlays it at read time.
+                let sync_state = (received && !available).then_some("pending");
                 Some(BbsAttachmentView {
                     attachment: entry.clone(),
                     local_path: path.display().to_string(),
                     available,
+                    sync_state,
                 })
             })
             .collect()
+    }
+    /// Read-only, for `kota-bbs show`: bytes already in this attachment's
+    /// resumable partial, if a transfer has started. Never creates directories.
+    pub(super) fn receiving_bytes(&self, sha256: &str, size_bytes: u64) -> Option<u64> {
+        let staging = self.managed(Path::new(".sync-staging"), false).ok()?;
+        let meta = fs::symlink_metadata(staging.join(resumable_partial_name(sha256, size_bytes))).ok()?;
+        (meta.is_file() && !meta.file_type().is_symlink()).then_some(meta.len())
     }
     fn read_origin(
         &self,
@@ -491,7 +568,17 @@ impl ContentStore {
         post: &str,
         version: &str,
     ) -> Result<Option<OriginSnapshot>> {
-        let path = self.managed(&Self::sidecar_relative(thread, post, version)?, false)?;
+        self.read_origin_tracked(thread, post, version, &mut Deps::untracked())
+    }
+    fn read_origin_tracked(
+        &self,
+        thread: &str,
+        post: &str,
+        version: &str,
+        deps: &mut Deps,
+    ) -> Result<Option<OriginSnapshot>> {
+        let path = self.managed_tracked(&Self::sidecar_relative(thread, post, version)?, false, deps)?;
+        deps.stat(&path);
         let Some(meta) = current_stamp(&path)? else {
             return Ok(None);
         };
@@ -680,7 +767,17 @@ impl ContentStore {
         version: &str,
         state: Option<&SyncState>,
     ) -> Option<AvatarView> {
-        let origin = match self.read_origin(thread, post, version) {
+        self.avatar_view_tracked(thread, post, version, state, &mut Deps::untracked())
+    }
+    pub(super) fn avatar_view_tracked(
+        &self,
+        thread: &str,
+        post: &str,
+        version: &str,
+        state: Option<&SyncState>,
+        deps: &mut Deps,
+    ) -> Option<AvatarView> {
+        let origin = match self.read_origin_tracked(thread, post, version, deps) {
             Ok(None) => {
                 // A local edit changes the raw hash before background inventory
                 // writes its new sidecar. Retain a known received origin in
@@ -690,7 +787,7 @@ impl ContentStore {
                         .values()
                         .filter(|r| r.thread_id == thread && r.post_id == post)
                         .filter_map(|r| {
-                            self.read_origin(thread, post, &r.version_id).ok().flatten()
+                            self.read_origin_tracked(thread, post, &r.version_id, deps).ok().flatten()
                         })
                         .find(|o| o.origin == "received")
                 });
@@ -711,9 +808,12 @@ impl ContentStore {
                 let sha256 = avatar.sha256.unwrap();
                 let ext = avatar.ext.unwrap();
                 let path = self
-                    .managed(&Path::new("avatars").join(format!("{sha256}.{ext}")), false)
+                    .managed_tracked(&Path::new("avatars").join(format!("{sha256}.{ext}")), false, deps)
                     .ok();
-                let metadata = path.as_ref().and_then(|p| current_stamp(p).ok()).flatten();
+                let metadata = path.as_ref().and_then(|p| {
+                    deps.stat(p);
+                    current_stamp(p).ok()
+                }).flatten();
                 let available = state.is_some_and(|state| {
                     state.ledger.values().any(|row| {
                         row.avatar_stamp.is_some()

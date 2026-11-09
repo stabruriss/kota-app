@@ -15,6 +15,7 @@ use std::{
 };
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
+mod note_progress;
 const T1: &str = "2026-10-14T07:02:11Z";
 const T2: &str = "2026-10-15T09:30:00Z";
 const T3: &str = "2026-10-16T01:00:00Z";
@@ -51,6 +52,7 @@ impl Fixture {
             kota_home: self.home(),
             agent_id: "agent-fixture".into(),
             project: Some("project-fixture".into()),
+            project_root: None,
             jev_ready: Some(jev),
         }
     }

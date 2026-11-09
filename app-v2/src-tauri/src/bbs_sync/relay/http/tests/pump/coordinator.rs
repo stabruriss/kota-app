@@ -488,6 +488,13 @@ async fn account_fixture(restart: bool, history: usize, recovery: bool, rendezvo
                 "manifestItems":engines.iter().map(|e|e.manifest_counts()).collect::<Vec<_>>()})
         };
         let initial_usage=usage();
+        // Inner Request/Response pairs of the first round, both directions.
+        let initial_rpcs=engines.iter().map(|e|e.rpc_requests()).sum::<u64>();
+        println!("BBS_INNER_RPC initialFull={initial_rpcs} history={history} restart={restart} recovery={recovery}");
+        if history==20 && !restart && !recovery && rendezvous.is_none() && wait.is_ok() {
+            // Open, 4+4 pages, 2 rosters, 1+1 bodies, Turn, Finish: the v4 count.
+            assert_eq!(initial_rpcs, 15, "v5 adds no stage, turn or refresh: {initial_usage}");
+        }
         if history>=1000 { eprintln!("BBS_DELTA_ACTOR_STAGE initialFull elapsedMs={} {}",watch_started.elapsed().as_millis(),initial_usage); }
         let mut changed_usage=Value::Null;
         let mut automatic_ok=restart || rendezvous.is_some();

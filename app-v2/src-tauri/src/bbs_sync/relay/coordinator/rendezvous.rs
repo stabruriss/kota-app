@@ -43,6 +43,30 @@ impl PeerRecovery {
 }
 
 impl Actor {
+    // Attach bounded scheduling facts to the existing started record. Do not
+    // log device IDs, revisions, wake IDs or content to diagnose an idle loop.
+    pub(super) fn round_reason(&self, id: &str, at: u64) -> serde_json::Value {
+        let checkpoint = self.engine.checkpoint(id).ok().flatten();
+        let item = self.item(id);
+        let revision_mismatch = item
+            .as_ref()
+            .and_then(|i| i.announcement.as_ref())
+            .map(|a| checkpoint.as_deref() != Some(a.revision.as_str()));
+        let fresh_wake = item.as_ref().is_some_and(|i| {
+            i.wake.as_ref().is_some_and(|w| {
+                w.expires_at > at && !self.seen_wakes.contains(id, &w.id, at)
+            }) && i.handshake.as_ref().is_some_and(|h| !h.closed)
+        });
+        serde_json::json!({
+            "forced": self.forced.contains(id),
+            "verification": self.verification.contains(id),
+            "full_catalog_due": self.engine.full_catalog_due(id),
+            "checkpoint_known": checkpoint.is_some(),
+            "revision_mismatch": revision_mismatch,
+            "fresh_wake": fresh_wake,
+            "change_pending": self.schedule.changed_at.is_some(),
+        })
+    }
     /// Isolated actor harness: prepare real local catalogs and publish them via
     /// its in-process relay before injecting capped failures at a fixed phase.
     /// This is not compiled into an App or a public diagnostics surface.
@@ -216,6 +240,7 @@ impl Actor {
         if a.peer_version != super::super::PEER_VERSION {
             return Err(Error::ProtocolVersion);
         }
+        let reason = self.round_reason(id, at);
         let mut attempt = Attempt {
             tag: uuid::Uuid::new_v4().to_string(),
             peer,
@@ -273,7 +298,7 @@ impl Actor {
                 .or_default()
                 .active_started(at);
         }
-        attempt.trace.event("started", None, 0);
+        attempt.trace.started(reason);
         self.attempts.insert(id.into(), attempt);
         self.schedule.busy(id, at);
         self.poll_at = self.poll_at.min(at + POLL_MS);
@@ -330,6 +355,7 @@ static NEXT_TRACE: AtomicU64 = AtomicU64::new(1);
 pub(super) struct Trace {
     id: u64,
     started: Instant,
+    pub(super) started_at: u64,
     pub(super) passive: bool,
     queued_ms: Option<u128>,
 }
@@ -340,10 +366,15 @@ impl Trace {
             "stage":"backoff", "error":error.to_string(), "retry_ms":retry_ms}),
         );
     }
+    pub(super) fn service_lapse(operation: &'static str) {
+        emit_log(serde_json::json!({"pid":std::process::id(), "stage":"failed",
+            "operation":operation, "error":Error::Unauthorized.to_string(), "cause":"lease_lapsed"}));
+    }
     pub(super) fn new(passive: bool, queued: Option<Instant>) -> Self {
         Self {
             id: NEXT_TRACE.fetch_add(1, Ordering::Relaxed),
             started: Instant::now(),
+            started_at: now(),
             passive,
             queued_ms: queued.map(|t| t.elapsed().as_millis()),
         }
@@ -361,6 +392,27 @@ impl Trace {
     }
     pub(super) fn event(&self, stage: &'static str, error: Option<Error>, retry_ms: u64) {
         emit_log(self.value(stage, error, retry_ms));
+    }
+    pub(super) fn failure_value(&self, error: Error, cause: Option<&str>) -> serde_json::Value {
+        let mut value = self.value("failed", Some(error), 0);
+        value["cause"] = serde_json::json!(cause);
+        value
+    }
+    pub(super) fn failed(&self, error: Error, cause: Option<&str>) {
+        emit_log(self.failure_value(error, cause));
+    }
+    fn started(&self, reason: serde_json::Value) {
+        let mut value = self.value("started", None, 0);
+        value["reason"] = reason;
+        emit_log(value);
+    }
+    pub(super) fn completed(&self, result: &exchange::Outcome) {
+        let mut value = self.value("completed", None, 0);
+        value["outcome"] = serde_json::json!({
+            "completed": result.completed, "total": result.total,
+            "failures": result.failures.len(), "omitted": result.omitted, "more": result.more,
+        });
+        emit_log(value);
     }
 }
 fn emit_log(value: serde_json::Value) {

@@ -9,6 +9,7 @@
    Remove keeps the owner uid (it identifies who may use the bridge,
    independent of which bot carries it). */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { cloudflareSummary } from '../lib/lm-cloudflare';
 import {
   lmClaimOwner,
   lmRevoke,
@@ -392,8 +393,10 @@ export function LaughingManSettings({ onChanged }: { onChanged?: () => void }) {
               <div className="lm-standby-status">
                 <span className="lm-standby-copy">
                   <b>{standby.workerUrl}</b>
-                  <small>
-                    {standby.lastError
+                  <small className={standby.cloudflare ? 'lm-cf-note' : undefined} title={standby.cloudflare?.message || undefined}>
+                    {standby.cloudflare
+                      ? cloudflareSummary(standby.cloudflare)
+                      : standby.lastError
                       ? standby.lastError
                       : standby.lastSyncAt
                         ? `last sync ${standby.lastSyncAt}`

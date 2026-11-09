@@ -4,7 +4,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Local, SecondsFormat};
@@ -539,47 +539,12 @@ impl AgentBusManager {
     }
 
     pub fn refresh_dispatch_watcher(&self, app: &AppHandle, project_root: &Path) -> Result<()> {
-        let outbox = dispatch_outbox_dir(project_root);
-        fs::create_dir_all(&outbox)?;
-        self.process_dispatch_outbox(app, project_root)?;
-
-        let key = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf());
-        let mut watchers = self
-            .dispatch_watchers
-            .lock()
-            .map_err(|_| anyhow!("agent bus dispatch watcher lock poisoned"))?;
-        if watchers
-            .get(&key)
-            .is_some_and(|existing| existing.watched_path == outbox)
-        {
-            return Ok(());
-        }
-
         let app_handle = app.clone();
         let project_root_for_callback = project_root.to_path_buf();
-        let last_process = std::sync::Arc::new(Mutex::new(
-            Instant::now()
-                .checked_sub(Duration::from_secs(60))
-                .unwrap_or_else(Instant::now),
-        ));
-        let last_process_for_callback = std::sync::Arc::clone(&last_process);
-        let mut watcher =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                let Ok(event) = res else {
-                    return;
-                };
-                if event.paths.is_empty() {
-                    return;
-                }
-                let now = Instant::now();
-                if let Ok(mut last) = last_process_for_callback.lock() {
-                    if now.duration_since(*last) < Duration::from_millis(250) {
-                        return;
-                    }
-                    *last = now;
-                }
+        self.refresh_dispatch_watcher_with(
+            project_root,
+            |root| self.process_dispatch_outbox(app, root),
+            move || {
                 let app_for_process = app_handle.clone();
                 let project_root_for_process = project_root_for_callback.clone();
                 thread::spawn(move || {
@@ -592,16 +557,54 @@ impl AgentBusManager {
                         ));
                     }
                 });
-            })?;
-        watcher.watch(&outbox, RecursiveMode::NonRecursive)?;
-        watchers.insert(
-            key,
-            AgentBusDispatchWatch {
-                _watcher: watcher,
-                watched_path: outbox,
             },
-        );
-        Ok(())
+        )
+    }
+
+    fn refresh_dispatch_watcher_with(
+        &self,
+        project_root: &Path,
+        drain_now: impl FnOnce(&Path) -> Result<()>,
+        on_event: impl Fn() + Send + 'static,
+    ) -> Result<()> {
+        let outbox = dispatch_outbox_dir(project_root);
+        fs::create_dir_all(&outbox)?;
+
+        let key = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        {
+            let mut watchers = self
+                .dispatch_watchers
+                .lock()
+                .map_err(|_| anyhow!("agent bus dispatch watcher lock poisoned"))?;
+            if !watchers
+                .get(&key)
+                .is_some_and(|existing| existing.watched_path == outbox)
+            {
+                let mut watcher =
+                    notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                        let Ok(event) = res else {
+                            return;
+                        };
+                        if event.paths.is_empty() {
+                            return;
+                        }
+                        // No throttle: rename claims keep concurrent drains idempotent, and a 250 ms throttle dropped a sender's follow-ups.
+                        on_event();
+                    })?;
+                watcher.watch(&outbox, RecursiveMode::NonRecursive)?;
+                watchers.insert(
+                    key,
+                    AgentBusDispatchWatch {
+                        _watcher: watcher,
+                        watched_path: outbox,
+                    },
+                );
+            }
+        }
+
+        drain_now(project_root)
     }
 
     fn process_dispatch_outbox(&self, app: &AppHandle, project_root: &Path) -> Result<()> {
@@ -1892,5 +1895,110 @@ mod ownership_delivery_tests {
         let room = violet::read_cache(&root, serde_json::from_value(serde_json::json!({})).unwrap()).unwrap();
         assert_eq!(room.messages.iter().filter(|item| item.native_event_id.as_deref() == Some(message.event_id.as_str())).count(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_watchers_register_all_workspaces_dispatch_unshown_outbox_and_stay_idempotent() {
+        use std::sync::{mpsc, Arc};
+
+        let temp = std::env::temp_dir().join(format!("kota-bus-startup-{}", Uuid::new_v4()));
+        let cedar = temp.join("cedar-alpha");
+        let maple = temp.join("maple-beta");
+        fs::create_dir_all(&cedar).unwrap();
+        fs::create_dir_all(&maple).unwrap();
+
+        // Pre-existing outbox backlog in unshown project `maple-beta` before startup registration.
+        let backlog = AgentBusDispatchFile {
+            schema: DISPATCH_SCHEMA.into(),
+            created_at: now_iso(),
+            project_root: path_string(&maple),
+            sender_agent_id: "agent-birch".into(),
+            sender_name: Some("Birch".into()),
+            target: "agent-heron".into(),
+            intent: "handoff".into(),
+            text: "backlog before startup".into(),
+            event_id: "agentbus-agent-birch-agent-heron-backlog00001".into(),
+            dedupe_key: "agentbus-agent-birch-agent-heron-backlog00001".into(),
+        };
+        enqueue_dispatch(&maple, &backlog).unwrap();
+
+        let bus = Arc::new(AgentBusManager::default());
+        let (tx, rx) = mpsc::channel::<String>();
+        let drain_root = |bus: &AgentBusManager, root: &Path, tx: &mpsc::Sender<String>| {
+            let mut delivered = Vec::new();
+            let res = bus.process_dispatch_outbox_with(root, |path| {
+                let text = fs::read_to_string(path)?;
+                let req: AgentBusDispatchFile = serde_json::from_str(&text)?;
+                delivered.push(req.event_id.clone());
+                Ok(AgentBusSendResult {
+                    event_id: req.event_id,
+                    target_agent_id: req.target,
+                    submitted: true,
+                    skipped_reason: None,
+                    duplicate: false,
+                })
+            });
+            for id in delivered {
+                let _ = tx.send(id);
+            }
+            res
+        };
+        let refresh = |root: &Path| {
+            let bus_for_event = Arc::clone(&bus);
+            let root_for_event = root.to_path_buf();
+            let tx_for_now = tx.clone();
+            let tx_for_event = tx.clone();
+            bus.refresh_dispatch_watcher_with(
+                root,
+                |r| drain_root(&bus, r, &tx_for_now),
+                move || {
+                    let _ = drain_root(&bus_for_event, &root_for_event, &tx_for_event);
+                },
+            )
+            .unwrap();
+        };
+
+        // 1) Startup loop registers watchers for every workspace and synchronously drains unshown project's backlog.
+        for root in [&cedar, &maple] {
+            refresh(root);
+        }
+        assert_eq!(bus.dispatch_watchers.lock().unwrap().len(), 2);
+        assert_eq!(rx.try_recv().unwrap(), backlog.event_id);
+        assert!(dispatch_delivered_dir(&maple)
+            .join(format!("{}.json", backlog.event_id))
+            .is_file());
+
+        // 2) Repeated refresh calls (e.g. later room sync) are idempotent: watcher count stays 2, no re-delivery.
+        for root in [&cedar, &maple] {
+            refresh(root);
+        }
+        assert_eq!(bus.dispatch_watchers.lock().unwrap().len(), 2);
+        assert!(rx.try_recv().is_err());
+
+        // 3) Live CLI enqueue in unshown project `cedar-alpha` is picked up by the notify watcher and delivered.
+        let live = AgentBusDispatchFile {
+            schema: DISPATCH_SCHEMA.into(),
+            created_at: now_iso(),
+            project_root: path_string(&cedar),
+            sender_agent_id: "agent-birch".into(),
+            sender_name: Some("Birch".into()),
+            target: "agent-heron".into(),
+            intent: "handoff".into(),
+            text: "live message in unshown project".into(),
+            event_id: "agentbus-agent-birch-agent-heron-live00000002".into(),
+            dedupe_key: "agentbus-agent-birch-agent-heron-live00000002".into(),
+        };
+        enqueue_dispatch(&cedar, &live).unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            live.event_id
+        );
+        assert!(dispatch_delivered_dir(&cedar)
+            .join(format!("{}.json", live.event_id))
+            .is_file());
+
+        // Stop the watchers first: an unthrottled late drain could recreate dirs mid-removal.
+        bus.dispatch_watchers.lock().unwrap().clear();
+        fs::remove_dir_all(temp).unwrap();
     }
 }

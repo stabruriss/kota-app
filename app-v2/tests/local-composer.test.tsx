@@ -74,7 +74,7 @@ async function mount(ids = [localId], extraWorkspaces: pty.WorkspaceProject[] = 
   vi.spyOn(pty, 'loadProjectAgentDetail').mockImplementation(async ({ agentId }) => detail(agentId));
   if (!vi.isMockFunction(pty.peekVioletRoomMessages)) vi.spyOn(pty, 'peekVioletRoomMessages').mockReturnValue([]);
   if (!vi.isMockFunction(pty.readVioletRoomCache)) vi.spyOn(pty, 'readVioletRoomCache').mockResolvedValue(cachedRoom());
-  vi.spyOn(pty, 'listAgentPtys').mockResolvedValue([]);
+  if (!vi.isMockFunction(pty.listAgentPtys)) vi.spyOn(pty, 'listAgentPtys').mockResolvedValue([]);
   vi.spyOn(pty, 'resolveProjectAgentLaunch').mockImplementation(async ({ agentId }) => ({ status: 'ready', request: agent(agentId) }));
   const check = vi.spyOn(pty, 'checkProjectAgentSession').mockResolvedValue(true);
   vi.spyOn(local, 'localSnapshot').mockResolvedValue({ scope: { projectRoot: root, agentId: localId, sessionId: 'fixture-session', epoch: 1 },
@@ -952,4 +952,27 @@ it('wires composer overrides through Local submit and takeover, keeps them stick
   expect(submit.mock.calls[3][0]).not.toHaveProperty('routeModel');
   await userEvent.click(screen.getByTestId(`chip-${terminalId}`));
   await waitFor(() => expect(screen.queryByTestId('composer-model-controls')).not.toBeInTheDocument());
+});
+
+it('sends directly to a terminal agent reported running by pty_agent_list without prompting Wake sleeping agent?', async () => {
+  vi.spyOn(pty, 'listAgentPtys').mockResolvedValue([
+    {
+      agentId: terminalId,
+      cli: 'codex',
+      cwd: `${root}/.agent-workspaces/${terminalId}`,
+      projectRoot: root,
+      projectId: 'fixture-local-composer',
+      running: true,
+    },
+  ]);
+  const { submit, spawn, terminalSubmit } = await mount([localId, terminalId]);
+  await userEvent.click(screen.getByTestId('ib-target-pill'));
+  const picker = await screen.findByTestId('broadcast-target-popover');
+  await userEvent.click(within(picker).getByText('Silver'));
+  await userEvent.click(screen.getByTestId('broadcast-confirm'));
+  await send('Already running in backend');
+  await waitFor(() => expect(terminalSubmit).toHaveBeenCalledOnce());
+  expect(submit).toHaveBeenCalledOnce();
+  expect(screen.queryByRole('dialog', { name: 'Wake sleeping agent?' })).not.toBeInTheDocument();
+  expect(spawn).not.toHaveBeenCalled();
 });

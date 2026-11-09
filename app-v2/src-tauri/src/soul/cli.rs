@@ -36,6 +36,7 @@ pub(crate) struct Env {
     pub kota_home: PathBuf,
     pub agent_id: String,
     pub project: Option<String>,
+    pub project_root: Option<PathBuf>,
     /// `Some` is injected by tests; `None` asks the Jev store (read-only, never the key).
     pub jev_ready: Option<bool>,
 }
@@ -89,6 +90,7 @@ impl Env {
                 kota_home,
                 agent_id,
                 project,
+                project_root: Some(project_root),
                 jev_ready: None,
             });
         }
@@ -100,7 +102,7 @@ impl Env {
             .ok_or_else(|| anyhow!("kota-my-soul requires KOTA_AGENT_ID or --agent-id"))?;
         let project_root = value("--project-root", "KOTA_PROJECT_ROOT").map(PathBuf::from);
         let project = project_slug(value("--project-id", "KOTA_PROJECT_ID").as_deref(), project_root.as_deref());
-        Ok(Self { agent_cwd, kota_home, agent_id, project, jev_ready: None })
+        Ok(Self { agent_cwd, kota_home, agent_id, project, project_root, jev_ready: None })
     }
 
     /// The gate Puppeteer uses: the selected Jev channel holds a verified key.
@@ -192,16 +194,25 @@ pub(crate) fn run(args: &[String], env: &Env, stdin: &str, ts: &str) -> Result<S
         "add-mark" => {
             let text = text_after(args, 1).unwrap_or_else(|| stdin.to_string());
             Ok(match marks::add(&paths, &text, env.project.clone(), ts)? {
-                marks::Added::Added { id, marks } => with_list(
-                    format!(
-                        "Added {id} (revision {}). {} of {} marks in use.",
-                        marks.revision,
-                        marks.marks.len(),
-                        marks::MARK_LIMIT
-                    ),
-                    &marks,
-                    env,
-                ),
+                marks::Added::Added { id, marks } => {
+                    // add() has committed and released the Soul lock. A room notification
+                    // must never turn this successful write into an error/retry.
+                    if let Some(mark) = marks.find(&id) {
+                        if let Err(error) = record_note(env, mark, marks.revision) {
+                            crate::kota_debug_log(&format!("[soul] note progress: {error}"));
+                        }
+                    }
+                    with_list(
+                        format!(
+                            "Added {id} (revision {}). {} of {} marks in use.",
+                            marks.revision,
+                            marks.marks.len(),
+                            marks::MARK_LIMIT
+                        ),
+                        &marks,
+                        env,
+                    )
+                },
                 marks::Added::Limit => LIMIT_REPLY.into(),
                 marks::Added::Empty => EMPTY_TEXT_REPLY.into(),
                 marks::Added::TooLong(chars) => too_long(chars),
@@ -243,6 +254,16 @@ pub(crate) fn run(args: &[String], env: &Env, stdin: &str, ts: &str) -> Result<S
         }
         _ => Err(format!("unknown kota-my-soul command: {verb}\n{HELP}")),
     }
+}
+
+fn record_note(env: &Env, mark: &marks::Mark, revision: u64) -> Result<(), String> {
+    let Some(project_root) = &env.project_root else { return Ok(()); };
+    let text = fs::read_to_string(env.agent_cwd.join("SHELL.yaml")).map_err(|e| e.to_string())?;
+    let shell = crate::parse_shell_yaml(&text)?;
+    let identity = crate::read_yaml_mapping(&env.agent_cwd.join("agent.yaml"))?;
+    let cli = crate::cli_from_project_agent_files(&env.agent_cwd, &shell, &identity)?;
+    crate::violet::record_note_added(project_root, &env.agent_id, crate::shell_name_for_cli(cli), mark, revision)?;
+    Ok(())
 }
 
 fn id_argument(args: &[String], at: usize) -> Result<String, String> {

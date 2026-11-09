@@ -48,7 +48,10 @@ pub(super) struct Reply {
 }
 impl Reply {
     pub(super) fn error(&self) -> Error {
-        super::response::rejected(
+        self.failure().0
+    }
+    pub(super) fn failure(&self) -> (Error, Option<String>) {
+        super::response::failure(
             self.status,
             &self.headers,
             self.body.as_ref().map_or(&[], Payload::bytes),

@@ -1789,6 +1789,42 @@ describe('M1 · canvas shell landmarks', () => {
     expect(onProgress).toHaveBeenCalledTimes(1);
   });
 
+  it('takes Bartender status pushes for its own project and never polls', async () => {
+    vi.useFakeTimers();
+    const workspace = hydrationWorkspace('push-fixture', []);
+    const status: ptyClient.BartenderStatus = {projectId:workspace.projectId,sourceDir:workspace.sourceDir,defaultBranch:'main',roomChangeCount:2,sourceChangeCount:0,githubChangeCount:0,githubBehindCount:0,githubNeedsInitialPush:false,githubPushBranch:null,githubInitialPushCommitCount:0,dirtyAgents:[],checkedAt:new Date().toISOString(),state:'roomDiff',message:'2 changed files waiting in agent worktrees.'};
+    const read = vi.spyOn(ptyClient, 'bartenderStatus').mockResolvedValue(status);
+    vi.spyOn(ptyClient, 'bartenderFetch').mockResolvedValue({ ok: true, message: 'Fetched GitHub.', status });
+    let push: (payload: ptyClient.BartenderStatus) => void = () => {};
+    const subscribe = vi.spyOn(ptyClient, 'onBartenderStatusChangedEvent').mockImplementation(async (callback) => {
+      push = callback;
+      return async () => {};
+    });
+    try {
+      const view = render(<RightColumn sceneKey="conversation" workspace={workspace} workingAgents={new Set()} onOpenHotMem={vi.fn()} />);
+      // Startup settles (conflict prompts load and rebuild the request), then the panel goes quiet.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(screen.getByRole('button', { name: 'Sync 2 changed files in room' })).toBeInTheDocument();
+      const settledReads = read.mock.calls.length;
+      expect(settledReads).toBeGreaterThan(0);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(read).toHaveBeenCalledTimes(settledReads);
+
+      await act(async () => { push({ ...status, projectId: 'other', roomChangeCount: 9 }); });
+      expect(screen.getByRole('button', { name: 'Sync 2 changed files in room' })).toBeInTheDocument();
+      await act(async () => { push({ ...status, roomChangeCount: 5, message: '5 changed files waiting in agent worktrees.' }); });
+      expect(screen.getByRole('button', { name: 'Sync 5 changed files in room' })).toBeInTheDocument();
+
+      // A hired agent changes the agent set: one more read, which Bartender answers by reconciling.
+      view.rerender(<RightColumn sceneKey="conversation" workspace={{ ...workspace, agents: [hydrationAgent('alice', workspace.localRoot)] }} workingAgents={new Set()} onOpenHotMem={vi.fn()} />);
+      await act(async () => {});
+      expect(read).toHaveBeenCalledTimes(settledReads + 1);
+      expect(subscribe).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('releases an external Bartender sync whose durable receipt never arrives', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-07-09T20:00:00Z'));
@@ -5405,6 +5441,7 @@ describe('M6.A · quick incarnate picker', () => {
     const spawn = vi.spyOn(ptyClient, 'spawnAgentPty');
     render(<App />);
     await userEvent.click(screen.getByTestId('seat-violet'));
+    await userEvent.click(screen.getByRole('tab', { name: 'Other Project' }));
     await userEvent.click(await screen.findByRole('button', { name: /^mock\/Atlas/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'Rowan' }));
     await screen.findByRole('alertdialog', { name: 'Reincarnate Rowan?' });
@@ -6661,6 +6698,35 @@ describe('Project agent hydration recovery', () => {
       restoreStorage: storage.restore,
     };
   }
+
+  it('opens notes with the same project target as the agent detail entry', async () => {
+    const workspace = hydrationWorkspace('notes-target', ['agent-alpha']);
+    const { restoreStorage } = mockWorkspaceBootstrap(workspace);
+    vi.spyOn(ptyClient, 'inspectProjectAgentIdentities').mockResolvedValue({
+      identities: [hydrationIdentity('agent-alpha', 'Alpha')], workspaceEntryCount: 1,
+    });
+    const loadDetail = vi.spyOn(ptyClient, 'loadProjectAgentDetail').mockResolvedValue({
+      ...hydrationDetail('agent-alpha', workspace.localRoot, 'Alpha'),
+      notes: { exists: true, path: `${workspace.localRoot}/.agent-workspaces/agent-alpha/under-table/soul/marks.json` },
+    });
+    vi.spyOn(ptyClient, 'listAccountSkills').mockResolvedValue([]);
+    vi.spyOn(ptyClient, 'supportedShellsStatus').mockResolvedValue([]);
+    const open = vi.spyOn(ptyClient, 'openProjectAgentNotes').mockResolvedValue();
+    const view = render(<App />);
+    try {
+      await screen.findByTestId('chip-agent-alpha');
+      await waitFor(() => expect(view.container.querySelector('.stage')).not.toHaveAttribute('aria-busy'));
+      fireEvent.contextMenu(screen.getByTestId('chip-agent-alpha'));
+      await userEvent.click(within(screen.getByRole('menu')).getByText('Detail'));
+      const dialog = await screen.findByRole('dialog', { name: 'Project agent detail' });
+      const button = within(dialog).getByRole('button', { name: 'View notes' });
+      await waitFor(() => expect(button).toBeEnabled());
+      await userEvent.click(button);
+      const detailTarget = loadDetail.mock.calls.at(-1)![0];
+      expect(detailTarget).toEqual({ agentId: 'agent-alpha', projectRoot: null });
+      expect(open).toHaveBeenCalledExactlyOnceWith(detailTarget);
+    } finally { view.unmount(); restoreStorage(); }
+  });
 
   describe('Saved provider Fresh confirmation', () => {
     async function openProviderDetail() {

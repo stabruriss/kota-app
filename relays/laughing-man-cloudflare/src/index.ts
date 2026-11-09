@@ -4,7 +4,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { BbsGroup, routeBbs } from './bbs_group';
 export { BbsGroup } from './bbs_group';
 
-const RELAY_VERSION = '0.1.4';
+const RELAY_VERSION = '0.1.5';
 const PROTOCOL_VERSION = 'kota-lm-standby.v1';
 const ONLINE_GRACE_MS = 90_000;
 const MAX_PULL_LIMIT = 50;
@@ -707,7 +707,25 @@ export class RelayState extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (new URL(request.url).pathname.startsWith('/bbs/')) return routeBbs(request, env);
-    const id = env.RELAY_STATE.idFromName('kota-laughing-man-standby');
-    return env.RELAY_STATE.get(id).fetch(request);
+    try {
+      const id = env.RELAY_STATE.idFromName('kota-laughing-man-standby');
+      return await env.RELAY_STATE.get(id).fetch(request);
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      const quota = raw.match(/Exceeded allowed (.+?) in Durable Objects free tier/i);
+      const reset = new Date(Date.now());
+      reset.setUTCHours(24, 0, 0, 0);
+      const flags = error as { retryable?: unknown; overloaded?: unknown } | null;
+      return json({
+        ok: false,
+        error: 'cloudflare_limit',
+        source: 'durable_objects',
+        limit: quota?.[1] ?? null,
+        message: Array.from(raw).slice(0, 200).join(''),
+        resetAt: quota ? reset.toISOString() : null,
+        retryable: typeof flags?.retryable === 'boolean' ? flags.retryable : null,
+        overloaded: typeof flags?.overloaded === 'boolean' ? flags.overloaded : null,
+      }, { status: 503 });
+    }
   },
 };

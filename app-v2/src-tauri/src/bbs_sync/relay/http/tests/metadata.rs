@@ -598,3 +598,39 @@ async fn ready_and_dual_open_use_http_queues_before_real_mutual_tls() {
         4
     );
 }
+
+#[tokio::test]
+async fn diagnosed_metadata_preserves_worker_cause_but_not_a_local_revocation() {
+    let rig = Rig::new(0).await;
+    let f = fixture();
+    let call = rig.client.ready(&f.contexts[0], f.now, deadline()).unwrap();
+    rig.script.push(409, json!({"ok":false,"error":"relay_wake_changed"}));
+    match call.diagnosed(None).await {
+        Err((error, cause)) => {
+            assert_eq!(error, Error::RelaySessionLost);
+            assert_eq!(cause.as_deref(), Some("worker:relay_wake_changed"));
+        }
+        _ => panic!("expected classified Worker rejection"),
+    }
+    rig.allowed.store(false, Ordering::Release);
+    assert!(matches!(call.diagnosed(None).await, Err((Error::Unauthorized, None))));
+    assert_eq!(rig.script.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn received_worker_refusal_keeps_its_proof_when_authority_expires_before_consumption() {
+    for rejected in [false, true] {
+        let rig = Rig::new(0).await;
+        let f = fixture();
+        let call = rig.client.ready(&f.contexts[0], f.now, deadline()).unwrap();
+        if rejected { rig.script.push(401, json!({"ok":false,"error":"unauthorized"})); }
+        else { rig.script.push(200, json!({"boot":f.contexts[0].boot,"ready":true})); }
+        let reply = call.submit().unwrap().wait().await.unwrap();
+        rig.allowed.store(false, Ordering::Release);
+        match call.received(reply) {
+            Err((Error::Unauthorized, cause)) => assert_eq!(cause.as_deref(),
+                rejected.then_some("worker:unauthorized")),
+            _ => panic!("expired authority must never consume even a successful reply"),
+        }
+    }
+}

@@ -11,6 +11,13 @@ use base64::Engine as _;
 
 #[tokio::test]
 async fn relay_carrier_preserves_real_two_way_forks_attachments_rosters_and_reuse() {
+    relay_carrier(false).await;
+}
+#[tokio::test]
+async fn expired_full_catalog_uses_delta_over_real_v4_tls() {
+    relay_carrier(true).await;
+}
+async fn relay_carrier(expired_v4: bool) {
     let f = fixture();
     let (_a, sa, mut fa) = content::tests::board(&f.contexts[0].peer.local_membership_id);
     let (_b, sb, mut fb) = content::tests::board(&f.contexts[1].peer.local_membership_id);
@@ -92,12 +99,19 @@ async fn relay_carrier_preserves_real_two_way_forks_attachments_rosters_and_reus
                     }
                 }));
             Arc::get_mut(&mut engine).unwrap().roster = Some(runtime);
+            if expired_v4 {
+                // The production relay actor registers peer catalog scopes the
+                // same way; without it this direct fixture never has a baseline.
+                engine.catalog_members([f.contexts[i].peer.clone()]);
+            }
             engine.refresh(&Cancellation::default()).await?;
             engines.push(engine);
         }
+        let tls_at = Instant::now();
         let (a, mut arx) = activity::run(activity::take(&mut pair.nodes[0]));
         let (b, mut brx) = activity::run(activity::take(&mut pair.nodes[1]));
         let channels = [activity::ready(&mut arx).await, activity::ready(&mut brx).await];
+        let tls_elapsed = tls_at.elapsed().as_millis();
         let mut links = Vec::new();
         for (i, channels) in channels.into_iter().enumerate() {
             let connection = channels.into_connection()?;
@@ -128,7 +142,25 @@ async fn relay_carrier_preserves_real_two_way_forks_attachments_rosters_and_reus
             }
         }
         until(|| links.iter().all(|link| !link.active())).await;
+        let before_delta = [engines[0].manifest_counts(), engines[1].manifest_counts()];
+        if expired_v4 {
+            for engine in &engines { engine.refresh(&Cancellation::default()).await?; }
+            engines[0].expire_full_catalog(&links[0].remote);
+            assert!(engines[0].full_catalog_due(&links[0].remote));
+        }
+        let incremental_at = Instant::now();
         let second = tokio::time::timeout(Duration::from_secs(60), links[0].round()).await.unwrap()?;
+        if expired_v4 {
+            for (engine, before) in engines.iter().zip(before_delta) {
+                // Full would offer both forks; delta offers just the opposite
+                // fork learned in round one. No content is silently omitted.
+                assert_eq!(engine.manifest_counts()[2] - before[2], 1);
+            }
+            assert!(engines[0].full_catalog_due(&links[0].remote), "repair is deferred, not forgiven");
+            println!("BBS_V4_EXPIRED_DELTA {}", json!({"tls_ms":tls_elapsed,
+                "incremental_ms":incremental_at.elapsed().as_millis(), "cloudflare":false,
+                "discovery":"covered separately by the coordinator snapshot gate"}));
+        }
         assert_eq!((second.completed, second.total), (0, 0));
         assert!(second.failures.is_empty() && !second.more);
         until(|| links.iter().all(|link| !link.active())).await;

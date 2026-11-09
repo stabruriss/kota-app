@@ -8,6 +8,8 @@ use crate::bbs_sync::{
 
 mod rendezvous;
 mod rendezvous_guards;
+mod refresh;
+mod lease;
 
 struct Rig {
     _root: exchange::tests::Root,
@@ -392,7 +394,7 @@ async fn healthy_idle_polls_break_the_failure_streak_instead_of_accumulating_min
     for _ in 0..7 {
         // Separate incidents with successful polls, not seven consecutive
         // failures. No socket or clock sleep is involved in this state test.
-        r.actor.meta_done(MetaDone::Poll(Err(Error::Timeout))).unwrap();
+        r.actor.meta_done(MetaDone::Poll(Err((Error::Timeout, None)))).unwrap();
         assert!(r.actor.service_retry() <= now() + 5000,
             "healthy intervals must not accumulate to the 300-second cap");
         r.actor.meta_done(MetaDone::Poll(Ok(Snapshot {
@@ -426,7 +428,7 @@ async fn consecutive_failures_keep_exponential_deadlines_and_other_operation_gua
     for delay in [5000, 10000, 20000, 40000, 80000, 160000, 300000] {
         r.actor.poll_at = now() + IDLE_POLL_MS;
         let before = now();
-        r.actor.meta_done(MetaDone::Poll(Err(Error::Timeout))).unwrap();
+        r.actor.meta_done(MetaDone::Poll(Err((Error::Timeout, None)))).unwrap();
         let wake = r.actor.poll_at.max(r.actor.service_retry());
         assert!(wake >= before + delay && wake <= now() + delay,
             "failure wake still obeys the existing exponential deadline");
@@ -478,10 +480,24 @@ async fn partial_round_does_not_discharge_pending_verification() {
     r.actor.verification.insert(r.peer.clone());
     r.actor.finished(&r.peer, &exchange::Outcome { more: true, ..Default::default() });
     assert!(r.actor.verification.contains(&r.peer));
-    r.actor.finished(&r.peer, &exchange::Outcome { omitted: 1, ..Default::default() });
-    assert!(r.actor.verification.contains(&r.peer));
     r.actor.finished(&r.peer, &exchange::Outcome::default());
     assert!(!r.actor.verification.contains(&r.peer));
+}
+
+#[tokio::test]
+async fn isolated_item_failures_settle_the_round_without_backing_off_the_peer() {
+    let mut r = Rig::new().await;
+    r.actor.verification.insert(r.peer.clone());
+    // One item failed and more were omitted from the report; all were tried.
+    r.actor.finished(&r.peer, &exchange::Outcome {
+        completed: 1,
+        total: 3,
+        omitted: 2,
+        ..Default::default()
+    });
+    assert!(!r.actor.verification.contains(&r.peer));
+    assert_eq!(r.actor.schedule.peers[&r.peer].retry_at, 0, "no peer backoff");
+    assert!(!r.actor.recovery.contains_key(&r.peer));
 }
 
 #[tokio::test]

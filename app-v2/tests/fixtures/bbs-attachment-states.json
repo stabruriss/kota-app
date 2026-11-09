@@ -1,0 +1,88 @@
+{
+  "pending": {
+    "postId": "root",
+    "body": "正文已到，可以先讨论。附件文件名保持原样。",
+    "attachments": [
+      {
+        "id": "att-archive",
+        "name": "参考资料.zip",
+        "path": "attachments/root/att-archive.zip",
+        "sizeBytes": 497025024,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "localPath": "/fixture/bbs/threads/thread-one/attachments/root/att-archive.zip",
+        "available": false,
+        "syncState": "pending"
+      },
+      {
+        "id": "att-image",
+        "name": "布局参考.png",
+        "path": "attachments/root/att-image.png",
+        "sizeBytes": 2516582,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "localPath": "/fixture/bbs/threads/thread-one/attachments/root/att-image.png",
+        "available": false,
+        "syncState": "pending"
+      }
+    ]
+  },
+  "paused": {
+    "postId": "root",
+    "body": "正文已到，可以先讨论。附件文件名保持原样。",
+    "attachments": [
+      {
+        "id": "att-archive",
+        "name": "参考资料.zip",
+        "path": "attachments/root/att-archive.zip",
+        "sizeBytes": 497025024,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "localPath": "/fixture/bbs/threads/thread-one/attachments/root/att-archive.zip",
+        "available": false,
+        "syncState": "paused"
+      },
+      {
+        "id": "att-notes",
+        "name": "notes.pdf",
+        "path": "attachments/root/att-notes.pdf",
+        "sizeBytes": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "localPath": "/fixture/bbs/threads/thread-one/attachments/root/att-notes.pdf",
+        "available": true
+      }
+    ]
+  },
+  "mixed": {
+    "postId": "root",
+    "body": "正文已到，可以先讨论。附件文件名保持原样。",
+    "attachments": [
+      {
+        "id": "att-archive",
+        "name": "参考资料.zip",
+        "path": "attachments/root/att-archive.zip",
+        "sizeBytes": 497025024,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "localPath": "/fixture/bbs/threads/thread-one/attachments/root/att-archive.zip",
+        "available": false,
+        "syncState": "paused"
+      },
+      {
+        "id": "att-image",
+        "name": "布局参考.png",
+        "path": "attachments/root/att-image.png",
+        "sizeBytes": 2516582,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "localPath": "/fixture/bbs/threads/thread-one/attachments/root/att-image.png",
+        "available": false,
+        "syncState": "pending"
+      },
+      {
+        "id": "att-notes",
+        "name": "notes.pdf",
+        "path": "attachments/root/att-notes.pdf",
+        "sizeBytes": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "localPath": "/fixture/bbs/threads/thread-one/attachments/root/att-notes.pdf",
+        "available": true
+      }
+    ]
+  }
+}

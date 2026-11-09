@@ -5,12 +5,16 @@ import type { AgentId } from '../types/scene';
 import { listWorkspaceProjects, listProjectAgentIdentities, loadProjectAgentDetail, type ProjectAgentIdentity, type WorkspaceProject } from '../pty-client';
 import { readRecruitPreview, type IncarnationRecruitSource, type RecruitPreview } from '../lib/reincarnation';
 import { avatarClassForId, avatarImageStyleForId } from '../lib/hero-avatars';
+import { splitProjectAgentName } from './ProjectAgentName';
 import { WorkingHeroPicker } from './WorkingHeroPicker';
 import '../styles/recruit-picker.css';
 
 type Selection = { hero: WorkingHero; preview: RecruitPreview } | { source: IncarnationRecruitSource; preview: RecruitPreview };
+type RecruitTab = 'tavern' | 'this' | 'other';
 const TAVERN_PREVIEW_COUNT = 4;
+const SAME_PROJECT_COPY = 'The new agent starts with the same marks and episodes, then goes its own way.';
 const failureText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const tabLabel = (tab: RecruitTab) => tab === 'tavern' ? 'Tavern' : tab === 'this' ? 'This Project' : 'Other Project';
 
 export function ShortcutRecruitModal({ seatNumber, heroes, unavailableHeroIds, projectRoot, onSelect, onSelectIncarnation, onDismiss }: {
   seatNumber: number;
@@ -26,14 +30,25 @@ export function ShortcutRecruitModal({ seatNumber, heroes, unavailableHeroIds, p
   const mounted = useRef(true);
   const pendingRef = useRef(false);
   const delivering = useRef(false);
+  const thisAgentsRef = useRef<readonly ProjectAgentIdentity[]>([]);
   const [pending, setPending] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tavernOpen, setTavernOpen] = useState(true);
+  const [tab, setTab] = useState<RecruitTab>('tavern');
+  const [thisOpened, setThisOpened] = useState(false);
+  const [otherOpened, setOtherOpened] = useState(false);
   const [showAll, setShowAll] = useState(false);
-  const [otherOpen, setOtherOpen] = useState(true);
-  const visibleHeroes = tavernOpen ? showAll ? heroes : heroes.slice(0, TAVERN_PREVIEW_COUNT) : [];
+  const tabs: RecruitTab[] = onSelectIncarnation ? (projectRoot ? ['tavern', 'this', 'other'] : ['tavern', 'other']) : ['tavern'];
+  const visibleHeroes = tab === 'tavern' ? (showAll ? heroes : heroes.slice(0, TAVERN_PREVIEW_COUNT)) : [];
   const selectedPerson = selection && ('hero' in selection ? selection.hero : selection.source.agent);
+  const sameProjectSelection = Boolean(
+    selection && 'source' in selection && projectRoot && selection.source.projectRoot === projectRoot,
+  );
+  const selectTab = (next: RecruitTab) => {
+    setTab(next);
+    if (next === 'this') setThisOpened(true);
+    if (next === 'other') setOtherOpened(true);
+  };
 
   useEffect(() => {
     mounted.current = true;
@@ -73,14 +88,14 @@ export function ShortcutRecruitModal({ seatNumber, heroes, unavailableHeroIds, p
     } catch (failure) { if (mounted.current) setError(failureText(failure)); }
     finally { pendingRef.current = false; if (mounted.current) setPending(false); }
   }, [deliver, unavailableHeroIds]);
-  const selectIncarnation = async (project: WorkspaceProject, identity: ProjectAgentIdentity) => {
+  const selectIncarnation = async (sourceProjectRoot: string, identity: ProjectAgentIdentity) => {
     if (pendingRef.current) return;
     pendingRef.current = true; setPending(true); setError(null);
     try {
-      const agent = await loadProjectAgentDetail({ projectRoot: project.localRoot, agentId: identity.agentId }, { readOnly: true });
+      const agent = await loadProjectAgentDetail({ projectRoot: sourceProjectRoot, agentId: identity.agentId }, { readOnly: true });
       if (!mounted.current) return;
-      const preview = await readRecruitPreview({ sourceProjectRoot: project.localRoot, sourceAgentId: identity.agentId });
-      if (mounted.current) setSelection({ source: { projectRoot: project.localRoot, agent }, preview });
+      const preview = await readRecruitPreview({ sourceProjectRoot, sourceAgentId: identity.agentId });
+      if (mounted.current) setSelection({ source: { projectRoot: sourceProjectRoot, agent }, preview });
     } catch (failure) { if (mounted.current) setError(failureText(failure)); }
     finally { pendingRef.current = false; if (mounted.current) setPending(false); }
   };
@@ -89,9 +104,16 @@ export function ShortcutRecruitModal({ seatNumber, heroes, unavailableHeroIds, p
       if (event.isComposing) return;
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss(); return; }
       if (selection || pendingRef.current || event.metaKey || event.ctrlKey || event.altKey || !/^[1-9]$/.test(event.key)) return;
-      const hero = visibleHeroes[Number(event.key) - 1];
-      if (!hero || hero.available === false || unavailableHeroIds?.has(hero.id)) return;
-      event.preventDefault(); event.stopPropagation(); void selectHero(hero);
+      const index = Number(event.key) - 1;
+      if (tab === 'tavern') {
+        const hero = visibleHeroes[index];
+        if (!hero || hero.available === false || unavailableHeroIds?.has(hero.id)) return;
+        event.preventDefault(); event.stopPropagation(); void selectHero(hero);
+      } else if (tab === 'this' && projectRoot) {
+        const identity = thisAgentsRef.current[index];
+        if (!identity) return;
+        event.preventDefault(); event.stopPropagation(); void selectIncarnation(projectRoot, identity);
+      }
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
@@ -104,7 +126,7 @@ export function ShortcutRecruitModal({ seatNumber, heroes, unavailableHeroIds, p
       role={selection ? 'alertdialog' : 'dialog'} aria-modal="true" aria-labelledby="shortcut-recruit-title" tabIndex={-1}
       onClick={event => event.stopPropagation()} onKeyDown={event => {
         if (event.key !== 'Tab') return;
-        const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"]') ?? []).filter(node => !node.closest('[hidden]'));
+        const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled):not([tabindex="-1"]), [tabindex="0"]') ?? []).filter(node => !node.closest('[hidden]'));
         const first = controls[0], last = controls[controls.length - 1];
         if (!first) { event.preventDefault(); panel.current?.focus(); }
         else if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last.focus(); }
@@ -114,10 +136,13 @@ export function ShortcutRecruitModal({ seatNumber, heroes, unavailableHeroIds, p
         <h2 id="shortcut-recruit-title">Reincarnate {selection.preview.heroName}?</h2>
         <div className="soul-recruit-origin">
           <span className={`working-hero-avatar tavern-avatar-art ${avatarClassForId(selectedPerson?.avatarId, selectedPerson?.cli)}`} style={avatarImageStyleForId(selectedPerson?.avatarId)} aria-hidden><span /><i /><b /></span>
-          <div><small>from project {selection.preview.sourceProjectName}</small><strong>{selection.preview.sourceAgentName ?? selection.preview.heroName}</strong></div>
+          <div>
+            <small>{sameProjectSelection ? 'from this project' : `from project ${selection.preview.sourceProjectName}`}</small>
+            <strong>{selection.preview.sourceAgentName ?? selection.preview.heroName}</strong>
+          </div>
         </div>
         <p>The original agent will not be removed.</p>
-        <p>The invited agent may bring information from project {selection.preview.sourceProjectName}.</p>
+        <p>{sameProjectSelection ? SAME_PROJECT_COPY : `The invited agent may bring information from project ${selection.preview.sourceProjectName}.`}</p>
         {selection.preview.reason && <p className="soul-recruit-reason">{selection.preview.reason}</p>}
         {error && <p role="alert" className="soul-recruit-error">{error}</p>}
         <div className="kota-confirm-actions">
@@ -129,24 +154,128 @@ export function ShortcutRecruitModal({ seatNumber, heroes, unavailableHeroIds, p
           <div><div className="shortcut-recruit-kicker">Seat {seatNumber}</div><div id="shortcut-recruit-title" className="shortcut-recruit-title">Add agent</div></div>
           <button type="button" className="shortcut-recruit-close" onClick={dismiss} disabled={delivering.current} aria-label="Close add agent dialog">×</button>
         </div>
+        {tabs.length > 1 && (
+          <div className="soul-recruit-tabs-bar">
+            <span className="soul-recruit-from-label">From :</span>
+            <div className="soul-recruit-tabs" role="tablist" aria-label="Recruit source">
+              {tabs.map(value => (
+                <button
+                  key={value}
+                  type="button"
+                  role="tab"
+                  id={`recruit-tab-${value}`}
+                  className="soul-recruit-tab"
+                  aria-selected={tab === value}
+                  tabIndex={tab === value ? 0 : -1}
+                  aria-controls={`recruit-panel-${value}`}
+                  disabled={pending}
+                  onClick={() => selectTab(value)}
+                  onKeyDown={event => {
+                    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                    event.preventDefault();
+                    const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+                      : (tabs.indexOf(value) + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+                    const next = tabs[index]!;
+                    selectTab(next);
+                    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[index]?.focus();
+                  }}
+                >
+                  {tabLabel(value)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="soul-recruit-scroll">
-          <section className="soul-recruit-group">
-            <button type="button" className="soul-recruit-group-toggle" aria-expanded={tavernOpen} onClick={() => setTavernOpen(value => !value)}><span>From Tavern</span><span>{heroes.length} heroes {tavernOpen ? '▾' : '▸'}</span></button>
-            {tavernOpen && <>
-              <WorkingHeroPicker heroes={visibleHeroes} unavailableHeroIds={unavailableHeroIds} onSelect={hero => void selectHero(hero)} testIdPrefix="incarnate-shortcut" variant="modal" showHotkeys disabled={pending} />
-              {heroes.length > TAVERN_PREVIEW_COUNT && <button type="button" className="soul-recruit-show" onClick={() => setShowAll(value => !value)}>{showAll ? 'Show fewer' : `Show all ${heroes.length}`}</button>}
-            </>}
+          <section id="recruit-panel-tavern" className="soul-recruit-tabpanel" role="tabpanel" aria-labelledby="recruit-tab-tavern" hidden={tab !== 'tavern'}>
+            <WorkingHeroPicker heroes={visibleHeroes} unavailableHeroIds={unavailableHeroIds} onSelect={hero => void selectHero(hero)} testIdPrefix="incarnate-shortcut" variant="modal" showHotkeys disabled={pending} />
+            {heroes.length > TAVERN_PREVIEW_COUNT && <button type="button" className="soul-recruit-show" onClick={() => setShowAll(value => !value)}>{showAll ? 'Show fewer' : `Show all ${heroes.length}`}</button>}
           </section>
-          {onSelectIncarnation && <section className="soul-recruit-group">
-            <button type="button" className="soul-recruit-group-toggle" aria-expanded={otherOpen} onClick={() => setOtherOpen(value => !value)}><span>From other project</span><span>{otherOpen ? '▾' : '▸'}</span></button>
-            <div hidden={!otherOpen}><OtherProjectIncarnations projectRoot={projectRoot} disabled={pending} onSelect={selectIncarnation} /></div>
-          </section>}
+          {onSelectIncarnation && projectRoot && thisOpened && (
+            <section id="recruit-panel-this" className="soul-recruit-tabpanel" role="tabpanel" aria-labelledby="recruit-tab-this" hidden={tab !== 'this'}>
+              <ThisProjectIncarnations projectRoot={projectRoot} disabled={pending} agentsRef={thisAgentsRef} onSelect={identity => void selectIncarnation(projectRoot, identity)} />
+            </section>
+          )}
+          {onSelectIncarnation && otherOpened && (
+            <section id="recruit-panel-other" className="soul-recruit-tabpanel" role="tabpanel" aria-labelledby="recruit-tab-other" hidden={tab !== 'other'}>
+              <OtherProjectIncarnations projectRoot={projectRoot} disabled={pending} onSelect={(project, identity) => void selectIncarnation(project.localRoot, identity)} />
+            </section>
+          )}
           {pending && <p role="status">Preparing incarnation profile.</p>}
           {error && <p role="alert" className="soul-recruit-error">{error}</p>}
         </div>
       </>}
     </div>
   </div>, document.body);
+}
+
+function IncarnationPills({ agents, disabled, showHotkeys = false, onSelect }: {
+  agents: readonly ProjectAgentIdentity[];
+  disabled: boolean;
+  showHotkeys?: boolean;
+  onSelect: (agent: ProjectAgentIdentity) => void;
+}) {
+  return (
+    <div className="working-hero-picker modal">
+      {agents.map((agent, index) => {
+        const nameParts = splitProjectAgentName(agent.displayName);
+        return (
+          <button
+            key={agent.agentId}
+            type="button"
+            className={`working-hero-pill soul-recruit-incarnation ${disabled ? 'pending' : ''}`}
+            title={agent.displayName}
+            data-full-name={agent.displayName}
+            disabled={disabled}
+            onClick={() => onSelect(agent)}
+          >
+            <span
+              className={`working-hero-avatar tavern-avatar-art ${avatarClassForId(agent.avatarId, agent.provider ?? 'codex')}`}
+              style={avatarImageStyleForId(agent.avatarId)}
+              aria-hidden
+            >
+              <span /><i /><b />
+            </span>
+            <span className="working-hero-copy">
+              {nameParts.title && (
+                <span className={`working-hero-name-title title-${nameParts.title.id}`}>
+                  {nameParts.title.abbr}
+                </span>
+              )}
+              <b>{nameParts.base}</b>
+            </span>
+            {showHotkeys && index < 9 && <kbd className="working-hero-hotkey" aria-hidden>{index + 1}</kbd>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ThisProjectIncarnations({ projectRoot, disabled, agentsRef, onSelect }: {
+  projectRoot: string;
+  disabled: boolean;
+  agentsRef: { current: readonly ProjectAgentIdentity[] };
+  onSelect: (identity: ProjectAgentIdentity) => void;
+}) {
+  const [agents, setAgents] = useState<ProjectAgentIdentity[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    let active = true; setAgents(null); setError(null); agentsRef.current = [];
+    void listProjectAgentIdentities(projectRoot).then(items => {
+      if (!active) return;
+      const filtered = items.filter(item => item.status === 'active');
+      agentsRef.current = filtered; setAgents(filtered);
+    }).catch(failure => { if (active) setError(failureText(failure)); });
+    return () => { active = false; agentsRef.current = []; };
+  }, [agentsRef, projectRoot, revision]);
+  return <>
+    {error ? <p role="alert">{error} <button type="button" onClick={() => setRevision(value => value + 1)}>Retry</button></p>
+      : !agents ? <p role="status">Loading agents…</p>
+      : !agents.length ? <p className="soul-recruit-empty">No agents in this project yet</p>
+      : <IncarnationPills agents={agents} disabled={disabled} showHotkeys onSelect={onSelect} />}
+  </>;
 }
 
 function OtherProjectIncarnations({ projectRoot, disabled, onSelect }: {
@@ -190,9 +319,7 @@ function ProjectIncarnations({ project, disabled, onSelect }: {
       {error ? <p role="alert">{error} <button type="button" onClick={() => setRevision(value => value + 1)}>Retry</button></p>
         : !agents ? <p role="status">Loading agents…</p>
         : !agents.length ? <p className="soul-recruit-empty">No active incarnations</p>
-        : agents.map(agent => <button key={agent.agentId} type="button" className="soul-recruit-incarnation" disabled={disabled} onClick={() => onSelect(project, agent)}>
-          <span className={`working-hero-avatar tavern-avatar-art ${avatarClassForId(agent.avatarId, agent.provider ?? 'codex')}`} style={avatarImageStyleForId(agent.avatarId)} aria-hidden><span /><i /><b /></span><span>{agent.displayName}</span>
-        </button>)}
+        : <IncarnationPills agents={agents} disabled={disabled} onSelect={agent => onSelect(project, agent)} />}
     </div>}
   </div>;
 }

@@ -222,8 +222,13 @@ impl ContentStore {
         Ok(plan)
     }
     pub(crate) fn catalog(&self, fence: &GroupFence) -> Result<reconcile::Catalog> {
+        self.catalog_tracked(fence, &mut Deps::untracked())
+    }
+    pub(crate) fn catalog_tracked(&self, fence: &GroupFence, deps: &mut Deps) -> Result<reconcile::Catalog> {
         let lock = acquire_write_lock(&self.root)?;
+        deps.stat(&self.state.control_path());
         self.check_fence(&lock, fence)?;
+        deps.stat(&self.state.state_path());
         reconcile::Catalog::from_state(&self.state_locked(&lock)?, &fence.group_id)
             .map_err(anyhow::Error::msg)
     }

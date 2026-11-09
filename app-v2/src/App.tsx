@@ -3590,19 +3590,23 @@ export function App() {
       ...agentLayout.offTableAgents,
       ...agentRuntime.liveAgents,
     ]);
-    const reservedProjectAgentNames = existingProjectAgents
+    const reservedProjectAgentBases = existingProjectAgents
       .filter((agent) => {
         const status = agent.status.trim().toLowerCase();
         return status === 'active' || status === 'archived';
       })
-      .map((agent) => agent.displayName.trim().toLowerCase());
-    const occupiedNames = new Set<string>([
-      ...reservedProjectAgentNames,
-      ...Object.values(agentInstances).map((agent) => agent.name.trim().toLowerCase()),
+      .map((agent) => splitProjectAgentName(agent.displayName).base.toLowerCase());
+    const occupiedBases = new Set<string>([
+      ...reservedProjectAgentBases,
+      ...Object.values(agentInstances).map((agent) => splitProjectAgentName(agent.name).base.toLowerCase()),
     ].filter(Boolean));
-    let nameIndex = 1;
+    const currentRoot = (activeWorkspace?.localRoot ?? projectAgentRoot)?.trim() || '';
+    const sameProjectSource = Boolean(
+      source && currentRoot && source.projectRoot.trim() === currentRoot,
+    );
+    let nameIndex = sameProjectSource ? 2 : 1;
     let guard = 0;
-    while (occupiedNames.has(composeProjectAgentName(fieldsForIndex(nameIndex)).trim().toLowerCase())) {
+    while (occupiedBases.has(splitProjectAgentName(composeProjectAgentName(fieldsForIndex(nameIndex))).base.toLowerCase())) {
       nameIndex += 1;
       guard += 1;
       if (guard > 1000) {
@@ -4429,7 +4433,8 @@ export function App() {
       const failedDance = () => {
         if (danceDelivery) emitVioletComposerDelivery({ id: danceDelivery.messageId, status: 'failed', reason: 'Prompt was not delivered.', retryTargetAgentIds: recipients });
       };
-      const liveBeforeWake = new Set(agentRuntime.liveAgents);
+      const liveBeforeWake = new Set(activeRunningAgents);
+      for (const id of agentRuntime.liveAgents) liveBeforeWake.add(id);
       const sleepingRecipients = recipients.filter((id) => !liveBeforeWake.has(id)).filter((id) => !localRecipients.has(id));
       if (sleepingRecipients.length > 0) {
         const names = sleepingRecipients.map((id) => shortProjectAgentName(agentMeta[id]?.name ?? id));
@@ -4556,6 +4561,7 @@ export function App() {
       return true;
     },
     [
+      activeRunningAgents,
       agentRuntime.liveAgents,
       agentRuntime.status,
       agentMeta,

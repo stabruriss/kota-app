@@ -19,10 +19,12 @@ fn finish_response_preserves_transport_errors_and_version_check_is_specific() {
     }
     assert_eq!(expect_ok(Ok(Answer::Ok)), Ok(()));
     assert_eq!(expect_ok(Ok(Answer::Busy)), Err(Error::Protocol));
-    assert_eq!(check_protocol_version(EXCHANGE_PROTOCOL_VERSION), Ok(()));
+    assert_eq!(check_protocol_version(EXCHANGE_PROTOCOL_VERSION, ExchangeVersion::V4), Ok(()));
     for version in [EXCHANGE_PROTOCOL_VERSION - 1, EXCHANGE_PROTOCOL_VERSION + 1] {
-        assert_eq!(check_protocol_version(version), Err(Error::ProtocolVersion));
+        assert_eq!(check_protocol_version(version, ExchangeVersion::V4), Err(Error::ProtocolVersion));
     }
+    assert_eq!(check_protocol_version(5, ExchangeVersion::V5), Ok(()));
+    assert_eq!(check_protocol_version(4, ExchangeVersion::V5), Err(Error::ProtocolVersion));
     assert_eq!(Error::ProtocolVersion.to_string(), "protocol_mismatch");
     assert_eq!(Error::Protocol.to_string(), "sync_protocol_error");
 }
@@ -58,7 +60,19 @@ pub(crate) fn board(membership: &str) -> (Root, ContentStore, GroupFence) {
     .unwrap();
     (root, store, fence)
 }
+/// Seed the same checkpoint/catalog facts as a completed full round, without
+/// opening a transport in coordinator scheduling tests.
+pub(crate) fn confirm_peer_catalog(engine: &Engine, remote: &str, revision: &str) {
+    engine.confirm_checkpoint(remote, revision).unwrap();
+    let start = engine.delta_start(remote).unwrap().unwrap();
+    let snapshot = engine.snapshot.lock().unwrap().clone().unwrap();
+    engine.delta.lock().unwrap().complete(&start, snapshot, true, std::time::Instant::now());
+}
+
 pub(crate) fn publish(store: &ContentStore, body: &str) -> Vec<u8> {
+    publish_with(store, body, b"immutable attachment bytes")
+}
+pub(crate) fn publish_with(store: &ContentStore, body: &str, attachment: &[u8]) -> Vec<u8> {
     let root = store.root().join("threads/thread-one");
     fs::create_dir_all(root.join("posts")).unwrap();
     let record = json!({"schema":"kota.bbs.thread.v1","threadId":"thread-one","status":"open","visibility":"targeted","projectTags":["source"],"createdByProject":"source","createdByAgent":"author","createdAt":"2026-09-12T10:00:00Z","updatedAt":"2026-09-12T10:00:00Z","latestPostId":"root"});
@@ -67,7 +81,6 @@ pub(crate) fn publish(store: &ContentStore, body: &str) -> Vec<u8> {
         serde_yaml::to_string(&record).unwrap(),
     )
     .unwrap();
-    let attachment = b"immutable attachment bytes";
     fs::create_dir_all(root.join("attachments/root")).unwrap();
     fs::write(root.join("attachments/root/file.txt"), attachment).unwrap();
     let meta = json!({"schema":"kota.bbs.post.v1","threadId":"thread-one","postId":"root","projectId":"source","agentId":"author","agentDisplayName":"Author","projectDisplayName":"Source","createdAt":"2026-09-12T10:00:00Z","kind":"topic","attachments":[{"id":"file","name":"file.txt","path":"attachments/root/file.txt","sha256":raw_sha256(attachment),"sizeBytes":attachment.len()}]});
@@ -126,6 +139,19 @@ async fn connect_wiring(
     sa: ContentStore, fa: GroupFence, sb: ContentStore, fb: GroupFence,
     ra: Option<Vec<roster::Project>>, rb: Option<Vec<roster::Project>>,
     shared_files: bool,
+) -> Connected {
+    connect_version(sa, fa, sb, fb, ra, rb, shared_files, ExchangeVersion::V4).await
+}
+/// The same loopback carrier as v4 tests, with the exchange version relay
+/// TLS would select. Both use the DataPipe for files.
+async fn connect_v5(sa: ContentStore, fa: GroupFence, sb: ContentStore, fb: GroupFence) -> Connected {
+    connect_version(sa, fa, sb, fb, Some(vec![]), Some(vec![]), true, ExchangeVersion::V5).await
+}
+#[allow(clippy::too_many_arguments)]
+async fn connect_version(
+    sa: ContentStore, fa: GroupFence, sb: ContentStore, fb: GroupFence,
+    ra: Option<Vec<roster::Project>>, rb: Option<Vec<roster::Project>>,
+    shared_files: bool, version: ExchangeVersion,
 ) -> Connected {
     let mut keys = [
         DeviceIdentity::from_seed([61; 32]).unwrap(),
@@ -268,9 +294,11 @@ async fn connect_wiring(
     let (a, b) = tokio::join!(
         ha.execute(move |_| async move {
             a.remote_description(&answer).await?;
-            Ok(Link::start(a.connect().await?, b_id, true, ae))
+            Ok(Link::start(a.connect().await?.with_exchange_version(version), b_id, true, ae))
         }),
-        hb.execute(move |_| async move { Ok(Link::start(b.connect().await?, a_id, false, be)) })
+        hb.execute(move |_| async move {
+            Ok(Link::start(b.connect().await?.with_exchange_version(version), a_id, false, be))
+        })
     );
     Connected {
         a: a.unwrap(),
@@ -996,7 +1024,7 @@ async fn checkpoints_name_the_pinned_catalog_and_roster_and_next_open_carries_th
 }
 
 #[tokio::test]
-async fn peer_inventory_failures_or_omitted_issues_do_not_confirm_the_initiator_checkpoint() {
+async fn peer_inventory_failures_or_omitted_issues_are_isolated_and_confirm_the_checkpoint() {
     for omitted in [false, true] {
         let (_ra, sa, fa) = board("member-a");
         let (_rb, sb, fb) = board("member-b");
@@ -1015,6 +1043,12 @@ async fn peer_inventory_failures_or_omitted_issues_do_not_confirm_the_initiator_
         responder_finished(&pair).await;
         assert_eq!(outcome.omitted, u64::from(omitted));
         assert_eq!(outcome.failures.is_empty(), omitted);
-        assert_eq!(pair.ea.checkpoint(&pair.a.remote).unwrap(), None);
+        // Reported, not a reason to repeat every item: the next full catalog
+        // or Manual round re-offers the failed item.
+        let revision_b = pair.eb.snapshot.lock().unwrap().as_ref().unwrap().revision.clone();
+        assert!(outcome.settled());
+        assert_eq!(pair.ea.checkpoint(&pair.a.remote).unwrap(), Some(revision_b));
     }
 }
+
+mod resume;

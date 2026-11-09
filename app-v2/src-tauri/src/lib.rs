@@ -717,6 +717,7 @@ struct ProjectAgentDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     applied_to_session: Option<bool>,
     agent_yaml_path: String,
+    notes: ProjectAgentNotes,
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     archived_at: Option<String>,
@@ -729,6 +730,34 @@ struct ProjectAgentDetail {
     session_source: Option<String>,
     dirty: bool,
     dirty_summary: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ProjectAgentNotes {
+    exists: bool,
+    path: String,
+}
+
+fn project_agent_notes(cwd: &Path) -> ProjectAgentNotes {
+    let path = soul::SoulPaths::new(cwd).marks();
+    ProjectAgentNotes { exists: path.is_file(), path: path_string(&path) }
+}
+
+fn project_agent_notes_path(cwd: &Path) -> Result<PathBuf, String> {
+    let path = soul::SoulPaths::new(cwd).marks();
+    if !path.is_file() { return Err("Notes file not found.".into()); }
+    Ok(path)
+}
+
+#[tauri::command]
+async fn project_agent_notes_open(app: AppHandle, request: ProjectAgentRequest) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Use exactly the same incarnation resolution as project_agent_load_detail.
+        let manager = app.state::<IntegrationManager>();
+        let ctx = resolve_shell_context(&manager, request.project_root.as_deref(), &request.agent_id)?;
+        let path = project_agent_notes_path(&ctx.cwd)?;
+        open_system_path(&path, false)
+    }).await.map_err(|err| format!("join project_agent_notes_open: {err}"))?
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2207,7 +2236,9 @@ async fn bartender_status(
         bartender
             .refresh_dispatch_watcher(&app, Path::new(&workspace.local_root))
             .map_err(|err| err.to_string())?;
-        bartender.status(&workspace).map_err(|err| err.to_string())
+        bartender
+            .watch_status(&app, &workspace)
+            .map_err(|err| err.to_string())
     })
     .await
     .map_err(|err| format!("join bartender_status: {err}"))?
@@ -6766,6 +6797,7 @@ fn load_project_agent_detail_in_context(
         shell_revision,
         applied_to_session: None,
         agent_yaml_path: path_string(&agent_yaml_path),
+        notes: project_agent_notes(&ctx.cwd),
         status,
         archived_at,
         invite_eligibility,
@@ -11141,6 +11173,21 @@ async fn github_create_repo(
     .map_err(|err| format!("join github_create_repo: {err}"))?
 }
 
+fn refresh_workspace_agent_bus_watcher(
+    app: &tauri::AppHandle,
+    workspace: &integrations::WorkspaceProject,
+) {
+    if let Err(err) = app
+        .state::<AgentBusManager>()
+        .refresh_dispatch_watcher(app, Path::new(&workspace.local_root))
+    {
+        eprintln!(
+            "Kota Agent Bus dispatch watcher setup failed for {}: {err}",
+            workspace.project_id
+        );
+    }
+}
+
 #[tauri::command]
 async fn workspace_prepare_github_project(
     app: tauri::AppHandle,
@@ -11151,6 +11198,7 @@ async fn workspace_prepare_github_project(
         let workspace = manager
             .prepare_github_project(request)
             .map_err(|err| err.to_string())?;
+        refresh_workspace_agent_bus_watcher(&app, &workspace);
         regenerate_workspace_adapters_best_effort(&workspace, "workspace prepare");
         Ok(workspace)
     })
@@ -11168,6 +11216,7 @@ async fn workspace_create_local_project(
         let workspace = manager
             .create_local_project(&name)
             .map_err(|err| err.to_string())?;
+        refresh_workspace_agent_bus_watcher(&app, &workspace);
         regenerate_workspace_adapters_best_effort(&workspace, "local project create");
         Ok(workspace)
     })
@@ -11216,9 +11265,13 @@ async fn project_connection_apply(
     app: tauri::AppHandle,
     request: integrations::ConnectionRequest,
 ) -> Result<integrations::ConnectionApplied, integrations::ConnectionError> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<IntegrationManager>().project_connection_apply(request))
-        .await
-        .map_err(connection_join_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        let applied = app.state::<IntegrationManager>().project_connection_apply(request)?;
+        refresh_workspace_agent_bus_watcher(&app, &applied.workspace);
+        Ok(applied)
+    })
+    .await
+    .map_err(connection_join_error)?
 }
 
 #[tauri::command]
@@ -11226,9 +11279,13 @@ async fn project_connection_set_local(
     app: tauri::AppHandle,
     project_id: String,
 ) -> Result<integrations::WorkspaceProject, integrations::ConnectionError> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<IntegrationManager>().project_connection_set_local(&project_id))
-        .await
-        .map_err(connection_join_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = app.state::<IntegrationManager>().project_connection_set_local(&project_id)?;
+        refresh_workspace_agent_bus_watcher(&app, &workspace);
+        Ok(workspace)
+    })
+    .await
+    .map_err(connection_join_error)?
 }
 
 /// TopBar and gear: the project's mode and the state of its account.
@@ -12328,6 +12385,7 @@ async fn workspace_open_project(
         let workspace = manager
             .open_workspace_project(project_id)
             .map_err(|err| err.to_string())?;
+        refresh_workspace_agent_bus_watcher(&app, &workspace);
         regenerate_workspace_adapters_best_effort(&workspace, "workspace open");
         Ok(workspace)
     })
@@ -12366,6 +12424,7 @@ async fn workspace_resume_project(
         let workspace = manager
             .resume_workspace_project(project_id)
             .map_err(|err| err.to_string())?;
+        refresh_workspace_agent_bus_watcher(&app, &workspace);
         regenerate_workspace_adapters_best_effort(&workspace, "workspace resume");
         Ok(workspace)
     })
@@ -14092,6 +14151,10 @@ pub fn run() {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 workspace_name_search::release_window(window.label());
             }
+            if matches!(event, tauri::WindowEvent::Focused(true)) {
+                // Back in front: Bartender reconciles the panel's project once.
+                window.app_handle().state::<BartenderManager>().note_focus();
+            }
         });
 
     #[cfg(debug_assertions)]
@@ -14161,7 +14224,7 @@ pub fn run() {
                 }
             });
             if let Ok(workspaces) = app.state::<IntegrationManager>().list_workspaces() {
-                for workspace in workspaces {
+                for workspace in &workspaces {
                     if let Err(err) = app
                         .state::<BartenderManager>()
                         .refresh_dispatch_watcher(app.handle(), Path::new(&workspace.local_root))
@@ -14172,6 +14235,14 @@ pub fn run() {
                         );
                     }
                 }
+                // Agent Bus outbox drain may cold-start a target agent (5s resume grace),
+                // so run the startup pass off the setup thread like github_accounts above.
+                let bus_app = app.handle().clone();
+                std::thread::spawn(move || {
+                    for workspace in workspaces {
+                        refresh_workspace_agent_bus_watcher(&bus_app, &workspace);
+                    }
+                });
             }
             adapter_sync::start_watchers();
             if let Some(workspace) = app.state::<IntegrationManager>().workspace_status().active {
@@ -14353,6 +14424,7 @@ pub fn run() {
             tavern_incarnate_hero,
             tavern_recruit_preview,
             project_agent_load_detail,
+            project_agent_notes_open,
             project_agent_layout_load,
             project_agent_layout_save,
             project_agent_commend,
@@ -14427,6 +14499,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod project_agent_configuration_tests;
+#[cfg(test)]
+mod project_agent_notes_tests;
 #[cfg(test)]
 mod tavern_soul_tests;
 

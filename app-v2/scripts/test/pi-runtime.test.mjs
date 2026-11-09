@@ -6,6 +6,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {create} from 'tar';
+import ts from 'typescript';
 import {appRoot, preparePiRuntime, readPiRuntimePin, validatePiRuntimeTree, piMachOFiles} from '../prepare-pi-runtime.mjs';
 import {signPiRuntimeLocal} from '../sign-pi-runtime-local.mjs';
 
@@ -140,6 +141,7 @@ test('Tauri hooks preserve CLI order and explicit runtime resource mappings', ()
     .filter(([source, destination]) => source.startsWith('../kota-ext') || destination.startsWith('kota-ext')));
   assert.deepEqual(extensionResources, {
     '../kota-ext/index.ts': 'kota-ext/index.ts',
+    '../kota-ext/history.ts': 'kota-ext/history.ts',
     '../kota-ext/bridge.ts': 'kota-ext/bridge.ts',
     '../kota-ext/inject.ts': 'kota-ext/inject.ts',
     '../kota-ext/tools.ts': 'kota-ext/tools.ts',
@@ -158,6 +160,27 @@ test('Tauri hooks preserve CLI order and explicit runtime resource mappings', ()
     '../kota-ext/shadow-clone.ts': 'kota-ext/shadow-clone.ts',
     '../kota-ext/package.json': 'kota-ext/package.json',
   });
+});
+
+test('every relative extension import is included at its bundled path', () => {
+  const configDirectory = path.join(appRoot, 'src-tauri');
+  const config = JSON.parse(fs.readFileSync(path.join(configDirectory, 'tauri.conf.json'), 'utf8'));
+  const resources = new Map(Object.entries(config.bundle.resources)
+    .map(([source, destination]) => [path.resolve(configDirectory, source), destination]));
+  const seen = new Set();
+  function visit(file, bundledPath) {
+    assert.equal(resources.get(file), bundledPath,
+      'Missing or misplaced extension resource: ' + path.relative(appRoot, file));
+    if (seen.has(file)) return;
+    seen.add(file);
+    if (path.extname(file) === '.json') return;
+    for (const {fileName} of ts.preProcessFile(fs.readFileSync(file, 'utf8'), true, true).importedFiles) {
+      if (!fileName.startsWith('.')) continue;
+      visit(path.resolve(path.dirname(file), fileName),
+        path.posix.normalize(path.posix.join(path.posix.dirname(bundledPath), fileName)));
+    }
+  }
+  visit(path.join(appRoot, 'kota-ext/index.ts'), 'kota-ext/index.ts');
 });
 
 test('real Pi 1.3 r1 stages identically; local signing selects only two inner files', {skip: process.platform !== 'darwin' || process.arch !== 'arm64'}, async t => {

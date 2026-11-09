@@ -460,7 +460,7 @@ pub(crate) fn valid_hash(value: &str) -> Result<(), String> {
 // flock releases automatically on process exit; a second process fails promptly.
 pub(crate) struct ControlLease(File);
 impl ControlLease {
-    fn acquire(root: &Path) -> Result<Self, String> {
+    fn acquire(root: &Path, wait: bool) -> Result<Self, String> {
         if let Ok(meta) = fs::symlink_metadata(root) {
             if !meta.is_dir() || meta.file_type().is_symlink() {
                 return Err("invalid private control directory".into());
@@ -482,8 +482,15 @@ impl ControlLease {
             .custom_flags(libc::O_NOFOLLOW)
             .open(root.join(".control.lock"))
             .map_err(|_| "control_lock_failed")?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err("control_in_use".into());
+        let flags = libc::LOCK_EX | if wait { 0 } else { libc::LOCK_NB };
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), flags) } == 0 {
+                break;
+            }
+            if wait && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(if wait { "control_lock_failed" } else { "control_in_use" }.into());
         }
         Ok(Self(file))
     }
@@ -522,7 +529,10 @@ impl StateStore {
         self.root.join("identity.json")
     }
     pub(crate) fn control_lease(&self) -> Result<ControlLease, String> {
-        ControlLease::acquire(&self.root)
+        ControlLease::acquire(&self.root, false)
+    }
+    pub(crate) fn wait_control_lease(&self) -> Result<ControlLease, String> {
+        ControlLease::acquire(&self.root, true)
     }
     pub(crate) fn control_path(&self) -> PathBuf {
         self.root.join("control.json")
@@ -543,10 +553,13 @@ impl StateStore {
         }
     }
     pub fn load_state(&self) -> Result<Option<SyncState>, String> {
-        load(&self.state_path(), |state: SyncState| {
+        self.load_state_tracked(&mut crate::bbs::cache::Deps::untracked())
+    }
+    pub(crate) fn load_state_tracked(&self, deps: &mut crate::bbs::cache::Deps) -> Result<Option<SyncState>, String> {
+        load_tracked(&self.state_path(), |state: SyncState| {
             state.validate()?;
             Ok(state)
-        })
+        }, deps)
     }
     pub fn save_state(&self, state: &SyncState) -> Result<(), String> {
         state.validate()?;
@@ -567,13 +580,21 @@ fn load<T: for<'de> Deserialize<'de>, U>(
     path: &Path,
     check: impl FnOnce(T) -> Result<U, String>,
 ) -> Result<Option<U>, String> {
+    load_tracked(path, check, &mut crate::bbs::cache::Deps::untracked())
+}
+fn load_tracked<T: for<'de> Deserialize<'de>, U>(
+    path: &Path,
+    check: impl FnOnce(T) -> Result<U, String>,
+    deps: &mut crate::bbs::cache::Deps,
+) -> Result<Option<U>, String> {
+    deps.stat(path);
     match fs::symlink_metadata(path) {
         Ok(meta) if !meta.is_file() => return Err("private state must be a regular file".into()),
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("read private state metadata: {error}")),
     }
-    let bytes = fs::read(path).map_err(|error| format!("read private state: {error}"))?;
+    let bytes = deps.read(path).map_err(|error| format!("read private state: {error}"))?;
     // Parse errors must not quote private credential values.
     let value = serde_json::from_slice(&bytes).map_err(|_| "invalid private state JSON")?;
     check(value).map(Some)

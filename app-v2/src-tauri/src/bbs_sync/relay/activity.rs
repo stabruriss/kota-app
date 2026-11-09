@@ -36,6 +36,7 @@ pub(super) enum Failure {
     Response {
         operation: Operation,
         error: Error,
+        cause: Option<String>,
     },
 }
 impl From<Error> for Failure {
@@ -240,11 +241,12 @@ impl Activity {
                     }
                 }
                 Outcome::Rejected(reply) => {
-                    let error = reply.error();
+                    let (error, cause) = reply.failure();
                     if error != Error::Busy {
                         return Err(Failure::Response {
                             operation: Operation::Receive,
                             error,
+                            cause,
                         });
                     }
                     // Reads already scheduled its next bounded opportunity.
@@ -271,7 +273,7 @@ impl Activity {
                 }
                 match result {
                     Ok(reply) if reply.status != 200 => {
-                        let error = reply.error();
+                        let (error, cause) = reply.failure();
                         if error == Error::Busy {
                             if now < m.deadline {
                                 m.retry_at(now);
@@ -286,6 +288,7 @@ impl Activity {
                                     Operation::Ack
                                 },
                                 error,
+                                cause,
                             });
                         }
                     }

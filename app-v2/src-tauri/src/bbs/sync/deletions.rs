@@ -1,4 +1,5 @@
 use super::inventory::{verify_path, PostLocation};
+use crate::bbs_sync::transport::stale_resumable_partial;
 use super::*;
 
 struct ObservedPost {
@@ -393,6 +394,12 @@ impl ContentStore {
                 .or_else(|| name.strip_prefix(".removed-"));
             if own.is_some_and(|s| Uuid::parse_str(s).is_ok_and(|u| u.to_string() == s)) {
                 remove_budgeted(&entry.path(), io)?;
+            } else if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                // A resumable attachment partial is progress, not an orphan,
+                // until it has been left untouched for a week.
+                if stale_resumable_partial(&name, modified) == Some(true) {
+                    remove_budgeted(&entry.path(), io)?;
+                }
             }
         }
         Ok(())

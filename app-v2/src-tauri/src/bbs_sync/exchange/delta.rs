@@ -63,6 +63,14 @@ struct Peer {
     full_at: Option<Instant>,
     force: u64,
     satisfied: u64,
+    // In-memory scheduling hint, never persisted or sent over the wire.
+    full_next: bool,
+}
+impl Peer {
+    fn due(&self, now: Instant) -> bool {
+        self.force != self.satisfied
+            || self.full_at.is_none_or(|t| now.saturating_duration_since(t) >= FULL_INTERVAL)
+    }
 }
 #[derive(Clone)]
 pub(super) struct Start {
@@ -119,6 +127,7 @@ impl Cache {
                 full_at: None,
                 force: 0,
                 satisfied: 0,
+                full_next: false,
             });
             self.peers.insert(scope.remote.clone(), value);
         }
@@ -142,24 +151,24 @@ impl Cache {
     pub(super) fn force_full(&mut self) {
         for p in self.peers.values_mut() {
             p.force = p.force.wrapping_add(1);
+            p.full_next = true;
         }
     }
     pub(super) fn due(&self, remote: &str, now: Instant) -> bool {
-        self.peers.get(remote).is_some_and(|p| {
-            p.force != p.satisfied
-                || p.full_at
-                    .is_none_or(|t| now.saturating_duration_since(t) >= FULL_INTERVAL)
-        })
+        self.peers.get(remote).is_some_and(|p| p.due(now))
     }
     pub(super) fn start(
-        &self,
+        &mut self,
         remote: &str,
         checkpoint: Option<String>,
         now: Instant,
     ) -> Option<Start> {
-        let p = self.peers.get(remote)?;
+        let p = self.peers.get_mut(remote)?;
+        // Let an expired baseline deliver new content before its full repair.
+        // Consume the repair turn at start: a failed full falls back to delta.
+        let full = std::mem::take(&mut p.full_next) && p.due(now);
         // Until the out-of-round write finishes (or if it is lost), use full.
-        let base = if !self.dirty && self.stamp.is_some() && !self.due(remote, now) {
+        let base = if !self.dirty && self.stamp.is_some() && !full {
             p.candidate.as_ref().map(|c| c.snapshot.clone())
         } else {
             None
@@ -170,6 +179,10 @@ impl Cache {
             checkpoint: base.as_ref().and(checkpoint),
             base,
         })
+    }
+    #[cfg(test)]
+    pub(super) fn expire(&mut self, remote: &str, now: Instant) {
+        self.peers.get_mut(remote).unwrap().full_at = Some(now - FULL_INTERVAL);
     }
     pub(super) fn complete(&mut self, start: &Start, snapshot: Snapshot, full: bool, now: Instant) {
         let Some(p) = self
@@ -183,6 +196,7 @@ impl Cache {
             p.full_at = Some(now);
             p.satisfied = start.force;
         }
+        if p.force == start.force { p.full_next = !full && p.due(now); }
         p.candidate = snapshot.cache_bytes.map(|bytes| Candidate {
             snapshot: Stored {
                 catalog: snapshot.catalog,

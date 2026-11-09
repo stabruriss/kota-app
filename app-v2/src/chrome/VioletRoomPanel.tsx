@@ -62,6 +62,7 @@ import {
 } from '../lib/room-quote';
 import { RoomQuoteMark } from '../lib/room-quote-mark';
 import subagentUpdateIconUrl from '../assets/tavern/icons/subagent-update.png';
+import noteUpdateIconUrl from '../assets/tavern/icons/note-update.svg';
 import { filterAgentBusMessages } from '../lib/violet-message-filter';
 import { HeroAvatarArt } from './HeroAvatarPicker';
 import { MermaidBlock } from './MermaidBlock';
@@ -1487,7 +1488,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
         {isUser ? (
           <HeroAvatarArt className="room-search-avatar" avatarId={searchResult.human.avatarId} />
         ) : (
-          <span className={`room-search-avatar tavern-avatar-art ${messageAgent?.avatarClass ?? providerAvatarClass(message.agentId)}`} style={avatarImageStyleForId(messageAgent?.avatarId)} aria-hidden>
+          <span className={`room-search-avatar tavern-avatar-art ${messageAgent?.avatarClass ?? providerAvatarClass(message.agentId, message.shell)}`} style={avatarImageStyleForId(messageAgent?.avatarId)} aria-hidden>
             <span /><i /><b />
           </span>
         )}
@@ -1563,7 +1564,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
             />
           ) : (
             <span
-              className={`violet-msg-avatar tavern-avatar-art ${isPuppeteer ? 'system-puppeteer' : messageAgent?.avatarClass ?? providerAvatarClass(message.agentId)}`}
+              className={`violet-msg-avatar tavern-avatar-art ${isPuppeteer ? 'system-puppeteer' : messageAgent?.avatarClass ?? providerAvatarClass(message.agentId, message.shell)}`}
               style={isPuppeteer ? undefined : avatarImageStyleForId(messageAgent?.avatarId)}
               title={avatarTitle}
               aria-hidden
@@ -1662,6 +1663,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
                   {isSubagentProgressEntry(latestProgressEntry) && (
                     <SubagentUpdateMark placement="summary" />
                   )}
+                  {isNoteProgressEntry(latestProgressEntry) && <NoteUpdateMark placement="summary" />}
                   {progressSummaryCopy.preview}
                 </em>
               </summary>
@@ -1957,6 +1959,13 @@ function QueuedMessageIcon() {
   );
 }
 
+function NoteUpdateMark({ placement }: { placement: 'summary' | 'entry' }) {
+  return <span className={`violet-note-origin violet-note-origin-${placement}`} role="img" aria-label="Note added">
+    <img src={noteUpdateIconUrl} alt="" aria-hidden draggable={false} />
+    <span className="violet-note-origin-label">Note</span>
+  </span>;
+}
+
 function SubagentUpdateMark({ placement }: { placement: 'summary' | 'entry' }) {
   return (
     <span
@@ -2099,7 +2108,7 @@ const ProgressEntrySpeaker = memo(function ProgressEntrySpeaker({
   return (
     <div className="violet-commentary-entry-speaker">
       <span
-        className={`violet-commentary-entry-avatar tavern-avatar-art ${agent?.avatarClass ?? providerAvatarClass(entry.agentId)}`}
+        className={`violet-commentary-entry-avatar tavern-avatar-art ${agent?.avatarClass ?? providerAvatarClass(entry.agentId, entry.shell)}`}
         style={avatarImageStyleForId(agent?.avatarId)}
         aria-hidden
       >
@@ -2121,6 +2130,12 @@ const ProgressEntryContent = memo(function ProgressEntryContent({
   projectRoot?: string | null;
 }) {
   const subagent = isSubagentProgressEntry(entry);
+  if (isNoteProgressEntry(entry)) {
+    return <div className="violet-commentary-entry-content note">
+      <NoteUpdateMark placement="entry" />
+      <MarkdownText text={entry.text} projectRoot={projectRoot} enableLocalFileRefs />
+    </div>;
+  }
   if (!subagent) {
     return <MarkdownText text={entry.text} projectRoot={projectRoot} enableLocalFileRefs />;
   }
@@ -2152,6 +2167,10 @@ function progressSummary(
 
 function isSubagentProgressEntry(entry?: VioletProgressEntry): boolean {
   return entry?.messageOrigin === 'subagent';
+}
+
+function isNoteProgressEntry(entry?: VioletProgressEntry): boolean {
+  return entry?.messageOrigin === 'note';
 }
 
 function progressEntriesForMessage(message: VioletRoomMessage): readonly VioletProgressEntry[] {
@@ -4835,19 +4854,21 @@ function projectAgentLifecycleStatus(status: string | null | undefined): 'archiv
   return null;
 }
 
-function providerAvatarClass(id: string): string {
+function providerAvatarClass(id: string, shell?: string | null): string {
   if (id === 'bartender') return 'system-bartender';
   if (id === 'bbs') return 'system-bbs';
   if (id === 'ember') return 'system-ember';
   if (id === 'laughing-man') return 'system-laughing-man';
   if (id === 'puppeteer') return 'system-puppeteer';
   if (id === 'violet') return 'system-violet';
+  if (shell === 'kota-local') return 'provider-kota-local';
   const baseId = id.replace(/-bunshin.*$/i, '').replace(/-\d+$/, '');
   if (baseId === 'hero-cc') return 'provider-claude';
   if (baseId === 'hero-dex') return 'provider-codex';
   if (baseId === 'hero-gem') return 'provider-antigravity';
   if (baseId === 'hero-op') return 'provider-opencode';
   if (baseId === 'hero-kimi') return 'provider-kimi';
+  if (baseId === 'hero-kota-local' || baseId === 'kota-local') return 'provider-kota-local';
   if (baseId === 'claude') return 'provider-claude';
   if (baseId === 'codex') return 'provider-codex';
   if (baseId === 'alice') return 'provider-claude';

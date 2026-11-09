@@ -15,7 +15,11 @@ mod signaling;
 mod tests;
 
 pub(crate) use control_channel::Delivery;
-pub(crate) use file_io::{FileIo, FileWriter, LocalIo, Resource, ResourceKind, VerifiedFile};
+pub(crate) use file_io::{
+    resumable_partial, resumable_partial_name, stale_resumable_partial, FileIo, FileWriter,
+    LocalIo, Resource,
+    ResourceKind, VerifiedFile, RESUME_SLICE,
+};
 pub(crate) use runtime_host::{Context, NetworkHost};
 pub(crate) use session::{Connection, NetworkMode, PendingConnection};
 pub(crate) use signaling::{PeerIdentity, SessionRole, SignedDescription};
@@ -31,6 +35,22 @@ pub(crate) const APP_QUEUE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_CONNECTIONS: usize = 4;
 pub(crate) const BYTES_PER_SECOND: u64 = 8 * 1024 * 1024;
 pub(crate) const PROGRESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Selected by the authenticated inner TLS connection, independently of the
+/// relay envelope's peerVersion. The isolated legacy RTC path stays on v4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExchangeVersion {
+    V4,
+    V5,
+}
+impl ExchangeVersion {
+    pub(crate) fn number(self) -> u32 {
+        match self {
+            Self::V4 => 4,
+            Self::V5 => 5,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Error {

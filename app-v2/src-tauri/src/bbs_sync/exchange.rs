@@ -4,10 +4,14 @@ use super::roster;
 use super::{
     public::Failure,
     reconcile::{self, Catalog, Issue, ManifestReader},
-    transport::{self, Cancellation, Connection, Context, Error, Resource, ResourceKind, Result},
+    transport::{
+        self, data_channel::Slice, Cancellation, Connection, Context, Error, ExchangeVersion,
+        Resource, ResourceKind, Result,
+    },
     valid_hash, Manifest, ManifestPhase, PostVersion,
 };
 use crate::bbs::sync::{ContentStore, GroupFence};
+use crate::bbs::cache::Deps;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -23,14 +27,15 @@ use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, OwnedSemaphorePermit, Sema
 mod delta;
 
 const MAX_JOBS: usize = 32;
-// v3 adds direct-peer Roster RPC after the four content phases.
+// Legacy wire fixture version. Relay connections use their TLS selection.
+#[cfg(test)]
 const EXCHANGE_PROTOCOL_VERSION: u32 = 4;
 const MAX_FAILURES: usize = 128;
 const PAGE_BUDGET: usize = 12_000;
 const PLAN_BUDGET: usize = 256 * 1024;
 
-fn check_protocol_version(peer: u32) -> Result<()> {
-    if peer == EXCHANGE_PROTOCOL_VERSION {
+fn check_protocol_version(peer: u32, negotiated: ExchangeVersion) -> Result<()> {
+    if peer == negotiated.number() {
         Ok(())
     } else {
         Err(Error::ProtocolVersion)
@@ -55,6 +60,12 @@ pub(crate) struct Outcome {
     pub more: bool,
 }
 impl Outcome {
+    /// Every planned item was attempted. A failed item is reported and stays
+    /// for the next full catalog or Manual round; it does not hold back the
+    /// checkpoint, the other items, or the peer.
+    pub(crate) fn settled(&self) -> bool {
+        !self.more && self.completed + self.failures.len() as u64 + self.omitted >= self.total
+    }
     fn failure(&mut self, f: Failure) {
         if self.failures.len() < MAX_FAILURES {
             self.failures.push(f)
@@ -155,6 +166,9 @@ enum Request {
     Get {
         round: String,
         resource: Resource,
+        // v5 attachments only. Absent means the whole file, exactly as v4.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Range>,
     },
     Turn {
         round: String,
@@ -163,6 +177,24 @@ enum Request {
         round: String,
         result: Outcome,
     },
+}
+/// One attachment slice: offsets are absolute, aligned to RESUME_SLICE.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Range {
+    offset: u64,
+    length: u64,
+}
+impl Range {
+    fn valid_for(&self, resource: &Resource) -> bool {
+        let size = resource.size_bytes;
+        matches!(resource.identity, ResourceKind::Attachment { .. })
+            && self.length > 0
+            && self.offset % transport::RESUME_SLICE == 0
+            && self.offset.checked_add(self.length).is_some_and(|end| {
+                end <= size && (end == size || self.length == transport::RESUME_SLICE)
+            })
+    }
 }
 impl Request {
     fn stage(&self) -> &'static str {
@@ -258,6 +290,7 @@ struct Session {
 #[derive(Clone)]
 struct Snapshot {
     catalog: Arc<Catalog>,
+    inputs: Arc<Deps>,
     roster: Option<Arc<roster::wire::Local>>,
     revision: String,
     issues: Vec<Failure>,
@@ -281,11 +314,38 @@ pub(crate) struct Engine {
     pub(crate) roster: Option<Arc<roster::runtime::Runtime>>,
     #[cfg(test)]
     manifest_items: [AtomicU64; 4],
+    // 2(a), memory only and per account, because a relay link lives for one
+    // round: `local_serial` counts local content changes; `yielded` is, per
+    // peer, the latest serial it was yielded to or pulled completely. So a
+    // peer gets at most one yield per local change, whatever its outcome, and
+    // a catalog that merely echoes its own content back re-arms nothing.
+    local_serial: AtomicU64,
+    yielded: Mutex<BTreeMap<String, u64>>,
+    /// Inner Request/Response pairs this account initiated.
+    #[cfg(test)]
+    rpc_requests: AtomicU64,
 }
 impl Engine {
     #[cfg(test)]
     pub(crate) fn manifest_counts(&self) -> [u64; 4] {
         std::array::from_fn(|i| self.manifest_items[i].load(Ordering::Relaxed))
+    }
+    #[cfg(test)]
+    pub(crate) fn rpc_requests(&self) -> u64 {
+        self.rpc_requests.load(Ordering::Relaxed)
+    }
+    /// Local content changed (publication, deletion or local roster).
+    pub(crate) fn local_changed(&self) {
+        self.local_serial.fetch_add(1, Ordering::Relaxed);
+    }
+    fn yielded(&self, remote: &str) -> u64 {
+        self.yielded.lock().map_or(0, |m| m.get(remote).copied().unwrap_or(0))
+    }
+    fn mark_yielded(&self, remote: &str, serial: u64) {
+        if let Ok(mut m) = self.yielded.lock() {
+            let entry = m.entry(remote.to_string()).or_insert(0);
+            *entry = (*entry).max(serial);
+        }
     }
     pub(crate) fn new(
         store: ContentStore,
@@ -306,6 +366,10 @@ impl Engine {
             roster: None,
             #[cfg(test)]
             manifest_items: std::array::from_fn(|_| AtomicU64::new(0)),
+            local_serial: AtomicU64::new(1),
+            yielded: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            rpc_requests: AtomicU64::new(0),
         })
     }
     pub(crate) async fn refresh(&self, cancel: &Cancellation) -> Result<()> {
@@ -324,8 +388,9 @@ impl Engine {
             .io
             .run_in_round(cancel, move |io| -> anyhow::Result<_> {
                 store.recover_staging(io)?;
-                let issues = store.refresh(&fence, io)?;
-                let catalog = store.catalog(&fence)?;
+                let mut inputs = Deps::new();
+                let issues = store.refresh_tracked(&fence, io, &mut inputs)?;
+                let catalog = store.catalog_tracked(&fence, &mut inputs)?;
                 let revision = catalog
                     .revision_with_roster(roster.as_ref().map(|r| r.version.as_str()));
                 let cache_bytes = delta::cache_bytes(&catalog);
@@ -334,6 +399,7 @@ impl Engine {
                 outcome.issues("local", issues);
                 Ok((Snapshot {
                     catalog: Arc::new(catalog),
+                    inputs: Arc::new(inputs),
                     roster,
                     revision,
                     issues: outcome.failures,
@@ -346,6 +412,21 @@ impl Engine {
         *self.snapshot.lock().map_err(|_| Error::Runtime)? = Some(snapshot);
         self.delta.lock().map_err(|_| Error::Runtime)?.flushed(generation, cached);
         Ok(())
+    }
+
+    /// Stat-only fallback for publications whose marker was missed. Keep all
+    /// work on the existing account file service and round permit.
+    pub(crate) async fn inspect_idle(&self, cancel: &Cancellation) -> Result<bool> {
+        let _round = self.rounds.clone().try_acquire_owned().map_err(|_| Error::Busy)?;
+        let snapshot = self.snapshot.lock().map_err(|_| Error::Runtime)?.clone();
+        let Some(snapshot) = snapshot else { return Ok(true) };
+        let roster = self.roster.as_ref().and_then(|r| r.source());
+        if snapshot.roster.as_ref().map(|r| &r.version) != roster.as_ref().map(|r| &r.version) {
+            return Ok(true);
+        }
+        self.context.io.run_in_round(cancel, move |io| {
+            snapshot.inputs.unchanged_with(|| io.check()).map(|same| !same)
+        }).await?
     }
 
     pub(crate) fn revision(&self) -> Result<String> {
@@ -361,6 +442,10 @@ impl Engine {
     }
     pub(crate) fn force_full_catalogs(&self) {
         if let Ok(mut cache) = self.delta.lock() { cache.force_full(); }
+    }
+    #[cfg(test)]
+    pub(crate) fn expire_full_catalog(&self, remote: &str) {
+        self.delta.lock().unwrap().expire(remote, std::time::Instant::now());
     }
     pub(crate) fn full_catalog_due(&self, remote: &str) -> bool {
         self.delta.lock().is_ok_and(|cache| cache.due(remote, std::time::Instant::now()))
@@ -409,11 +494,20 @@ pub(crate) struct Link {
     remote_work: AtomicU64,
     last_input: Mutex<std::time::Instant>,
     file_work: AtomicBool,
+    // Either side changed content after this round opened. A v5 attachment
+    // pull stops at its next slice boundary so the new bodies go first.
+    changed_in_round: AtomicBool,
     reported: AtomicBool,
     roster_unavailable: AtomicBool,
     trace: Mutex<Trace>,
     #[cfg(test)]
     finish_credit: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// Receiver: called with the durable offset after each completed slice.
+    #[cfg(test)]
+    pub(crate) after_slice: Mutex<Option<Box<dyn Fn(u64) + Send + Sync>>>,
+    /// Sender: every ranged Get served, as (offset, length); whole Gets as None.
+    #[cfg(test)]
+    pub(crate) served: Mutex<Vec<Option<(u64, u64)>>>,
 }
 impl Link {
     fn emit(&self, event: Event) {
@@ -441,11 +535,16 @@ impl Link {
             remote_work: AtomicU64::new(0),
             last_input: Mutex::new(std::time::Instant::now()),
             file_work: AtomicBool::new(false),
+            changed_in_round: AtomicBool::new(false),
             reported: AtomicBool::new(false),
             roster_unavailable: AtomicBool::new(false),
             trace: Mutex::new(Trace::default()),
             #[cfg(test)]
             finish_credit: Mutex::new(None),
+            #[cfg(test)]
+            after_slice: Mutex::new(None),
+            #[cfg(test)]
+            served: Mutex::new(Vec::new()),
         });
         let (tx, rx) = mpsc::channel(1);
         // Transport cancellation can make a loop return Ok. Every exit must
@@ -494,7 +593,7 @@ impl Link {
             crate::kota_debug_log(&format!("[bbs-sync-trace] {}", serde_json::json!({
                 "pid": std::process::id(), "link": self.id,
                 "role": if self.smaller { "initiator" } else { "responder" },
-                "localProtocol": EXCHANGE_PROTOCOL_VERSION,
+                "localProtocol": self.connection.exchange_version().number(),
                 "site": site, "error": error.to_string(), "stage": trace,
             })));
             self.emit(Event::Failed(self.remote.clone(), error));
@@ -514,8 +613,17 @@ impl Link {
         *self.finish_credit.lock().unwrap() = Some((reached, released));
         (observed, release)
     }
+    /// Content changed: tell the peer, and let both sides' attachment pulls
+    /// stop at their next slice boundary so the new bodies go first. The
+    /// account counts a local change itself (Engine::local_changed).
     pub(crate) async fn changed(&self) -> Result<()> {
+        self.changed_in_round.store(true, Ordering::Relaxed);
         self.send(Packet::Changed).await
+    }
+    #[cfg(test)]
+    pub(crate) fn note_local_change(&self) {
+        self.changed_in_round.store(true, Ordering::Relaxed);
+        self.engine.local_changed();
     }
     async fn send(&self, packet: Packet) -> Result<()> {
         let bytes = serde_json::to_vec(&packet).map_err(|_| Error::Protocol)?;
@@ -526,6 +634,8 @@ impl Link {
     }
     async fn rpc(&self, body: Request) -> Result<Response> {
         let _serial = self.rpc_lock.lock().await;
+        #[cfg(test)]
+        self.engine.rpc_requests.fetch_add(1, Ordering::Relaxed);
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         {
             let mut trace = self.trace.lock().unwrap();
@@ -629,6 +739,7 @@ impl Link {
                 }
                 Packet::Changed => {
                     delivery.acknowledge()?;
+                    self.changed_in_round.store(true, Ordering::Relaxed);
                     self.emit(Event::Changed(self.remote.clone()));
                 }
                 Packet::Working { counter } => {
@@ -692,7 +803,7 @@ impl Link {
                     revision,
                     checkpoint,
                 } => {
-                    check_protocol_version(protocol_version)?;
+                    check_protocol_version(protocol_version, self.connection.exchange_version())?;
                     if self.smaller
                         || uuid::Uuid::parse_str(&round)
                             .map_err(|_| Error::Protocol)?
@@ -724,6 +835,7 @@ impl Link {
                         let answer_checkpoint = if incremental {
                             delta.as_ref().and_then(|d| d.checkpoint.clone())
                         } else { None };
+                        self.changed_in_round.store(false, Ordering::Relaxed);
                         *self.session.lock().map_err(|_| Error::Runtime)? = Session {
                             id: Some(round),
                             stage: 1,
@@ -742,7 +854,7 @@ impl Link {
                         self.send(Packet::Response {
                             id,
                             body: Answer::Open {
-                                protocol_version: EXCHANGE_PROTOCOL_VERSION,
+                                protocol_version: self.connection.exchange_version().number(),
                                 revision: snapshot.revision,
                                 checkpoint: answer_checkpoint,
                                 omitted: snapshot.omitted
@@ -810,9 +922,15 @@ impl Link {
                         self.roster_response(&round, after.as_deref(), known_version.as_deref())?;
                     self.send(Packet::Response { id, body }).await?;
                 }
-                Request::Get { round, resource } => {
+                Request::Get { round, resource, range } => {
                     let catalog = self.catalog_for(&round)?;
                     resource.validate()?;
+                    if range.is_some_and(|r| {
+                        self.connection.exchange_version() != ExchangeVersion::V5
+                            || !r.valid_for(&resource)
+                    }) {
+                        return Err(Error::Protocol);
+                    }
                     let store = self.engine.store.clone();
                     let fence = self.engine.fence.clone();
                     let r = resource.clone();
@@ -827,13 +945,22 @@ impl Link {
                         .await;
                     match path {
                         Ok(Ok(path)) => {
+                            #[cfg(test)]
+                            self.served.lock().unwrap().push(range.map(|r| (r.offset, r.length)));
                             self.send(Packet::Response {
                                 id,
                                 body: Answer::Ok,
                             })
                             .await?;
                             self.file_work.store(true, Ordering::Relaxed);
-                            let result = self.connection.send_file(resource, &path).await;
+                            let result = match range {
+                                Some(r) => {
+                                    self.connection
+                                        .send_range(resource, &path, r.offset, r.offset + r.length)
+                                        .await
+                                }
+                                None => self.connection.send_file(resource, &path).await,
+                            };
                             self.file_work.store(false, Ordering::Relaxed);
                             result?;
                         }
@@ -863,7 +990,7 @@ impl Link {
                     .await?;
                     let link = self.clone();
                     tokio::spawn(async move {
-                        let result = link.pull(&round).await;
+                        let result = link.pull(&round, None).await;
                         match result {
                             Ok(outcome) => {
                                 let sent = link
@@ -879,11 +1006,7 @@ impl Link {
                                             .lock()
                                             .ok()
                                             .and_then(|s| s.peer_revision.clone());
-                                        if outcome.failures.is_empty()
-                                            && outcome.omitted == 0
-                                            && !outcome.more
-                                            && outcome.completed == outcome.total
-                                        {
+                                        if outcome.settled() {
                                             if let Some(peer_revision) = peer_revision {
                                                 let _ = link.engine.confirm_checkpoint(
                                                     &link.remote,
@@ -950,6 +1073,7 @@ impl Link {
             .clone()
             .ok_or(Error::Busy)?;
         let round = uuid::Uuid::new_v4().to_string();
+        self.changed_in_round.store(false, Ordering::Relaxed);
         let delta = self.engine.delta_start(&self.remote)?;
         let checkpoint = delta.as_ref().and_then(|d| d.checkpoint.clone());
         let (done, mut finished) = oneshot::channel();
@@ -981,10 +1105,13 @@ impl Link {
             .clone();
         let mut peer_declined = false;
         let mut remote_revision = None;
+        // The peer still has local content of ours to pull in this round.
+        let mut owed = false;
+        let serial = self.engine.local_serial.load(Ordering::Relaxed);
         let result = async {
             let response = self
                 .rpc(Request::Open {
-                    protocol_version: EXCHANGE_PROTOCOL_VERSION,
+                    protocol_version: self.connection.exchange_version().number(),
                     round: round.clone(),
                     revision: revision.clone(),
                     checkpoint: checkpoint.clone(),
@@ -1003,7 +1130,7 @@ impl Link {
                     failures,
                     omitted,
                 } => {
-                    check_protocol_version(protocol_version)?;
+                    check_protocol_version(protocol_version, self.connection.exchange_version())?;
                     if valid_hash(&revision).is_err()
                         || checkpoint.as_deref().is_some_and(|v| valid_hash(v).is_err())
                     {
@@ -1015,6 +1142,7 @@ impl Link {
                         let (pages, _) = session.delta.as_ref()
                             .map(|d| d.select(&snapshot, checkpoint.as_deref()))
                             .unwrap_or((snapshot.catalog.clone(), false));
+                        owed = !pages.is_empty() && self.engine.yielded(&self.remote) < serial;
                         session.pages = Some(pages);
                         // A null response requests full in both directions.
                         // Mismatched non-null baselines only force our outbound
@@ -1038,7 +1166,7 @@ impl Link {
             }
             drop(response._delivery);
             self.emit(Event::Started(self.remote.clone()));
-            outcome.merge(self.pull(&round).await?);
+            outcome.merge(self.pull(&round, owed.then_some(serial)).await?);
             {
                 let mut session = self.session.lock().map_err(|_| Error::Runtime)?;
                 session.stage = 2;
@@ -1053,7 +1181,12 @@ impl Link {
                 tokio::select! {
                     _ = self.stop.cancelled() => return Err(Error::Cancelled),
                     result = &mut finished => {
-                        outcome.merge(result.map_err(|_| Error::Closed)?);
+                        let peer = result.map_err(|_| Error::Closed)?;
+                        if peer.settled() {
+                            // It pulled the whole catalog named by this Open.
+                            self.engine.mark_yielded(&self.remote, serial);
+                        }
+                        outcome.merge(peer);
                         break;
                     }
                     _ = tokio::time::sleep(transport::PROGRESS_TIMEOUT) => {
@@ -1065,11 +1198,7 @@ impl Link {
                     }
                 }
             }
-            if outcome.failures.is_empty()
-                && outcome.omitted == 0
-                && !outcome.more
-                && outcome.completed == outcome.total
-            {
+            if outcome.settled() {
                 if let Some(remote_revision) = remote_revision.as_deref() {
                     self.engine.confirm_checkpoint(&self.remote, remote_revision)?;
                     let session = self.session.lock().map_err(|_| Error::Runtime)?;
@@ -1092,7 +1221,9 @@ impl Link {
         }
         result
     }
-    async fn pull(&self, round: &str) -> Result<Outcome> {
+    /// `owed`: the local serial the peer still has to pull from us after this
+    /// half of the round, if any.
+    async fn pull(&self, round: &str, owed: Option<u64>) -> Result<Outcome> {
         // Includes parsed descriptors, jobs and their transient serialization.
         let _budget = self.engine.context.limits.reserve(PLAN_BUDGET)?;
         let mut reader = ManifestReader::default();
@@ -1194,16 +1325,57 @@ impl Link {
             .await?;
         outcome.total = jobs.len() as u64;
         self.emit(Event::Progress(self.remote.clone(), 0, outcome.total));
+        let ranged = self.connection.exchange_version() == ExchangeVersion::V5;
+        let mut slicing = Slicing { bytes: 0 };
+        let count = jobs.len();
+        let attachment_bytes: u64 = jobs
+            .iter()
+            .filter(|job| job.ranged())
+            .map(|job| job.resource.size_bytes)
+            .sum();
         for (index, job) in jobs.into_iter().enumerate() {
             if index > 0 && self.engine.yield_requested.load(Ordering::Relaxed) {
                 outcome.more = true;
                 break;
             }
-            let result = self.fetch(round, &job, peer_roster.clone()).await;
+            // Slice boundary 0: every body of this round is in. If the peer
+            // still pulls our new content and more than one slice of files
+            // remains, let it pull first instead of making its bodies wait.
+            if let Some(serial) = owed.filter(|_| {
+                ranged
+                    && job.ranged()
+                    && slicing.bytes == 0
+                    && attachment_bytes > transport::RESUME_SLICE
+            }) {
+                // Once per local serial, even if the peer's pull stays partial.
+                self.engine.mark_yielded(&self.remote, serial);
+                outcome.more = true;
+                break;
+            }
+            let result = if ranged && job.ranged() {
+                self.fetch_ranged(round, &job, peer_roster.clone(), &mut slicing).await
+            } else {
+                self.fetch(round, &job, peer_roster.clone()).await.map(|()| Fetched::Done)
+            };
             match result {
-                Ok(()) => outcome.completed += 1,
-                Err(Error::Cancelled | Error::Closed | Error::Timeout | Error::Unauthorized) => {
-                    return Err(result.unwrap_err())
+                Ok(Fetched::Done) => {
+                    outcome.completed += 1;
+                    if job.ranged() && index + 1 < count && self.bodies_waiting(&slicing) {
+                        outcome.more = true;
+                        self.emit(Event::Progress(
+                            self.remote.clone(),
+                            outcome.completed,
+                            outcome.total,
+                        ));
+                        break;
+                    }
+                }
+                Ok(Fetched::Cut) => {
+                    outcome.more = true;
+                    break;
+                }
+                Err(error @ (Error::Cancelled | Error::Closed | Error::Timeout | Error::Unauthorized)) => {
+                    return Err(error)
                 }
                 Err(Error::Busy) => {
                     outcome.more = true;
@@ -1223,12 +1395,19 @@ impl Link {
         }
         Ok(outcome)
     }
-    async fn fetch(
+    /// At a later slice boundary, stop receiving attachment bytes when either
+    /// side changed content after this round opened: its new bodies go first.
+    fn bodies_waiting(&self, slicing: &Slicing) -> bool {
+        slicing.bytes >= transport::RESUME_SLICE
+            && self.changed_in_round.load(Ordering::Relaxed)
+    }
+    /// Local reuse first, then admission for a network receive. None means the
+    /// resource is already installed from a local copy.
+    async fn admit(
         &self,
-        round: &str,
         job: &Job,
         roster: Option<roster::reference::Peer>,
-    ) -> Result<()> {
+    ) -> Result<Option<std::path::PathBuf>> {
         let store = self.engine.store.receiving_from(&self.remote).map_err(|_| Error::Unauthorized)?;
         let fence = self.engine.fence.clone();
         let resource = job.resource.clone();
@@ -1251,13 +1430,13 @@ impl Link {
             .map_err(|_| Error::Io)?;
         if copied {
             self.avatar_installed(&job.resource);
-            return Ok(());
+            return Ok(None);
         }
         let store = self.engine.store.receiving_from(&self.remote).map_err(|_| Error::Unauthorized)?;
         let fence = self.engine.fence.clone();
         let resource = job.resource.clone();
         let offered = job.offered.clone();
-        let peer = roster.clone();
+        let peer = roster;
         let staging = self
             .engine
             .context
@@ -1272,6 +1451,17 @@ impl Link {
             })
             .await?
             .map_err(|_| Error::InvalidResource)?;
+        Ok(Some(staging))
+    }
+    async fn fetch(
+        &self,
+        round: &str,
+        job: &Job,
+        roster: Option<roster::reference::Peer>,
+    ) -> Result<()> {
+        let Some(staging) = self.admit(job, roster.clone()).await? else {
+            return Ok(());
+        };
         #[cfg(not(test))]
         let started = std::time::Instant::now();
         let incoming = self
@@ -1282,6 +1472,7 @@ impl Link {
             .rpc(Request::Get {
                 round: round.into(),
                 resource: job.resource.clone(),
+                range: None,
             })
             .await?;
         match response.answer {
@@ -1323,12 +1514,104 @@ impl Link {
         ));
         result
     }
+    /// v5 attachment: one Get per slice into a deterministic partial, so a
+    /// lost link or a stop at a slice boundary resumes where it left off.
+    async fn fetch_ranged(
+        &self,
+        round: &str,
+        job: &Job,
+        roster: Option<roster::reference::Peer>,
+        slicing: &mut Slicing,
+    ) -> Result<Fetched> {
+        let Some(staging) = self.admit(job, roster.clone()).await? else {
+            crate::bbs::sync::mark_attachment_paused(&job.resource, false);
+            return Ok(Fetched::Done);
+        };
+        let size = job.resource.size_bytes;
+        self.file_work.store(true, Ordering::Relaxed);
+        let file = self.connection.resume_file(job.resource.clone(), &staging).await;
+        self.file_work.store(false, Ordering::Relaxed);
+        let mut file = file?;
+        loop {
+            let offset = file.offset();
+            let length = transport::RESUME_SLICE.min(size - offset);
+            let incoming = file.expect(length)?;
+            let response = self
+                .rpc(Request::Get {
+                    round: round.into(),
+                    resource: job.resource.clone(),
+                    range: Some(Range { offset, length }),
+                })
+                .await?;
+            match response.answer {
+                Answer::Rejected { .. } | Answer::Busy => {
+                    incoming.declined();
+                    crate::bbs::sync::mark_attachment_paused(&job.resource, true);
+                    return Err(Error::InvalidResource);
+                }
+                Answer::Ok => {}
+                _ => return Err(Error::Protocol),
+            }
+            self.file_work.store(true, Ordering::Relaxed);
+            let slice = incoming.finish().await;
+            self.file_work.store(false, Ordering::Relaxed);
+            self.connection.recheck_membership()?;
+            slicing.bytes += length;
+            #[cfg(test)]
+            if let (Ok(Slice::Partial(at)), Some(hook)) = (&slice, self.after_slice.lock().unwrap().as_ref()) {
+                hook(*at);
+            }
+            let verified = match slice {
+                Ok(Slice::Partial(_)) if self.bodies_waiting(slicing) => return Ok(Fetched::Cut),
+                Ok(Slice::Partial(_)) => continue,
+                Ok(Slice::Verified(verified)) => verified,
+                Err(error @ Error::Integrity) => {
+                    crate::bbs::sync::mark_attachment_paused(&job.resource, true);
+                    return Err(error);
+                }
+                Err(error @ Error::Io) => {
+                    crate::bbs::sync::mark_attachment_paused(&job.resource, false);
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
+            let installed = self
+                .engine
+                .store
+                .receiving_from(&self.remote)
+                .map_err(|_| Error::Unauthorized)?
+                .install_received_with_roster(
+                    verified,
+                    self.engine.fence.clone(),
+                    job.offered.clone(),
+                    roster,
+                    &self.stop,
+                )
+                .await;
+            // A failed install is local; the verified partial stays for retry.
+            crate::bbs::sync::mark_attachment_paused(&job.resource, false);
+            return installed.map(|()| Fetched::Done).map_err(|_| Error::Io);
+        }
+    }
+}
+/// Attachment bytes received in one pull, for the slice-boundary rule.
+struct Slicing {
+    bytes: u64,
+}
+enum Fetched {
+    Done,
+    /// Stopped at a slice boundary; the partial resumes in the next round.
+    Cut,
 }
 struct Job {
     resource: Resource,
     offered: Option<PostVersion>,
 }
 impl Job {
+    fn ranged(&self) -> bool {
+        matches!(self.resource.identity, ResourceKind::Attachment { .. })
+            && self.resource.size_bytes > 0
+    }
     fn priority(&self) -> (u8, String) {
         match &self.resource.identity {
             ResourceKind::Post { post_id, .. } => (

@@ -4,7 +4,7 @@ use super::wire::{Declarations, Role};
 use super::{Error, Result, SessionContext, SignedStatement, MAX_BATCH};
 use crate::bbs_sync::{
     raw_sha256,
-    transport::{Cancellation, MembershipCheck, MAX_FRAME},
+    transport::{Cancellation, ExchangeVersion, MembershipCheck, MAX_FRAME},
     DeviceIdentity,
 };
 use rustls::{
@@ -193,7 +193,8 @@ fn client_config(credentials: &Credentials, fingerprint: String) -> Result<Clien
     config.resumption = rustls::client::Resumption::disabled();
     config.enable_early_data = false;
     config.enable_sni = false;
-    config.alpn_protocols.clear();
+    // v5 adds attachment slices. A 0.1.26 peer sends no ALPN and stays on v4.
+    config.alpn_protocols = vec![b"kota-bbs/5".to_vec(), b"kota-bbs/4".to_vec()];
     config.max_fragment_size = Some(MAX_FRAME);
     Ok(config)
 }
@@ -207,7 +208,7 @@ fn server_config(credentials: &Credentials, fingerprint: String) -> Result<Serve
     config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
     config.send_tls13_tickets = 0;
     config.max_early_data_size = 0;
-    config.alpn_protocols.clear();
+    config.alpn_protocols = vec![b"kota-bbs/5".to_vec(), b"kota-bbs/4".to_vec()];
     config.max_fragment_size = Some(MAX_FRAME);
     Ok(config)
 }
@@ -397,6 +398,16 @@ impl TlsStream {
     pub(crate) fn handshake_complete(&mut self) -> Result<bool> {
         self.check()?;
         Ok(!self.connection.is_handshaking())
+    }
+    pub(super) fn exchange_version(&mut self) -> Result<ExchangeVersion> {
+        if !self.handshake_complete()? {
+            return Err(Error::Busy);
+        }
+        match self.connection.alpn_protocol() {
+            None | Some(b"kota-bbs/4") => Ok(ExchangeVersion::V4),
+            Some(b"kota-bbs/5") => Ok(ExchangeVersion::V5),
+            Some(_) => self.fail(Error::ProtocolVersion),
+        }
     }
     /// Never feeds more input while decrypted plaintext is waiting. A batch can
     /// span multiple calls; its owner retains the unconsumed suffix and credit.

@@ -908,6 +908,7 @@ function SingleAgentWindow({
 }
 
 function providerAvatarClass(cli: AgentStatusEvent['cli'] | undefined, id: AgentId): string {
+  if (cli === 'kota-local') return 'provider-kota-local';
   return avatarClassForAgentFallback(cli, id);
 }
 

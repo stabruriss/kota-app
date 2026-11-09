@@ -105,7 +105,8 @@ fn real_tls13_mutual_auth_fragments_and_plaintext_follow_the_same_stream() {
         if let Connection::Server(s) = &server.connection {
             assert_eq!(s.server_name(), None);
         }
-        assert_eq!(client.connection.alpn_protocol(), None);
+        assert_eq!(client.connection.alpn_protocol(), Some(b"kota-bbs/5".as_slice()));
+        assert_eq!(client.exchange_version(), Ok(ExchangeVersion::V5));
         for forward in [true, false] {
             let (from, to) = if forward {
                 (&mut client, &mut server)
@@ -126,6 +127,77 @@ fn real_tls13_mutual_auth_fragments_and_plaintext_follow_the_same_stream() {
     let (a, _) = pending();
     let (b, _) = pending();
     assert_ne!(a.credentials.fingerprint(), b.credentials.fingerprint());
+}
+
+#[test]
+fn alpn_selects_v5_or_legacy_v4_in_both_tls_roles() {
+    let new: &[&[u8]] = &[b"kota-bbs/5", b"kota-bbs/4"];
+    let v4: &[&[u8]] = &[b"kota-bbs/4"];
+    for (offered, supported, expected) in [
+        (new, new, ExchangeVersion::V5),
+        (new, &[][..], ExchangeVersion::V4),
+        (&[][..], new, ExchangeVersion::V4),
+        (&[][..], &[][..], ExchangeVersion::V4),
+        (new, v4, ExchangeVersion::V4),
+        (v4, new, ExchangeVersion::V4),
+    ] {
+        let (client, server) = pending();
+        let mut c = client_config(&client.credentials, server.credentials.fingerprint()).unwrap();
+        let mut s = server_config(&server.credentials, client.credentials.fingerprint()).unwrap();
+        c.alpn_protocols = offered.iter().map(|p| p.to_vec()).collect();
+        s.alpn_protocols = supported.iter().map(|p| p.to_vec()).collect();
+        let offer = client.statement().clone();
+        let reply = server.statement().clone();
+        let mut client = client.accept(&reply, fixture().now).unwrap();
+        let mut server = server.accept(&offer, fixture().now).unwrap();
+        replace_connections(&mut client, &mut server, c, s);
+        assert_eq!(client.exchange_version(), Err(Error::Busy));
+        handshake(&mut client, &mut server, 101).unwrap();
+        assert_eq!(client.exchange_version(), Ok(expected));
+        assert_eq!(server.exchange_version(), Ok(expected));
+        assert_eq!(client.write_plaintext(b"same authenticated carrier"), Ok(26));
+        transfer(&mut client, &mut server, 101).unwrap();
+        let mut data = [0; 32];
+        let n = server.read_plaintext(&mut data).unwrap();
+        assert_eq!(&data[..n], b"same authenticated carrier");
+    }
+}
+
+#[test]
+fn production_config_against_a_0_1_26_peer_without_alpn_stays_on_v4() {
+    for legacy_client in [true, false] {
+        let (client, server) = pending();
+        let mut c = client_config(&client.credentials, server.credentials.fingerprint()).unwrap();
+        let mut s = server_config(&server.credentials, client.credentials.fingerprint()).unwrap();
+        // 0.1.26 clears ALPN in both roles; the other side keeps production.
+        if legacy_client { c.alpn_protocols.clear() } else { s.alpn_protocols.clear() }
+        let offer = client.statement().clone();
+        let reply = server.statement().clone();
+        let mut client = client.accept(&reply, fixture().now).unwrap();
+        let mut server = server.accept(&offer, fixture().now).unwrap();
+        replace_connections(&mut client, &mut server, c, s);
+        handshake(&mut client, &mut server, 101).unwrap();
+        assert_eq!(client.exchange_version(), Ok(ExchangeVersion::V4));
+        assert_eq!(server.exchange_version(), Ok(ExchangeVersion::V4));
+    }
+}
+
+#[test]
+fn unknown_selected_alpn_is_not_silently_downgraded() {
+    let (client, server) = pending();
+    let mut c = client_config(&client.credentials, server.credentials.fingerprint()).unwrap();
+    let mut s = server_config(&server.credentials, client.credentials.fingerprint()).unwrap();
+    c.alpn_protocols = vec![b"unknown-protocol".to_vec()];
+    s.alpn_protocols = c.alpn_protocols.clone();
+    let offer = client.statement().clone();
+    let reply = server.statement().clone();
+    let mut client = client.accept(&reply, fixture().now).unwrap();
+    let mut server = server.accept(&offer, fixture().now).unwrap();
+    replace_connections(&mut client, &mut server, c, s);
+    handshake(&mut client, &mut server, 101).unwrap();
+    assert_eq!(client.exchange_version(), Err(Error::ProtocolVersion));
+    assert_eq!(server.exchange_version(), Err(Error::ProtocolVersion));
+    assert_eq!(client.write_plaintext(b"must not escape"), Err(Error::ProtocolVersion));
 }
 
 #[test]

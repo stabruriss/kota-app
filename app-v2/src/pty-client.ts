@@ -63,6 +63,7 @@ const LM_STANDBY_DEPLOY_EVENT = 'lm-standby-deploy';
 const INCARNATION_PROGRESS_EVENT = 'kota://incarnation-progress';
 const BARTENDER_SYNC_EVENT = 'bartender-sync-local';
 const BARTENDER_SYNC_PROGRESS_EVENT = 'bartender-sync-progress';
+const BARTENDER_STATUS_CHANGED_EVENT = 'bartender-status-changed';
 const MOCK_TERMINAL_ENHANCEMENT_KEY = 'kota-v2.ghostty-terminal-enhancement';
 
 interface SpawnSmartPtyOptions {
@@ -1494,6 +1495,7 @@ export interface BbsAttachment {
   /** Read-time projection only; never persisted into post Markdown. */
   localPath: string;
   available: boolean;
+  syncState?: 'pending' | 'paused';
 }
 
 export interface BbsAttachmentValidation extends BbsAttachmentSource {
@@ -1924,6 +1926,7 @@ export interface ProjectAgentInviteEligibility {
 }
 
 export interface ProjectAgentDetail {
+  notes?: { exists: boolean; path: string };
   autoRoute?: AutoRouteGroup;
   agentId: string;
   displayName: string;
@@ -2372,6 +2375,16 @@ export async function onBartenderSyncProgressEvent(
   });
 }
 
+/** Bartender pushes the shown project's status whenever its live model moves. */
+export async function onBartenderStatusChangedEvent(
+  callback: (payload: BartenderStatus) => void,
+): Promise<UnlistenFn> {
+  if (!useTauriRuntime()) return async () => {};
+  return listen<BartenderStatus>(BARTENDER_STATUS_CHANGED_EVENT, (event: Event<BartenderStatus>) => {
+    callback(event.payload);
+  });
+}
+
 export async function bartenderPullFromGithub(
   request: BartenderRequest = {},
 ): Promise<BartenderPullResult> {
@@ -2667,12 +2680,22 @@ export interface LmLogEntry {
   offlineRecordedAt?: string | null;
 }
 
+export interface LmCloudflareError {
+  code: number | null;
+  message: string;
+  limit: string | null;
+  resetAt: string | null;
+  since: string;
+  notifiedFor?: string | null;
+}
+
 export interface LmStandbyStatus {
   workerUrl: string;
   live: boolean;
   lastHeartbeatAt?: string | null;
   lastSyncAt?: string | null;
   lastError?: string | null;
+  cloudflare?: LmCloudflareError | null;
   relayVersion?: string | null;
   protocolVersion?: string | null;
   recommendedVersion: string;
@@ -3887,6 +3910,11 @@ export async function checkProjectAgentSession(request: ProjectAgentRequest): Pr
   return invoke<boolean>('project_agent_check_session', { request });
 }
 
+export async function openProjectAgentNotes(request: ProjectAgentRequest): Promise<void> {
+  if (!useTauriRuntime()) return;
+  return invoke<void>('project_agent_notes_open', { request });
+}
+
 export function isSessionUnavailableError(error: unknown): boolean {
   return String(error).includes('KOTA_SESSION_UNAVAILABLE:');
 }
@@ -4143,6 +4171,7 @@ function mockProjectAgentDetail(
     adapterPath: `${root}/.agent-workspaces/${agentId}/AGENTS.md`,
     shellPath: `${root}/.agent-workspaces/${agentId}/SHELL.yaml`,
     agentYamlPath: `${root}/.agent-workspaces/${agentId}/agent.yaml`,
+    notes: { exists: false, path: `${root}/.agent-workspaces/${agentId}/under-table/soul/marks.json` },
     status: 'active',
     archivedAt: null,
     inviteEligibility: {

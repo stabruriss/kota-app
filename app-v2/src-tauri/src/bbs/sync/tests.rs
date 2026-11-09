@@ -3,6 +3,7 @@ use crate::bbs_sync::transport::{FileIo, Limits};
 use serde_json::{json, Value};
 use std::os::unix::fs::MetadataExt;
 mod unavailable_tests;
+mod cache_tests;
 
 struct Board {
     directory: PathBuf,
@@ -1033,4 +1034,45 @@ async fn sync_eligibility_does_not_limit_local_posts_or_hide_other_valid_records
             .len(),
         reconcile::MAX_BODY_BYTES as usize + 1
     );
+}
+
+#[tokio::test]
+async fn received_unverified_attachments_show_pending_or_paused_from_memory_only() {
+    let b = Board::new();
+    b.thread().await;
+    let bytes = b"attachment still in flight";
+    let (raw, mut post) = raw_post("root", "topic", "Body before its file", vec![attachment(bytes)]);
+    post.attachments[0].available = true;
+    b.receive_post(&post, &raw).await.unwrap();
+    let resource = reconcile::attachment_resource(&post, &post.attachments[0]);
+    let views = |store: &ContentStore| {
+        let state = store.state.load_state().unwrap().unwrap();
+        let (_, posts) = load_thread(store.root(), "thread-one").unwrap();
+        store
+            .attachment_views(&posts[0], Some(&state))
+            .into_iter()
+            .map(|v| (v.available, v.sync_state))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(views(&b.store), vec![(false, Some("pending"))]);
+    // The UI snapshot caches by file dependencies; the memory-only mark must
+    // still show on a cached read, with no file change in between.
+    let ui = |store: &ContentStore| {
+        serde_json::to_string(&crate::bbs::view_cache::load(store, "source", None).unwrap()).unwrap()
+    };
+    assert!(ui(&b.store).contains(r#""syncState":"pending""#));
+    // Only a failed verification or a source refusal is shown as paused; a
+    // local failure clears it back to pending.
+    mark_attachment_paused(&resource, true);
+    assert_eq!(views(&b.store), vec![(false, Some("paused"))]);
+    assert!(ui(&b.store).contains(r#""syncState":"paused""#));
+    mark_attachment_paused(&resource, false);
+    assert_eq!(views(&b.store), vec![(false, Some("pending"))]);
+    assert!(ui(&b.store).contains(r#""syncState":"pending""#));
+    let file = b.verified(resource, bytes).await;
+    b.store
+        .install_received(file, b.fence.clone(), None, &Cancellation::default())
+        .await
+        .unwrap();
+    assert_eq!(views(&b.store), vec![(true, None)]);
 }

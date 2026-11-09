@@ -25,6 +25,7 @@ pub(crate) mod launch;
 mod bridge;
 mod process;
 mod protocol;
+mod history;
 mod runtime;
 pub(crate) mod shadow_clone;
 mod workbench;

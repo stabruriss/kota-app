@@ -62,12 +62,24 @@ impl Call {
             )
     }
     pub(super) async fn complete(&self, pending: PendingHttp) -> Result<Reply> {
-        let reply = pending.wait().await?;
-        self.client.check(self.deadline)?;
-        if reply.status != 200 {
-            return Err(reply.error());
-        }
-        self.client.http.checked(reply.json())?;
+        self.diagnosed(Some(pending)).await.map_err(|(error, _)| error)
+    }
+    pub(super) async fn diagnosed(&self, pending: Option<PendingHttp>)
+        -> std::result::Result<Reply, (Error, Option<String>)>
+    {
+        let pending = match pending { Some(pending) => Ok(pending), None => self.submit() }
+            .map_err(|error| (error, None))?;
+        let reply = pending.wait().await.map_err(|error| (error, None))?;
+        self.received(reply)
+    }
+    pub(super) fn received(&self, reply: Reply) -> std::result::Result<Reply, (Error, Option<String>)> {
+        let failure = (reply.status != 200).then(|| reply.failure());
+        // A parsed Worker rejection must retain its cause even when the live
+        // lease expires before this final check. Authority still fails closed.
+        self.client.check(self.deadline).map_err(|error|
+            (error, failure.as_ref().and_then(|(_, cause)| cause.clone())))?;
+        if let Some(failure) = failure { return Err(failure); }
+        self.client.http.checked(reply.json()).map_err(|error| (error, None))?;
         Ok(reply)
     }
 }
@@ -146,63 +158,73 @@ impl Client {
     /// One whole group read, never one independent polling loop per peer.
     /// Partial pages remain private and all pages share one boot/deadline.
     pub(super) async fn poll(&self, now: u64, deadline: Instant) -> Result<Snapshot> {
-        let started = Instant::now();
-        let deadline = deadline.min(started + PROGRESS_TIMEOUT);
-        self.check(deadline)?;
-        let mut after: Option<String> = None;
-        let mut boot: Option<String> = None;
-        let mut items = BTreeMap::new();
-        // Even one item per page has a finite bound, including a terminal page.
-        for _ in 0..=MAX_MEMBERS {
-            let time = now
-                .checked_add(
-                    started
-                        .elapsed()
-                        .as_millis()
-                        .try_into()
-                        .map_err(|_| Error::Runtime)?,
-                )
-                .ok_or(Error::Runtime)?;
-            let signed = SignedRequest::sign(
-                &self.identity,
-                &self.membership.membership_id,
-                Target::poll(
-                    &self.membership.worker_url,
-                    &self.membership.group_id,
-                    after.as_deref(),
-                )?,
-                Fields::Read,
-                &[],
-                time,
-            )?;
-            let reply = self.call(signed, &[], deadline)?.execute().await?;
-            let page = self.http.checked(Page::decode(
-                reply.json()?,
-                &self.membership.group_id,
-                &self.local,
-                after.as_deref(),
-            ))?;
-            drop(reply); // No HTTP payload allocation retained across pages.
+        self.poll_diagnosed(now, deadline).await.map_err(|(error, _)| error)
+    }
+    pub(super) async fn poll_diagnosed(&self, now: u64, deadline: Instant)
+        -> std::result::Result<Snapshot, (Error, Option<String>)>
+    {
+        let mut cause = None;
+        let result = async {
+            let started = Instant::now();
+            let deadline = deadline.min(started + PROGRESS_TIMEOUT);
             self.check(deadline)?;
-            if boot.as_ref().is_some_and(|b| b != &page.boot) {
-                return Err(Error::RelaySessionLost);
+            let mut after: Option<String> = None;
+            let mut boot: Option<String> = None;
+            let mut items = BTreeMap::new();
+            // Even one item per page has a finite bound, including a terminal page.
+            for _ in 0..=MAX_MEMBERS {
+                let time = now
+                    .checked_add(
+                        started
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .map_err(|_| Error::Runtime)?,
+                    )
+                    .ok_or(Error::Runtime)?;
+                let signed = SignedRequest::sign(
+                    &self.identity,
+                    &self.membership.membership_id,
+                    Target::poll(
+                        &self.membership.worker_url,
+                        &self.membership.group_id,
+                        after.as_deref(),
+                    )?,
+                    Fields::Read,
+                    &[],
+                    time,
+                )?;
+                let reply = self.call(signed, &[], deadline)?.diagnosed(None).await
+                    .map_err(|(error, why)| { cause = why; error })?;
+                let page = self.http.checked(Page::decode(
+                    reply.json()?,
+                    &self.membership.group_id,
+                    &self.local,
+                    after.as_deref(),
+                ))?;
+                drop(reply); // No HTTP payload allocation retained across pages.
+                self.check(deadline)?;
+                if boot.as_ref().is_some_and(|b| b != &page.boot) {
+                    return Err(Error::RelaySessionLost);
+                }
+                boot = Some(page.boot);
+                if items.len() + page.items.len() > MAX_MEMBERS {
+                    return self.http.checked(Err(Error::Protocol));
+                }
+                for item in page.items {
+                    items.insert(item.device.clone(), item);
+                }
+                after = page.next;
+                if after.is_none() {
+                    return Ok(Snapshot {
+                        boot: boot.ok_or(Error::Protocol)?,
+                        items,
+                    });
+                }
             }
-            boot = Some(page.boot);
-            if items.len() + page.items.len() > MAX_MEMBERS {
-                return self.http.checked(Err(Error::Protocol));
-            }
-            for item in page.items {
-                items.insert(item.device.clone(), item);
-            }
-            after = page.next;
-            if after.is_none() {
-                return Ok(Snapshot {
-                    boot: boot.ok_or(Error::Protocol)?,
-                    items,
-                });
-            }
-        }
-        self.http.checked(Err(Error::Protocol))
+            self.http.checked(Err(Error::Protocol))
+        }.await;
+        result.map_err(|error| (error, cause))
     }
     /// The caller must have durably prepared this intent before making a call,
     /// and completes it through Outbox only outside accepted content rounds.

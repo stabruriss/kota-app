@@ -280,6 +280,7 @@ async fn platform_error_retires_activity_as_resource_without_guessing_quota_or_r
         Err(Failure::Response {
             operation: Operation::Receive,
             error,
+            ..
         }) => {
             assert_eq!(error, Error::CloudflareResourceLimit);
         }
