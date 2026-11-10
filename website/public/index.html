@@ -7,14 +7,31 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/assets/kota/app-icons/32x32.png">
 <link rel="icon" type="image/png" sizes="128x128" href="/assets/kota/app-icons/128x128.png">
 <link rel="apple-touch-icon" href="/assets/kota/app-icons/icon.png">
-<script src="./support.js"></script>
+<style>
+@font-face{font-family:'Hanken Grotesk';font-style:normal;font-weight:400 800;font-display:swap;src:url('/assets/fonts/hanken-grotesk-v12-latin-ext-normal.woff2') format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:'Hanken Grotesk';font-style:normal;font-weight:400 800;font-display:swap;src:url('/assets/fonts/hanken-grotesk-v12-latin-normal.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:'Hanken Grotesk';font-style:italic;font-weight:500 600;font-display:swap;src:url('/assets/fonts/hanken-grotesk-v12-latin-ext-italic.woff2') format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:'Hanken Grotesk';font-style:italic;font-weight:500 600;font-display:swap;src:url('/assets/fonts/hanken-grotesk-v12-latin-italic.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('/assets/fonts/jetbrains-mono-v24-latin-ext-normal.woff2') format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C4,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400 600;font-display:swap;src:url('/assets/fonts/jetbrains-mono-v24-latin-normal.woff2') format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:'IM Fell English';font-style:normal;font-weight:400;font-display:swap;src:url('/assets/fonts/im-fell-english-v14-latin-normal.woff2') format('woff2')}
+@font-face{font-family:'IM Fell English';font-style:italic;font-weight:400;font-display:swap;src:url('/assets/fonts/im-fell-english-v14-latin-italic.woff2') format('woff2')}
+@font-face{font-family:'Noto Serif TC';font-style:normal;font-weight:900;font-display:swap;src:url('/assets/fonts/noto-serif-tc-v35-zh-900.woff2') format('woff2')}
+@font-face{font-family:'Noto Serif JP';font-style:normal;font-weight:900;font-display:swap;src:url('/assets/fonts/noto-serif-jp-v30-ja-900.woff2') format('woff2')}
+@font-face{font-family:'Frank Ruhl Libre';font-style:normal;font-weight:700;font-display:swap;src:url('/assets/fonts/frank-ruhl-libre-v16-he-700.woff2') format('woff2')}
+html,body{margin:0;background:#0c0b0a;color:#f1ece5;font-family:'Hanken Grotesk',system-ui,sans-serif}
+x-dc{display:block}
+helmet{display:none}
+</style>
+<style id="dc-prehide">x-dc{display:none!important}</style>
+<script>window.__dcPrehideDeadline=Date.now()+5000;setTimeout(function(){window.__dcPrehideRevealed=true;var s=document.getElementById("dc-prehide");if(s)s.remove();if(window.__dcRemoveHide)window.__dcRemoveHide()},5000)</script>
+<link rel="preload" as="script" href="/assets/vendor/react-18.3.1.production.min.js">
+<link rel="preload" as="script" href="/assets/vendor/react-dom-18.3.1.production.min.js">
+<script src="./support.js" defer onerror="window.__dcPrehideRevealed=true;var s=document.getElementById('dc-prehide');if(s)s.remove();if(window.__dcRemoveHide)window.__dcRemoveHide()"></script>
 </head>
 <body>
 <x-dc>
 <helmet>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,400;0,500;0,600;0,700;0,800;1,500;1,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <meta name="description" content="Desktop app that runs agent CLIs in project-scoped rooms and presents their history in one shared view.">
 <link rel="canonical" href="https://www.kota.place/">
 <meta property="og:type" content="website">
@@ -83,7 +100,46 @@
   .vid-title{ font-weight:700; font-size:16.5px; letter-spacing:-0.01em; color:#f1ece5; }
   .vid-sub{ margin-top:3px; font-size:13px; color:#8a847a; }
   .vid-meta{ padding:13px 6px 0; }
-  @media (prefers-reduced-motion: reduce){ *{ transition-duration:0.001ms !important; animation:none !important; scroll-behavior:auto !important; } }
+  .hero-scramble-wrap{ width:100%; max-width:860px; min-height:clamp(172px,18.5vw,218px); margin:18px auto 40px; padding:14px 16px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; }
+  .scrambled-text{ position:relative; margin:0; width:100%; max-width:820px; color:#f2ece1; cursor:default; }
+  .scrambled-text p{ margin:0; }
+  .scrambled-text-sr{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }
+  .hero-scramble-cite{ margin-top:18px; font-family:'JetBrains Mono',monospace; font-size:11.5px; font-weight:500; letter-spacing:0.16em; text-transform:uppercase; color:#867f75; user-select:none; }
+  .circular-carousel-wrap{ position:relative; width:100%; height:clamp(430px, 46vw, 500px); margin:6px 0 8px; }
+  .circular-carousel{ --cc-fade:#0c0b0a; --cc-radius:16px; --cc-inner:0.4; position:relative; width:100%; height:100%; overflow:hidden; outline:none; touch-action:pan-y; user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent; }
+  .circular-carousel[data-axis='x']{ touch-action:pan-x; }
+  .circular-carousel[data-draggable]{ cursor:grab; }
+  .circular-carousel[data-dragging]{ cursor:grabbing; }
+  .circular-carousel:focus-visible{ box-shadow:inset 0 0 0 2px rgba(217, 138, 79, 0.55); border-radius:12px; }
+  .circular-carousel__view{ position:absolute; inset:0; }
+  .circular-carousel[data-shape='wheel'] .circular-carousel__view{ -webkit-mask-image:linear-gradient(to bottom, transparent, #000000 18%, #000000 82%, transparent); mask-image:linear-gradient(to bottom, transparent, #000000 18%, #000000 82%, transparent); }
+  .circular-carousel[data-shape='panorama'] .circular-carousel__view{ -webkit-mask-image:linear-gradient(to right, transparent, #000000 12%, #000000 88%, transparent); mask-image:linear-gradient(to right, transparent, #000000 12%, #000000 88%, transparent); }
+  .circular-carousel__stage{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; opacity:0; transition:opacity 0.45s ease; }
+  .circular-carousel[data-ready] .circular-carousel__stage{ opacity:1; }
+  .circular-carousel__camera, .circular-carousel__ring, .circular-carousel__card{ width:0; height:0; transform-style:preserve-3d; }
+  .circular-carousel__camera{ position:relative; }
+  .circular-carousel__ring, .circular-carousel__card{ position:absolute; left:0; top:0; }
+  .circular-carousel__tile{ position:absolute; outline:1px solid transparent; backface-visibility:hidden; -webkit-backface-visibility:hidden; }
+  .circular-carousel__frame{ position:absolute; left:0; top:0; width:100%; overflow:hidden; }
+  .circular-carousel__photo{ position:absolute; display:block; max-width:none; object-fit:cover; pointer-events:none; user-select:none; -webkit-user-drag:none; }
+  .circular-carousel__photo--leaving{ animation:circular-carousel-leave 700ms cubic-bezier(0.33, 1, 0.68, 1) both; }
+  .circular-carousel__shade, .circular-carousel__inner{ position:absolute; inset:0; pointer-events:none; }
+  .circular-carousel__shade{ background:var(--cc-fade); opacity:var(--cc-depth, 0); }
+  .circular-carousel__inner{ background:#000000; opacity:var(--cc-inner); }
+  .circular-carousel__caption{ position:absolute; left:0; right:0; bottom:14px; display:flex; flex-direction:column; align-items:center; gap:6px; padding:0 16px; color:#f1ece5; text-align:center; pointer-events:none; animation:circular-carousel-reveal 900ms ease both; }
+  .circular-carousel__title{ display:flex; max-width:100%; flex-direction:column; align-items:center; gap:3px; font-size:15.5px; font-weight:600; line-height:1.35; animation:circular-carousel-title 520ms cubic-bezier(0.22, 1, 0.36, 1); }
+  .circular-carousel__subtitle{ font-size:13px; font-weight:400; color:#9c9488; }
+  .circular-carousel__count{ display:inline-flex; align-items:center; gap:3px; font-family:'JetBrains Mono',monospace; font-size:11.5px; font-variant-numeric:tabular-nums; line-height:1; color:#8a847a; }
+  .circular-carousel__slash{ opacity:0.6; }
+  .circular-carousel__digits{ display:inline-flex; }
+  .circular-carousel__digit{ display:inline-block; height:1em; overflow:hidden; }
+  .circular-carousel__reel{ display:flex; flex-direction:column; transition:transform 600ms cubic-bezier(0.22, 1, 0.36, 1); }
+  .circular-carousel__reel > span{ height:1em; }
+  .circular-carousel__live{ position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+  @keyframes circular-carousel-title{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:translateY(0); } }
+  @keyframes circular-carousel-leave{ from{ opacity:1; } to{ opacity:0; } }
+  @keyframes circular-carousel-reveal{ from{ opacity:0; } to{ opacity:1; } }
+  @media (prefers-reduced-motion: reduce){ *{ transition-duration:0.001ms !important; animation:none !important; scroll-behavior:auto !important; } .circular-carousel__stage, .circular-carousel__reel{ transition:none; } .circular-carousel__caption, .circular-carousel__title{ animation:none; } }
 </style>
 </helmet>
 
@@ -111,9 +167,9 @@
         <div style="position:relative; width:100%; height:clamp(150px,19vw,212px); margin:0 0 -14px;">
           <canvas ref="{{ canvasRef }}" aria-hidden="true" style="display:block; width:100%; height:100%;"></canvas>
         </div>
-        <h1 style="{{ srOnly }}">kota — a home for your agents and projects</h1>
+        <h1 style="{{ srOnly }}">kota — Go out into the highways and hedges, and compel them to come in, that my house may be filled.</h1>
 
-        <p ref="{{ scrambleRef }}" data-scramble style="font-family:'JetBrains Mono',monospace; font-size:clamp(15px,1.95vw,20px); line-height:1.55; letter-spacing:-0.01em; color:#cfc8bd; margin:0 0 26px; cursor:default; min-height:1.6em;">A home for your agents and projects.</p>
+        <div ref="{{ scrambleRef }}" class="hero-scramble-wrap" data-scramble-mount></div>
 
         <div class="hero-cta-row">
           <a href="https://github.com/stabruriss/kota-app/releases/latest" data-download-cta style="{{ heroBtnStyle }}" style-hover="{{ heroBtnHover }}">
@@ -138,40 +194,8 @@
       </div>
     </section>
 
-    <section style="padding:32px 0 28px; display:flex; flex-wrap:wrap; gap:24px; align-items:flex-start;">
-      <div style="flex:1 1 320px; min-width:0; display:flex; flex-direction:column; gap:16px;">
-        <section id="whats-new" style="flex:0 0 auto; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.025),rgba(255,255,255,0)); padding:16px 20px; display:flex; flex-direction:column; gap:12px;">
-          <div>
-            <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:{{ accent }}; margin-bottom:7px;">What's new</div>
-            <div style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">{{ newsHeading }}</div>
-            <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7e7870;">{{ date }}</div>
-          </div>
-          <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:11px; min-width:0;">
-            <sc-for list="{{ news }}" as="n" hint-placeholder-count="4">
-              <li style="display:flex; gap:10px; align-items:baseline; font-size:13px; color:#c8c1b7; line-height:1.35;">
-                <span style="flex:0 0 auto; width:5px; height:5px; border-radius:2px; background:{{ accent }}; transform:translateY(-1px);"></span>
-                <span style="min-width:0;">{{ n }}</span>
-              </li>
-            </sc-for>
-          </ul>
-        </section>
-
-        <section aria-label="Supported CLIs" style="flex:0 0 auto; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.022),rgba(255,255,255,0)); padding:14px 18px; display:flex; flex-direction:column; gap:11px;">
-          <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.13em; text-transform:uppercase; color:#8a847a;">Works with your CLI</div>
-          <div style="display:flex; gap:9px; flex-wrap:wrap;">
-            <sc-for list="{{ clis }}" as="cli" hint-placeholder-count="5">
-              <div style="display:flex; align-items:center; gap:8px; padding:6px 11px 6px 7px; border:1px solid rgba(255,255,255,0.08); border-radius:9px; background:rgba(255,255,255,0.02);">
-                <span style="display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:6px; background:linear-gradient(160deg,#241f1a,#15110e); border:1px solid rgba(255,255,255,0.1); flex:0 0 auto;">
-                  <div aria-hidden="true" style="{{ cli.iconStyle }}"></div>
-                </span>
-                <span style="font-size:12.5px; font-weight:600; color:#cfc8bd; white-space:nowrap;">{{ cli.name }}</span>
-              </div>
-            </sc-for>
-          </div>
-        </section>
-      </div>
-
-      <div style="flex:1.14 1 420px; min-width:0; display:flex;">
+    <section style="display:none; padding:32px 0 28px;">
+      <div style="display:none; flex:1.14 1 420px; min-width:0;">
         <div ref="{{ swapContainerRef }}" style="{{ swapContainerStyle }}">
         <div ref="{{ swapStackRef }}" style="{{ swapStackStyle }}">
           <sc-for list="{{ shots }}" as="s" hint-placeholder-count="4">
@@ -194,7 +218,7 @@
       </div>
     </section>
 
-    <section style="padding:40px 0 8px;">
+    <section style="display:none; padding:40px 0 8px;">
       <div class="vid-head">
         <div>
           <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:#8a847a; margin-bottom:12px;">See it in action</div>
@@ -237,13 +261,15 @@
       </div>
     </section>
 
-    <section id="features" style="padding:64px 0 30px; scroll-margin-top:80px;">
-      <div style="margin-bottom:34px;">
-        <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:#8a847a; margin-bottom:12px;">The collection</div>
-        <h2 style="font-size:clamp(30px,4vw,46px); line-height:1.02; letter-spacing:-0.03em; font-weight:800; margin:0; max-width:18ch; text-wrap:balance;">What Kota Does</h2>
+    <section id="features" style="padding:36px 0 20px; scroll-margin-top:80px;">
+      <div style="margin-bottom:18px;">
+        <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:#8a847a; margin-bottom:12px;">What is Kota</div>
+        <h2 style="font-size:clamp(28px,3.8vw,44px); line-height:1.08; letter-spacing:-0.03em; font-weight:800; margin:0;">Human-Led,<br>Self-Evolving Agent Teams.</h2>
       </div>
 
-      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:30px 26px;">
+      <div data-flip-cards-mount class="circular-carousel-wrap"></div>
+
+      <div style="display:none; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:30px 26px;">
         <sc-for list="{{ cards }}" as="c" hint-placeholder-count="8">
           <div style="position:relative; aspect-ratio:2.46;">
             <article tabindex="0" role="group" aria-label="{{ c.title }}" ref="{{ c.ref }}" style="{{ c.shellStyle }}">
@@ -260,7 +286,7 @@
                         <div style="{{ c.splitDividerStyle }}"></div>
                         <div style="{{ c.singleImgStyle }}"></div>
                         </div>
-                        <div style="{{ c.artWrapStyle }}"><img src="{{ c.frontImg }}" alt="{{ c.title }}" loading="lazy" style="{{ c.artScreenshotStyle }}"><div style="{{ c.frameOverlayStyle }}"></div></div>
+                        <div style="{{ c.artWrapStyle }}"><sc-if value="{{ c.frontImg }}"><img sc-camel-src="{{ c.frontImg }}" alt="{{ c.title }}" loading="lazy" style="{{ c.artScreenshotStyle }}"></sc-if><div style="{{ c.frameOverlayStyle }}"></div></div>
                         <span style="{{ c.tShotStyle }}">{{ c.tag }}</span>
                         <div style="{{ c.tImgTagStyle }}">{{ c.tag }}</div>
                       </div>
@@ -294,7 +320,7 @@
                       </div>
                     </div>
                     <div style="{{ c.backStubStyle }}">
-                      <div data-role="art" style="{{ c.stubImgStyle }}"><img src="{{ c.backImg }}" alt="{{ c.title }}" loading="lazy" style="{{ c.backImgStyle }}"></div>
+                      <div data-role="art" style="{{ c.stubImgStyle }}"><img sc-camel-src="{{ c.backImg }}" alt="{{ c.title }}" loading="lazy" decoding="async" style="{{ c.backImgStyle }}"></div>
                       <div style="{{ c.stubVStyle }}">ADMIT ONE PER ROOM</div>
                     </div>
                   </div>
@@ -314,6 +340,36 @@
       </div>
     </section>
 
+    <section id="whats-new" style="width:100%; margin:24px 0 18px; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.025),rgba(255,255,255,0)); padding:20px 24px; display:flex; flex-direction:column; gap:12px;">
+      <div>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:{{ accent }}; margin-bottom:7px;">What's new</div>
+        <div style="font-size:17px; font-weight:700; letter-spacing:-0.02em; margin-bottom:3px;">{{ newsHeading }}</div>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7e7870;">{{ date }}</div>
+      </div>
+      <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:11px; min-width:0;">
+        <sc-for list="{{ news }}" as="n" hint-placeholder-count="4">
+          <li style="display:flex; gap:10px; align-items:baseline; font-size:13px; color:#c8c1b7; line-height:1.35;">
+            <span style="flex:0 0 auto; width:5px; height:5px; border-radius:2px; background:{{ accent }}; transform:translateY(-1px);"></span>
+            <span style="min-width:0;">{{ n }}</span>
+          </li>
+        </sc-for>
+      </ul>
+    </section>
+
+    <section aria-label="Supported agents" style="width:100%; margin:0 0 10px; border:1px solid rgba(255,255,255,0.07); border-radius:12px; background:linear-gradient(160deg,rgba(255,255,255,0.022),rgba(255,255,255,0)); padding:18px 24px; display:flex; flex-direction:column; gap:12px;">
+      <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:0.13em; text-transform:uppercase; color:#8a847a;">Work with your agents</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <sc-for list="{{ clis }}" as="cli" hint-placeholder-count="5">
+          <div style="display:flex; align-items:center; gap:8px; padding:6px 11px 6px 7px; border:1px solid rgba(255,255,255,0.08); border-radius:9px; background:rgba(255,255,255,0.02);">
+            <span style="display:flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:6px; background:linear-gradient(160deg,#241f1a,#15110e); border:1px solid rgba(255,255,255,0.1); flex:0 0 auto;">
+              <div aria-hidden="true" style="{{ cli.iconStyle }}"></div>
+            </span>
+            <span style="font-size:12.5px; font-weight:600; color:#cfc8bd; white-space:nowrap;">{{ cli.name }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
   </main>
 
   <footer style="border-top:1px solid rgba(255,255,255,0.07); margin-top:50px; background:#0a0908;">
@@ -323,7 +379,7 @@
           <img src="/assets/kota/app-icons/icon.png" alt="Kota" width="20" height="20" style="display:block; border-radius:5px;">
           <span style="font-weight:700; font-size:19px; letter-spacing:-0.02em;">kota</span>
         </div>
-        <p style="font-size:14px; color:#7e7870; line-height:1.55; max-width:30ch; margin:0;">A home for your agents and projects.</p>
+        <p style="font-size:13.5px; color:#7e7870; line-height:1.6; max-width:34ch; margin:0; font-style:italic;">“Go out into the highways and hedges, and compel them to come in, that my house may be filled.” <span style="font-family:'JetBrains Mono',monospace; font-style:normal; font-size:11px; color:#655f57; letter-spacing:0.06em;">— LUKE 14:23</span></p>
       </div>
       <sc-for list="{{ footerCols }}" as="col" hint-placeholder-count="4">
         <div style="flex:1 1 150px; min-width:140px;">
@@ -464,16 +520,15 @@ class Component extends DCLogic {
     }
 
     this._startFlame();
-    this._initScramble();
     this._sweep = () => this._sweepCartridges();
     [0, 80, 250, 700, 1500, 3000].forEach((d) => setTimeout(this._sweep, d));
     window.addEventListener('resize', this._sweep);
-    import('https://cdn.jsdelivr.net/npm/animejs@4/+esm')
+    import('/assets/vendor/anime-4.5.0.esm.js')
       .then((mod) => { this._A = mod; })
       .catch(() => { this._A = null; });
-    import('https://cdn.jsdelivr.net/npm/gsap@3.12.5/+esm')
-      .then((m) => { this._gsap = m.gsap || m.default || m; this._initSwap(); })
-      .catch(() => { this._gsap = null; this._initSwap(); });
+    import('/assets/vendor/gsap-3.12.5.esm.js')
+      .then((m) => { this._gsap = m.gsap || m.default || m; this._initScramble(); this._initSwap(); })
+      .catch(() => { this._gsap = null; this._initScramble(); this._initSwap(); });
   }
   componentWillUnmount() {
     if (this._onScroll) window.removeEventListener('scroll', this._onScroll);
@@ -486,74 +541,1573 @@ class Component extends DCLogic {
     if (this._swapRO) this._swapRO.disconnect();
     if (this._cardRO) this._cardRO.disconnect();
     if (this._swapTl) this._swapTl.kill();
-    document.querySelectorAll('[data-scramble]').forEach((el) => { if (el._scrMove) el.removeEventListener('pointermove', el._scrMove); });
+    if (this._scrambleRoot) { try { this._scrambleRoot.unmount(); } catch (e) {} this._scrambleRoot = null; }
+    if (this._flipCardsRoot) { try { this._flipCardsRoot.unmount(); } catch (e) {} this._flipCardsRoot = null; }
   }
 
-  // ---- ScrambledText (proximity scramble, ported from React Bits / GSAP ScrambleText) ----
+  // ---- ScrambledText (ported from React Bits ScrambledText + GSAP) ----
   _initScramble(tries) {
-    const els = document.querySelectorAll('[data-scramble]');
-    if (!els.length) { if ((tries || 0) < 20) setTimeout(() => this._initScramble((tries || 0) + 1), 120); return; }
-    els.forEach((el) => this._scrambleEl(el));
+    const el = this.scrambleRef.current || document.querySelector('[data-scramble-mount]');
+    const gsap = this._gsap;
+    if (!el || !window.React || !window.ReactDOM || !gsap) {
+      if ((tries || 0) < 30) setTimeout(() => this._initScramble((tries || 0) + 1), 80);
+      return;
+    }
+    if (el._scrambleMounted) return;
+    el._scrambleMounted = true;
+
+    const mountNode = document.createElement('div');
+    mountNode.style.width = '100%';
+    mountNode.style.display = 'flex';
+    mountNode.style.flexDirection = 'column';
+    mountNode.style.alignItems = 'center';
+    el.innerHTML = '';
+    el.appendChild(mountNode);
+
+    const ScrambleTextPlugin = {
+      name: 'scrambleText',
+      headless: true,
+      init(target, value, tween) {
+        const cfg = typeof value === 'object' ? value : { text: String(value ?? '') };
+        this.target = target;
+        this.tween = tween;
+        this.text = String(cfg.text ?? target.textContent ?? '');
+        this.chars = Array.from(cfg.chars || '.:');
+        this.speed = Math.max(0.05, Number(cfg.speed) || 0.5);
+        this.revealDelay = Number(cfg.revealDelay) || 0;
+        this.lastStep = -1;
+        this.randChar = this.chars[Math.floor(Math.random() * this.chars.length)] || '.';
+        return true;
+      },
+      render(ratio, data) {
+        const { target, tween, text, chars, speed, revealDelay } = data;
+        const dur = tween.duration() || 0.001;
+        const elapsed = ratio * dur;
+        const revealed = ratio >= 1 || (revealDelay > 0 && elapsed >= revealDelay);
+        if (revealed) {
+          if (target.textContent !== text) target.textContent = text;
+          return;
+        }
+        const cadence = 1 / (14 + speed * 36);
+        const step = Math.floor(elapsed / cadence);
+        if (step !== data.lastStep) {
+          data.lastStep = step;
+          data.randChar = chars[Math.floor(Math.random() * chars.length)] || '.';
+        }
+        if (target.textContent !== data.randChar) target.textContent = data.randChar;
+      },
+    };
+    gsap.registerPlugin(ScrambleTextPlugin);
+
+    const graphemeSeg = typeof Intl !== 'undefined' && Intl.Segmenter
+      ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+      : null;
+    const splitGraphemes = (str) =>
+      graphemeSeg ? Array.from(graphemeSeg.segment(str), (s) => s.segment) : Array.from(str);
+    const isCjkOrPunct = (ch) => /[\u3000-\u9fff\uff00-\uffef]/.test(ch);
+    const isCjkTrailPunct = (ch) => /[，。、！？；：）》」』】]/.test(ch);
+
+    const SplitText = {
+      create(textEl, opts = {}) {
+        const origHtml = textEl.innerHTML;
+        const raw = textEl.textContent || '';
+        const isRtl = /[\u0590-\u05ff]/.test(raw);
+        textEl.dir = isRtl ? 'rtl' : 'ltr';
+        textEl.textContent = '';
+        const chars = [];
+        const makeCharSpan = (g) => {
+          const sp = document.createElement('span');
+          const cjk = isCjkOrPunct(g);
+          sp.dataset.cjk = cjk ? '1' : '0';
+          sp.style.cssText = cjk
+            ? 'display:inline-block;position:relative;margin:0 -0.058em;'
+            : (isRtl ? 'display:inline-block;position:relative;' : 'display:inline-block;position:relative;margin:0 -0.015em;');
+          sp.textContent = g;
+          chars.push(sp);
+          return sp;
+        };
+        raw.split(/(\n|\s+)/).forEach((tok) => {
+          if (!tok) return;
+          if (tok === '\n') {
+            textEl.appendChild(document.createElement('br'));
+            return;
+          }
+          if (/^\s+$/.test(tok)) {
+            textEl.appendChild(document.createTextNode(tok));
+            return;
+          }
+          const gs = splitGraphemes(tok);
+          const hasCjk = gs.some(isCjkOrPunct);
+          if (hasCjk) {
+            for (let i = 0; i < gs.length; i += 1) {
+              if (i + 1 < gs.length && isCjkTrailPunct(gs[i + 1])) {
+                const wrap = document.createElement('span');
+                wrap.style.cssText = 'display:inline-block;white-space:nowrap;';
+                wrap.appendChild(makeCharSpan(gs[i]));
+                wrap.appendChild(makeCharSpan(gs[i + 1]));
+                textEl.appendChild(wrap);
+                i += 1;
+              } else {
+                textEl.appendChild(makeCharSpan(gs[i]));
+              }
+            }
+          } else if (opts.smartWrap !== false) {
+            const word = document.createElement('span');
+            word.style.cssText = 'display:inline-block;white-space:nowrap;';
+            if (isRtl) word.dir = 'rtl';
+            gs.forEach((g) => word.appendChild(makeCharSpan(g)));
+            textEl.appendChild(word);
+          } else {
+            gs.forEach((g) => textEl.appendChild(makeCharSpan(g)));
+          }
+        });
+        return {
+          chars,
+          revert() {
+            textEl.innerHTML = origHtml;
+            textEl.removeAttribute('dir');
+          },
+        };
+      },
+    };
+
+    const R = window.React;
+    const h = R.createElement;
+    const { useState, useEffect, useLayoutEffect, useRef } = R;
+    const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
+
+    const PHYSICAL = { lift: true, blur: true, magnify: true };
+
+    const falloff = (distance, radius) => {
+      if (distance >= radius) return 0;
+      const f = 1 - (distance / radius) ** 2;
+      return f * f;
+    };
+
+    const ScrambledText = ({
+      radius = 100,
+      duration = 1.0,
+      speed = 0.5,
+      scrambleChars = '.:',
+      scrambleColor = '',
+      effect = 'scramble',
+      strength = 1,
+      trail = 0.6,
+      clickBurst = true,
+      intro = true,
+      fontFamily = '',
+      color = '',
+      className = '',
+      style = {},
+      children,
+    }) => {
+      const rootRef = useRef(null);
+      const textRef = useRef(null);
+      const resetRef = useRef(() => {});
+      const settings = { radius, duration, speed, scrambleChars, scrambleColor, effect, strength, trail, clickBurst };
+      const settingsRef = useRef(settings);
+      settingsRef.current = settings;
+      const textKey = typeof children === 'string' ? children : undefined;
+
+      const [fontsReady, setFontsReady] = useState(
+        () => typeof document === 'undefined' || !document.fonts || document.fonts.status === 'loaded'
+      );
+
+      useEffect(() => {
+        if (fontsReady) return;
+        let live = true;
+        document.fonts.ready
+          .then(() => {
+            if (live) setFontsReady(true);
+          })
+          .catch(() => {
+            if (live) setFontsReady(true);
+          });
+        return () => {
+          live = false;
+        };
+      }, [fontsReady]);
+
+      useIsomorphicLayoutEffect(() => {
+        const root = rootRef.current;
+        const textEl = textRef.current;
+        if (!root || !textEl || !fontsReady) return;
+
+        const split = SplitText.create(textEl, { type: 'chars', smartWrap: true, aria: 'none' });
+        const chars = split.chars;
+        const originals = chars.map((char) => char.textContent ?? '');
+        const glyphs = chars.map((char, i) => {
+          const sizer = document.createElement('span');
+          const glyph = document.createElement('span');
+          const cjk = char.dataset.cjk === '1';
+          const scale = cjk ? 'scaleX(0.83) scaleY(1.09)' : (textEl.dir === 'rtl' ? 'scaleX(0.92) scaleY(1.06)' : 'scaleX(0.87) scaleY(1.11)');
+          sizer.textContent = originals[i];
+          sizer.style.visibility = 'hidden';
+          glyph.textContent = originals[i];
+          glyph.style.cssText = `position:absolute;top:0;left:50%;transform:translateX(-50%) ${scale};white-space:pre`;
+          char.replaceChildren(sizer, glyph);
+          return glyph;
+        });
+        const points = chars.map(() => ({ x: 0, y: 0, energy: 0, dx: 0, dy: 0, shown: false }));
+        const reduce = Boolean(
+          (this.props && this.props.reducedMotion) ||
+          (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+        );
+        const pointer = { x: 0, y: 0, sx: 0, sy: 0, inside: false };
+        const waves = [];
+        let measured = false;
+        let fontPx = 16;
+        let raf = 0;
+        let last = 0;
+        let moveFrame = 0;
+        let decode = null;
+        let observer = null;
+
+        const scramble = (index, length, revealDelay = 0) => {
+          const { speed: sp, scrambleChars: sc, scrambleColor: scol } = settingsRef.current;
+          const glyph = glyphs[index];
+          return {
+            overwrite: true,
+            duration: length,
+            ease: 'none',
+            scrambleText: { text: originals[index], chars: sc, speed: sp, revealDelay },
+            onUpdate: () => {
+              glyph.style.color = scol && glyph.textContent !== originals[index] ? scol : '';
+            },
+          };
+        };
+
+        if (intro && !reduce && glyphs.length > 0) {
+          const introLength = settingsRef.current.duration;
+          const timeline = gsap.timeline({ paused: true });
+          glyphs.forEach((glyph, index) => {
+            const reveal = 0.15 + introLength * (0.75 * (index / glyphs.length) + 0.25 * Math.random());
+            timeline.to(glyph, scramble(index, reveal + 0.1, reveal), 0);
+          });
+          timeline.time(0.001);
+          const io = new IntersectionObserver(
+            ([entry]) => {
+              if (!entry.isIntersecting) return;
+              io.disconnect();
+              timeline.play();
+            },
+            { rootMargin: '0px 0px -10% 0px' }
+          );
+          io.observe(root);
+          decode = timeline;
+          observer = io;
+        }
+
+        const offsetOf = (nodeEl) => {
+          let x = 0;
+          let y = 0;
+          for (let node = nodeEl; node; node = node.offsetParent) {
+            x += node.offsetLeft;
+            y += node.offsetTop;
+          }
+          return [x, y];
+        };
+
+        const measure = () => {
+          fontPx = parseFloat(window.getComputedStyle(textEl).fontSize) || 16;
+          const [rootX, rootY] = offsetOf(root);
+          chars.forEach((char, i) => {
+            const [x, y] = offsetOf(char);
+            points[i].x = x - rootX + char.offsetWidth / 2;
+            points[i].y = y - rootY + char.offsetHeight / 2;
+          });
+          measured = true;
+        };
+
+        const toLocal = (e) => {
+          const rect = root.getBoundingClientRect();
+          const scaleX = root.offsetWidth ? rect.width / root.offsetWidth : 1;
+          const scaleY = root.offsetHeight ? rect.height / root.offsetHeight : 1;
+          return [(e.clientX - rect.left) / (scaleX || 1), (e.clientY - rect.top) / (scaleY || 1)];
+        };
+
+        const clear = (i) => {
+          const char = chars[i];
+          char.style.transform = '';
+          char.style.filter = '';
+          char.style.opacity = '';
+          char.style.zIndex = '';
+          points[i].shown = false;
+        };
+
+        const paint = (i, mode, amount) => {
+          const p = points[i];
+          const e = p.energy;
+          if (e < 0.001) {
+            if (p.shown) clear(i);
+            return;
+          }
+          const char = chars[i];
+          p.shown = true;
+          if (mode === 'lift') {
+            char.style.transform = `translate3d(0, ${(-e * fontPx * 0.75 * amount).toFixed(2)}px, 0)`;
+          } else if (mode === 'blur') {
+            char.style.filter = `blur(${(e * fontPx * 0.24 * amount).toFixed(2)}px)`;
+            char.style.opacity = (1 - e * Math.min(0.7, 0.45 * amount)).toFixed(3);
+            char.style.transform = `scale(${(1 + e * 0.15 * amount).toFixed(4)})`;
+          } else {
+            char.style.transform = `translate3d(${p.dx.toFixed(2)}px, ${p.dy.toFixed(2)}px, 0) scale(${(1 + e * 0.85 * amount).toFixed(4)})`;
+            char.style.zIndex = `${Math.round(e * 10)}`;
+          }
+        };
+
+        const tick = (now) => {
+          raf = 0;
+          const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
+          last = now;
+          if (!measured) measure();
+          const s = settingsRef.current;
+          const mode = PHYSICAL[s.effect] && !reduce ? s.effect : '';
+          const amount = Math.max(0, s.strength);
+          const reach = Math.max(1, s.radius);
+          const width = Math.max(fontPx * 1.3, 16);
+          const swell = mode === 'magnify' ? 0.55 : 1;
+          const follow = 1 - Math.exp(-dt / 0.06);
+          const attack = 1 - Math.exp(-dt / 0.08);
+          const release = 1 - Math.exp(-dt / Math.max(0.04, s.trail / 3));
+          pointer.sx += (pointer.x - pointer.sx) * follow;
+          pointer.sy += (pointer.y - pointer.sy) * follow;
+
+          for (const wave of waves) {
+            wave.age += dt;
+            const t = Math.min(1, wave.age / wave.life);
+            wave.r = wave.reach * (1 - (1 - t) * (1 - t));
+            wave.fade = t < 0.75 ? 1 : 1 - ((t - 0.75) / 0.25) ** 2;
+          }
+
+          let busy = waves.length > 0 || Math.abs(pointer.x - pointer.sx) + Math.abs(pointer.y - pointer.sy) > 0.2;
+          for (let i = 0; i < chars.length; i += 1) {
+            const p = points[i];
+            let target = 0;
+            let tx = 0;
+            let ty = 0;
+            if (mode && pointer.inside) {
+              const ax = p.x - pointer.sx;
+              const ay = p.y - pointer.sy;
+              target = falloff(Math.hypot(ax, ay), reach);
+              tx = ax * 0.5 * amount * target;
+              ty = ay * 0.5 * amount * target;
+            }
+            for (const wave of waves) {
+              const ax = p.x - wave.x;
+              const ay = p.y - wave.y;
+              const d = Math.hypot(ax, ay);
+              const strengthAt = 1 - (0.6 * d) / wave.reach;
+              if (!wave.hit[i] && d <= wave.r) {
+                wave.hit[i] = 1;
+                gsap.to(glyphs[i], scramble(i, Math.max(0.2, s.duration * (0.2 + 0.5 * strengthAt))));
+              }
+              if (mode) {
+                const band = swell * strengthAt * wave.fade * Math.exp(-(((d - wave.r) / width) ** 2));
+                if (band > target) {
+                  const push = (fontPx * 0.6 * amount * band) / (d || 1);
+                  target = band;
+                  tx = ax * push;
+                  ty = ay * push;
+                }
+              }
+            }
+            const k = target > p.energy ? attack : release;
+            p.energy += (target - p.energy) * k;
+            if (Math.abs(target - p.energy) > 0.0005) busy = true;
+            if (mode === 'magnify') {
+              p.dx += (tx - p.dx) * k;
+              p.dy += (ty - p.dy) * k;
+            }
+            if (!mode) {
+              if (p.shown) clear(i);
+              continue;
+            }
+            paint(i, mode, amount);
+          }
+
+          for (let j = waves.length - 1; j >= 0; j -= 1) {
+            if (waves[j].age >= waves[j].life) waves.splice(j, 1);
+          }
+
+          if (busy) raf = requestAnimationFrame(tick);
+          else last = 0;
+        };
+
+        const wake = () => {
+          if (!raf) raf = requestAnimationFrame(tick);
+        };
+
+        const scrambleNearPointer = () => {
+          moveFrame = 0;
+          if (!measured) measure();
+          const { radius: rad, duration: dur } = settingsRef.current;
+          glyphs.forEach((glyph, index) => {
+            const p = points[index];
+            const dist = Math.hypot(pointer.x - p.x, pointer.y - p.y);
+            if (dist < rad) gsap.to(glyph, scramble(index, dur * (1 - dist / rad)));
+          });
+        };
+
+        const handleEnter = () => {
+          measured = false;
+        };
+
+        const handleMove = (e) => {
+          const [x, y] = toLocal(e);
+          pointer.x = x;
+          pointer.y = y;
+          if (!pointer.inside) {
+            pointer.sx = x;
+            pointer.sy = y;
+            pointer.inside = true;
+          }
+          if (PHYSICAL[settingsRef.current.effect]) {
+            if (!reduce) wake();
+          } else if (!moveFrame) moveFrame = requestAnimationFrame(scrambleNearPointer);
+        };
+
+        const handleLeave = () => {
+          pointer.inside = false;
+          wake();
+        };
+
+        const handleDown = (e) => {
+          if (!settingsRef.current.clickBurst || (e.pointerType === 'mouse' && e.button !== 0)) return;
+          if (!measured) measure();
+          const [x, y] = toLocal(e);
+          let reach = 0;
+          for (const p of points) reach = Math.max(reach, Math.hypot(p.x - x, p.y - y));
+          reach += fontPx;
+          if (waves.length > 3) waves.shift();
+          waves.push({ x, y, age: 0, r: 0, fade: 1, reach, life: 0.45 + reach / 1100, hit: new Uint8Array(chars.length) });
+          wake();
+        };
+
+        resetRef.current = () => {
+          points.forEach((p) => {
+            p.energy = 0;
+            p.dx = 0;
+            p.dy = 0;
+          });
+          chars.forEach((_, i) => clear(i));
+        };
+
+        const resize = new ResizeObserver(() => {
+          measured = false;
+        });
+        resize.observe(root);
+        document.fonts?.ready
+          .then(() => {
+            measured = false;
+          })
+          .catch(() => {});
+
+        root.addEventListener('pointerenter', handleEnter);
+        root.addEventListener('pointermove', handleMove);
+        root.addEventListener('pointerleave', handleLeave);
+        root.addEventListener('pointerdown', handleDown);
+
+        return () => {
+          root.removeEventListener('pointerenter', handleEnter);
+          root.removeEventListener('pointermove', handleMove);
+          root.removeEventListener('pointerleave', handleLeave);
+          root.removeEventListener('pointerdown', handleDown);
+          resize.disconnect();
+          cancelAnimationFrame(raf);
+          cancelAnimationFrame(moveFrame);
+          observer?.disconnect();
+          decode?.kill();
+          gsap.killTweensOf(glyphs);
+          resetRef.current = () => {};
+          split.revert();
+        };
+      }, [intro, textKey, fontsReady]);
+
+      useEffect(() => {
+        resetRef.current();
+      }, [effect]);
+
+      return h(
+        'div',
+        {
+          ref: rootRef,
+          className: `scrambled-text ${className}`.trim(),
+          style: { ...style, ...(color ? { color } : null), ...(fontFamily ? { fontFamily } : null) },
+        },
+        h('span', { className: 'scrambled-text-sr' }, children),
+        h('p', { key: textKey, ref: textRef, 'aria-hidden': 'true' }, children)
+      );
+    };
+
+    // 语言顺序：英 - 中(繁) - 日 - 拉丁 - 希伯来（统一三行）
+    // 停留时长：英、中 5.5s (5500ms)，日、拉丁、希伯来 2.5s (2500ms)
+    // EVA 极太明朝长体风格：Noto Serif TC 900 / Noto Serif JP 900 + IM Fell English + Frank Ruhl Libre
+    const evaShadow = '0 0 11px rgba(242, 236, 225, 0.30), 0 0 2px rgba(242, 236, 225, 0.38)';
+    const VERSES = [
+      {
+        code: 'EN',
+        holdMs: 5500,
+        cite: '— LUKE 14:23',
+        text: 'Go out into the highways and hedges,\nand compel them to come in,\nthat my house may be filled.',
+        style: {
+          fontFamily: "'IM Fell English', Georgia, serif",
+          fontStyle: 'normal',
+          fontWeight: 400,
+          fontSize: 'clamp(23px, 2.85vw, 31px)',
+          lineHeight: 1.38,
+          letterSpacing: '0.005em',
+          WebkitTextStroke: '0.3px rgba(242, 236, 225, 0.7)',
+          textShadow: evaShadow,
+        },
+      },
+      {
+        code: 'ZH',
+        holdMs: 5500,
+        cite: '— 路加福音 14:23',
+        text: '你出去到路上和籬笆那裡，\n勉強人進來，\n好坐滿我的屋子。',
+        style: {
+          fontFamily: "'Noto Serif TC', 'Noto Serif JP', serif",
+          fontStyle: 'normal',
+          fontWeight: 900,
+          fontSize: 'clamp(24px, 3.05vw, 33px)',
+          lineHeight: 1.46,
+          WebkitTextStroke: '0.5px rgba(242, 236, 225, 0.88)',
+          textShadow: evaShadow,
+        },
+      },
+      {
+        code: 'JA',
+        holdMs: 2500,
+        cite: '— ルカ傳福音書 14:23',
+        text: '道や垣のあたりに出でゆき、\n強ひて人々を伴ひ來り、\n我が家を充せ。',
+        style: {
+          fontFamily: "'Noto Serif JP', 'Noto Serif TC', serif",
+          fontStyle: 'normal',
+          fontWeight: 900,
+          fontSize: 'clamp(24px, 3.05vw, 33px)',
+          lineHeight: 1.46,
+          WebkitTextStroke: '0.5px rgba(242, 236, 225, 0.88)',
+          textShadow: evaShadow,
+        },
+      },
+      {
+        code: 'LA',
+        holdMs: 2500,
+        cite: '— LUCAS 14:23',
+        text: 'Exi in vias et sepes,\net compelle intrare,\nut impleatur domus mea.',
+        style: {
+          fontFamily: "'IM Fell English', Georgia, serif",
+          fontStyle: 'italic',
+          fontWeight: 400,
+          fontSize: 'clamp(23px, 2.85vw, 31px)',
+          lineHeight: 1.38,
+          letterSpacing: '0.01em',
+          WebkitTextStroke: '0.25px rgba(242, 236, 225, 0.65)',
+          textShadow: evaShadow,
+        },
+      },
+      {
+        code: 'HE',
+        holdMs: 2500,
+        cite: '— לוקס י״ד 23',
+        text: 'צֵא אֶל־הַדְּרָכִים וְאֶל־הַגְּדֵרוֹת\nוּפְצַר בָּהֶם לָבוֹא\nלְמַעַן יִמָּלֵא בֵיתִי׃',
+        style: {
+          fontFamily: "'Frank Ruhl Libre', serif",
+          fontStyle: 'normal',
+          fontWeight: 700,
+          fontSize: 'clamp(23px, 2.8vw, 30px)',
+          lineHeight: 1.44,
+          textShadow: evaShadow,
+        },
+      },
+    ];
+
+    const ScrambledVerseCarousel = () => {
+      const [idx, setIdx] = useState(0);
+
+      useEffect(() => {
+        let timer = 0;
+        const hold = (VERSES[idx] && VERSES[idx].holdMs) || 5500;
+        const schedule = (ms) => {
+          timer = window.setTimeout(() => {
+            if (document.hidden) {
+              schedule(1000);
+              return;
+            }
+            setIdx((i) => (i + 1) % VERSES.length);
+          }, ms);
+        };
+        schedule(hold);
+        return () => window.clearTimeout(timer);
+      }, [idx]);
+
+      const current = VERSES[idx] || VERSES[0];
+
+      return h(
+        R.Fragment,
+        null,
+        h(
+          ScrambledText,
+          {
+            effect: 'scramble',
+            radius: 100,
+            strength: 1,
+            trail: 0.6,
+            duration: 0.95,
+            speed: 0.5,
+            scrambleChars: '.:',
+            clickBurst: true,
+            intro: true,
+            style: current.style,
+          },
+          current.text
+        ),
+        h('div', { className: 'hero-scramble-cite' }, current.cite)
+      );
+    };
+
+    this._scrambleRoot = window.ReactDOM.createRoot(mountNode);
+    this._scrambleRoot.render(h(ScrambledVerseCarousel));
+    this._initFlipCards();
   }
 
-  _scrambleEl(el) {
-    if (el._scrMove) el.removeEventListener('pointermove', el._scrMove);
+  // ---- CircularCarousel (ported from React Bits CircularCarousel) ----
+  _initFlipCards() {
+    const gridEl = document.querySelector('[data-flip-cards-mount]');
+    if (!gridEl || !window.React || !window.ReactDOM || gridEl._flipMounted) return;
+    gridEl._flipMounted = true;
 
-    const radius = 120, duration = 1.2, speed = 0.5;
-    const chars = '.:';
-    const reduced = this.props.reducedMotion ?? false;
-    const text = el.textContent;
-    el.textContent = '';
-    const spans = [];
-    text.split(/(\s+)/).forEach((tok) => {
-      if (tok === '') return;
-      if (/^\s+$/.test(tok)) { el.appendChild(document.createTextNode(tok)); return; }
-      const word = document.createElement('span');
-      word.style.display = 'inline-block';
-      word.style.whiteSpace = 'nowrap';
-      for (const ch of tok) {
-        const s = document.createElement('span');
-        s.textContent = ch;
-        s.style.display = 'inline-block';
-        spans.push({ el: s, orig: ch, until: 0, next: 0 });
-        word.appendChild(s);
-      }
-      el.appendChild(word);
-    });
-    if (reduced) return;
+    const R = window.React;
+    const h = R.createElement;
+    const { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } = R;
 
-    const rnd = () => chars[(Math.random() * chars.length) | 0];
-    const cadence = 38 + 70 * speed;
-    let raf = 0;
-    const tick = (now) => {
-      let active = false;
-      for (const sp of spans) {
-        if (now < sp.until) {
-          active = true;
-          if (now >= sp.next) { sp.el.textContent = rnd(); sp.next = now + cadence * (0.6 + Math.random() * 0.8); }
-        } else if (sp.el.textContent !== sp.orig) {
-          sp.el.textContent = sp.orig;
-        }
-      }
-      raf = active ? requestAnimationFrame(tick) : 0;
+    const PRESETS = {
+      cylinder: { axis: 'y', tilt: -5, perspective: 2600, curve: 0.78, spread: 1.28, inward: false, billboard: false, backfaces: true, window: 0 },
+      orbit: { axis: 'y', tilt: -16, perspective: 1500, curve: 0, spread: 1.45, inward: false, billboard: true, backfaces: false, window: 0 },
+      wheel: { axis: 'x', tilt: 0, perspective: 1800, curve: 0, spread: 1, inward: false, billboard: false, backfaces: true, window: 1.7 },
+      panorama: { axis: 'y', tilt: 0, perspective: 0, curve: 1, spread: 1, inward: true, billboard: false, backfaces: false, window: 0 },
     };
-    const onMove = (e) => {
-      const now = performance.now();
-      for (const sp of spans) {
-        if (sp.orig === ' ') continue;
-        const r = sp.el.getBoundingClientRect();
-        const dx = e.clientX - (r.left + r.width / 2);
-        const dy = e.clientY - (r.top + r.height / 2);
-        const dist = Math.hypot(dx, dy);
-        if (dist < radius) {
-          const d = duration * (1 - dist / radius) * 1000;
-          if (now + d > sp.until) sp.until = now + d;
-        }
-      }
-      if (!raf) raf = requestAnimationFrame(tick);
+
+    const INTRO_LENGTH = { assemble: 1500, rise: 1400, spin: 1800, none: 0 };
+    const TILES = 8;
+    const OVERLAP = 2.5;
+    const DRAG_THRESHOLD = 5;
+    const SPRING = 118;
+    const SETTLE_SPEED = 9;
+    const CAPTION_SPACE = 76;
+    const SWAP_LENGTH = 700;
+    const SWAP_SPREAD = 420;
+    const TO_RAD = Math.PI / 180;
+
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const wrap = (degrees) => ((((degrees + 180) % 360) + 360) % 360) - 180;
+    const easeOut = (t) => 1 - Math.pow(1 - t, 4);
+    const easeOutQuint = (t) => 1 - Math.pow(1 - t, 5);
+
+    const rotateX = (p, degrees) => {
+      const r = degrees * TO_RAD;
+      const c = Math.cos(r);
+      const s = Math.sin(r);
+      return [p[0], p[1] * c - p[2] * s, p[1] * s + p[2] * c];
     };
-    el.addEventListener('pointermove', onMove);
-    el._scrMove = onMove;
+
+    const rotateY = (p, degrees) => {
+      const r = degrees * TO_RAD;
+      const c = Math.cos(r);
+      const s = Math.sin(r);
+      return [p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c];
+    };
+
+    const Digits = ({ value }) =>
+      h(
+        'span',
+        { className: 'circular-carousel__digits' },
+        String(value)
+          .padStart(2, '0')
+          .split('')
+          .map((digit, index) =>
+            h(
+              'span',
+              { key: index, className: 'circular-carousel__digit' },
+              h(
+                'span',
+                { className: 'circular-carousel__reel', style: { transform: `translateY(${-Number(digit) * 10}%)` } },
+                '0123456789'.split('').map((n) => h('span', { key: n }, n))
+              )
+            )
+          )
+      );
+
+    const CircularCarousel = ({
+      items = [],
+      preset = 'cylinder',
+      intro = 'rise',
+      cardWidth = 248,
+      aspectRatio = 0.75,
+      gap = 26,
+      curve,
+      tilt,
+      perspective,
+      autoplay = 'drift',
+      speed = 14,
+      interval = 3,
+      direction = 'left',
+      draggable = true,
+      momentum = 0.6,
+      snap = true,
+      pauseOnHover = true,
+      focusOnClick = true,
+      parallax = 0.3,
+      stretch = 0.5,
+      depthFade = 0.55,
+      fadeColor = '#0c0b0a',
+      innerShade = 0.6,
+      cornerRadius = 16,
+      captions = true,
+      onChange,
+      onItemClick,
+      className = '',
+      style,
+    }) => {
+      const incoming = items;
+      const [list, setList] = useState(incoming);
+      const [leaving, setLeaving] = useState(null);
+      const count = list.length;
+      const shape = PRESETS[preset] ? preset : 'cylinder';
+      const layout = PRESETS[shape];
+      const axis = layout.axis;
+      const tiltValue = tilt ?? layout.tilt;
+      const curveValue = layout.billboard ? 0 : clamp(curve ?? layout.curve, 0, 1);
+      const reduced = Boolean(
+        (this.props && this.props.reducedMotion) ||
+        (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+      );
+
+      const cardW = Math.max(40, cardWidth);
+      const cardH = cardW / clamp(aspectRatio, 0.2, 5);
+      const along = axis === 'x' ? cardH : cardW;
+      const step = 360 / count;
+
+      const radius = useMemo(() => {
+        const n = Math.max(count, 3);
+        const pitch = (along + gap) * layout.spread;
+        const chord = pitch / (2 * Math.sin(Math.PI / n));
+        const arc = (n * pitch) / (2 * Math.PI);
+        return Math.max(chord + (arc - chord) * curveValue, along * 0.6);
+      }, [count, along, gap, curveValue, layout.spread]);
+
+      const tiles = useMemo(() => {
+        const total = curveValue > 0.001 ? TILES : 1;
+        const length = along / total;
+        const bend = curveValue > 0.001 ? radius / curveValue : 0;
+        return Array.from({ length: total }, (_, index) => {
+          const start = index * length - (index > 0 ? OVERLAP / 2 : 0);
+          const end = (index + 1) * length + (index < total - 1 ? OVERLAP / 2 : 0);
+          const center = (start + end) / 2 - along / 2;
+          const alpha = bend ? center / bend : 0;
+          const shift = bend ? bend * Math.sin(alpha) : center;
+          const sink = bend ? bend * (1 - Math.cos(alpha)) : 0;
+          const depth = layout.inward ? sink : -sink;
+          const turn = ((layout.inward ? -alpha : alpha) * 180) / Math.PI;
+          const move =
+            axis === 'x'
+              ? `translate3d(0px, ${shift}px, ${depth}px) rotateX(${-turn}deg)`
+              : `translate3d(${shift}px, 0px, ${depth}px) rotateY(${turn}deg)`;
+          return { index, total, start, end, size: end - start, move };
+        });
+      }, [along, axis, curveValue, layout.inward, radius]);
+
+      const rootRef = useRef(null);
+      const stageRef = useRef(null);
+      const cameraRef = useRef(null);
+      const ringRef = useRef(null);
+      const cardRefs = useRef([]);
+      const wakeRef = useRef(() => {});
+      const measureRef = useRef(() => {});
+      const activeRef = useRef(0);
+      const [active, setActive] = useState(0);
+      const [ready, setReady] = useState(false);
+      const [dragging, setDragging] = useState(false);
+      const readyRef = useRef(false);
+      readyRef.current = ready;
+
+      const stateRef = useRef({
+        angle: 0,
+        velocity: 0,
+        target: null,
+        dir: 0,
+        press: null,
+        drag: false,
+        hover: false,
+        pointer: { inside: false, x: 0, y: 0 },
+        yaw: 0,
+        pitch: 0,
+        intro: null,
+        introDone: false,
+        holdUntil: 0,
+        stepAt: 0,
+        suppressClick: false,
+        wheelTimer: 0,
+        fit: 1,
+        shift: 0,
+        drop: 0,
+        last: 0,
+      });
+
+      const settings = {
+        count,
+        step,
+        radius,
+        layout,
+        axis,
+        tilt: tiltValue,
+        perspective: layout.inward ? radius : (perspective ?? layout.perspective),
+        cardW,
+        cardH,
+        intro: reduced ? 'none' : intro in INTRO_LENGTH ? intro : 'rise',
+        autoplay: reduced ? 'off' : autoplay,
+        speed,
+        interval: Math.max(0.5, interval),
+        draggable,
+        momentum: clamp(momentum, 0, 1),
+        snap,
+        pauseOnHover,
+        parallax: reduced ? 0 : clamp(parallax, 0, 1),
+        stretch: reduced ? 0 : clamp(stretch, 0, 1),
+        depthFade: clamp(depthFade, 0, 1),
+        captions,
+        reduced,
+      };
+      const settingsRef = useRef(settings);
+      settingsRef.current = settings;
+
+      const onChangeRef = useRef(onChange);
+      onChangeRef.current = onChange;
+
+      const dragSign = layout.inward ? -1 : 1;
+      const directionSign = (direction === 'right' ? 1 : -1) * dragSign;
+
+      useEffect(() => {
+        stateRef.current.dir = directionSign;
+        wakeRef.current();
+      }, [directionSign]);
+
+      const incomingRef = useRef(incoming);
+      incomingRef.current = incoming;
+      const listRef = useRef(list);
+      listRef.current = list;
+      const sourcesKey = incoming.map((item) => item.src).join('|');
+
+      useEffect(() => {
+        let cancelled = false;
+        const next = incomingRef.current;
+        const smooth = readyRef.current && next.length === listRef.current.length;
+        if (!smooth) {
+          setReady(false);
+          setLeaving(null);
+          setList(next);
+        }
+        const sources = next.slice(0, 16).map((item) => item.src);
+        const load = (src) =>
+          new Promise((resolve) => {
+            const image = new Image();
+            image.decoding = 'async';
+            image.onload = () => (image.decode ? image.decode().then(resolve, resolve) : resolve());
+            image.onerror = resolve;
+            image.src = src;
+          });
+        const timeout = new Promise((resolve) => setTimeout(resolve, 2400));
+        Promise.race([Promise.all(sources.map(load)), timeout]).then(() => {
+          if (cancelled) return;
+          const state = stateRef.current;
+          if (smooth) {
+            const previous = listRef.current;
+            const s = settingsRef.current;
+            if (!s.reduced && previous !== next) {
+              setLeaving((curr) => ({
+                id: (curr?.id || 0) + 1,
+                items: previous,
+                delays: previous.map((_, idx) => (Math.abs(wrap(idx * s.step + state.angle)) / 180) * SWAP_SPREAD),
+              }));
+            }
+            setList(next);
+            wakeRef.current();
+            return;
+          }
+          state.introDone = false;
+          state.intro = null;
+          setReady(true);
+          wakeRef.current();
+        });
+        return () => {
+          cancelled = true;
+        };
+      }, [sourcesKey]);
+
+      useEffect(() => {
+        if (!leaving) return undefined;
+        const timer = setTimeout(() => setLeaving(null), SWAP_LENGTH + SWAP_SPREAD + 80);
+        return () => clearTimeout(timer);
+      }, [leaving]);
+
+      useLayoutEffect(() => {
+        const root = rootRef.current;
+        const stage = stageRef.current;
+        const camera = cameraRef.current;
+        const ring = ringRef.current;
+        if (!root || !stage || !camera || !ring) return undefined;
+        const state = stateRef.current;
+        let raf = 0;
+        let visible = true;
+
+        const nearest = (angle) => Math.round(angle / settingsRef.current.step) * settingsRef.current.step;
+
+        const measure = () => {
+          const s = settingsRef.current;
+          const rect = root.getBoundingClientRect();
+          if (!rect.width || !rect.height) return;
+          const room = s.captions ? CAPTION_SPACE : 0;
+          const width = rect.width * 0.94;
+          const height = (rect.height - room) * 0.92;
+          const P = s.perspective;
+          let minX = Infinity;
+          let maxX = -Infinity;
+          let minY = Infinity;
+          let maxY = -Infinity;
+          if (s.layout.inward) {
+            minX = -width / 2;
+            maxX = width / 2;
+            minY = -s.cardH / 2;
+            maxY = s.cardH / 2;
+          } else {
+            const corners = [
+              [-s.cardW / 2, -s.cardH / 2],
+              [s.cardW / 2, -s.cardH / 2],
+              [-s.cardW / 2, s.cardH / 2],
+              [s.cardW / 2, s.cardH / 2],
+            ];
+            const limit = s.layout.window ? s.layout.window * s.step : 180;
+            for (let a = -limit; a <= limit; a += limit / 24) {
+              for (const [cx, cy] of corners) {
+                let p;
+                if (s.axis === 'x') {
+                  p = rotateY(rotateX([cx, cy, s.radius], -a), s.tilt);
+                } else if (s.layout.billboard) {
+                  const c = rotateY([0, 0, s.radius], a);
+                  p = rotateX([c[0] + cx, cy, c[2]], s.tilt);
+                } else {
+                  p = rotateX(rotateY([cx, cy, s.radius], a), s.tilt);
+                }
+                p = [p[0], p[1], p[2] - s.radius];
+                if (p[2] >= P * 0.95) continue;
+                const k = P / (P - p[2]);
+                minX = Math.min(minX, p[0] * k);
+                maxX = Math.max(maxX, p[0] * k);
+                minY = Math.min(minY, p[1] * k);
+                maxY = Math.max(maxY, p[1] * k);
+              }
+            }
+          }
+          const spanX = Math.max(maxX - minX, 1);
+          const spanY = Math.max(maxY - minY, 1);
+          const fit = Math.min(1, width / spanX, height / spanY);
+          state.fit = fit;
+          state.shift = -((minY + maxY) / 2) * fit - room / 2;
+          state.drop = s.axis === 'x' ? (rect.width / fit) * 0.55 + s.cardW : (rect.height / fit) * 0.55 + s.cardH;
+          stage.style.perspective = `${P}px`;
+          stage.style.transform = `translate3d(0, ${state.shift}px, 0) scale(${fit})`;
+        };
+        measureRef.current = measure;
+
+        const introCard = (elapsed, landing) => {
+          if (!state.intro) return { radius: 1, lift: 0 };
+          const type = state.intro.type;
+          const reach = Math.abs(wrap(landing + state.angle));
+          if (type === 'assemble') {
+            const delay = (reach / 180) * 420;
+            const p = easeOut(clamp((elapsed - delay) / 1080, 0, 1));
+            return { radius: 1 + 0.6 * (1 - p), lift: 0 };
+          }
+          if (type === 'rise') {
+            const delay = (reach / 180) * 480;
+            const p = easeOutQuint(clamp((elapsed - delay) / 900, 0, 1));
+            return { radius: 1, lift: (1 - p) * state.drop };
+          }
+          if (type === 'spin') {
+            const p = easeOut(clamp(elapsed / INTRO_LENGTH.spin, 0, 1));
+            return { radius: 1 + 0.28 * (1 - p), lift: 0 };
+          }
+          return { radius: 1, lift: 0 };
+        };
+
+        const advance = (s, dt, now) => {
+          if (!state.introDone && readyRef.current) {
+            if (!state.intro) {
+              if (s.intro === 'none') state.introDone = true;
+              else state.intro = { type: s.intro, start: now };
+            }
+            if (state.intro && now - state.intro.start >= INTRO_LENGTH[state.intro.type]) {
+              state.intro = null;
+              state.introDone = true;
+            }
+          }
+
+          const paused = (s.pauseOnHover && state.hover) || state.drag || now < state.holdUntil;
+          const cruise = s.autoplay === 'drift' && !paused && !state.intro ? s.speed * state.dir : 0;
+          let busy = Boolean(state.intro) || state.drag;
+
+          if (state.drag || state.intro) {
+            state.velocity = state.drag ? state.velocity : 0;
+          } else if (state.target !== null) {
+            let remaining = dt;
+            const damping = 2 * Math.sqrt(SPRING);
+            while (remaining > 0) {
+              const hDt = Math.min(remaining, 1 / 240);
+              const accel = SPRING * (state.target - state.angle) - damping * state.velocity;
+              state.velocity += accel * hDt;
+              state.angle += state.velocity * hDt;
+              remaining -= hDt;
+            }
+            if (Math.abs(state.target - state.angle) < 0.004 && Math.abs(state.velocity) < 0.03) {
+              state.angle = state.target;
+              state.velocity = 0;
+              state.target = null;
+            }
+            busy = true;
+          } else {
+            const tau = 0.18 + s.momentum * 1.5;
+            state.velocity += (cruise - state.velocity) * (1 - Math.exp(-dt / tau));
+            state.angle += state.velocity * dt;
+            if (cruise === 0 && s.snap && Math.abs(state.velocity) < SETTLE_SPEED) {
+              state.target = nearest(state.angle);
+            }
+            busy = busy || cruise !== 0 || Math.abs(state.velocity) > 0.01 || state.target !== null;
+          }
+
+          if (s.autoplay === 'step' && !paused && !state.intro && state.introDone) {
+            if (!state.stepAt) state.stepAt = now + s.interval * 1000;
+            if (now >= state.stepAt) {
+              state.target = (state.target ?? nearest(state.angle)) + s.step * state.dir;
+              state.stepAt = now + s.interval * 1000;
+            }
+            busy = true;
+          } else {
+            state.stepAt = 0;
+          }
+
+          if (now < state.holdUntil) busy = true;
+
+          const ease = 1 - Math.exp(-dt / 0.35);
+          const aimYaw = state.pointer.inside ? state.pointer.x * s.parallax * 9 : 0;
+          const aimPitch = state.pointer.inside ? -state.pointer.y * s.parallax * 6 : 0;
+          state.yaw += (aimYaw - state.yaw) * ease;
+          state.pitch += (aimPitch - state.pitch) * ease;
+          if (Math.abs(aimYaw - state.yaw) > 0.01 || Math.abs(aimPitch - state.pitch) > 0.01) busy = true;
+
+          return busy;
+        };
+
+        const render = (s, now) => {
+          const elapsed = state.intro ? now - state.intro.start : 0;
+          const swell = 1 + s.stretch * 0.12 * Math.min(1, Math.abs(state.velocity) / 420);
+          let spinOffset = 0;
+          if (state.intro?.type === 'spin') {
+            const p = easeOut(clamp(elapsed / INTRO_LENGTH.spin, 0, 1));
+            spinOffset = -300 * state.dir * (1 - p);
+          } else if (state.intro?.type === 'assemble') {
+            const p = easeOut(clamp(elapsed / INTRO_LENGTH.assemble, 0, 1));
+            spinOffset = -32 * state.dir * (1 - p);
+          }
+          const angle = state.angle + spinOffset;
+          const Rlen = s.radius * swell;
+
+          if (s.axis === 'x') {
+            camera.style.transform = `translate3d(0, 0, ${-Rlen}px) rotateY(${s.tilt + state.yaw}deg) rotateX(${state.pitch}deg)`;
+            ring.style.transform = `rotateX(${-angle}deg)`;
+          } else if (s.layout.inward) {
+            camera.style.transform = `translate3d(0, 0, ${s.perspective - 1}px) rotateX(${s.tilt + state.pitch}deg) rotateY(${state.yaw}deg)`;
+            ring.style.transform = `rotateY(${angle}deg)`;
+          } else {
+            camera.style.transform = `translate3d(0, 0, ${-Rlen}px) rotateX(${s.tilt + state.pitch}deg) rotateY(${state.yaw}deg)`;
+            ring.style.transform = `rotateY(${angle}deg)`;
+          }
+
+          for (let index = 0; index < s.count; index += 1) {
+            const card = cardRefs.current[index];
+            if (!card) continue;
+            const base = index * s.step;
+            const mod = introCard(elapsed, base);
+            const r = Rlen * mod.radius;
+            let transform;
+            if (s.axis === 'x') {
+              transform = `rotateX(${-base}deg) translateZ(${r}px)`;
+            } else if (s.layout.inward) {
+              transform = `rotateY(${base}deg) translateZ(${-r}px)`;
+            } else {
+              transform = `rotateY(${base}deg) translateZ(${r}px)`;
+              if (s.layout.billboard) transform += ` rotateY(${-(base + angle)}deg)`;
+            }
+            if (mod.lift) transform += s.axis === 'x' ? ` translateX(${mod.lift}px)` : ` translateY(${mod.lift}px)`;
+            card.style.transform = transform;
+
+            const world = wrap(base + angle);
+            const facing = Math.cos(world * TO_RAD);
+            if (s.layout.inward) card.style.visibility = Math.abs(world) > 86 ? 'hidden' : '';
+            const fade = s.depthFade * Math.pow((1 - facing) / 2, 1.25);
+            card.style.setProperty('--cc-depth', fade.toFixed(3));
+          }
+
+          const index = ((Math.round(-state.angle / s.step) % s.count) + s.count) % s.count || 0;
+          if (index !== activeRef.current) {
+            activeRef.current = index;
+            setActive(index);
+            if (onChangeRef.current) onChangeRef.current(index);
+          }
+        };
+
+        const frame = (now) => {
+          raf = 0;
+          const s = settingsRef.current;
+          const dt = state.last ? Math.min((now - state.last) / 1000, 0.05) : 1 / 60;
+          state.last = now;
+          const busy = advance(s, dt, now);
+          render(s, now);
+          if (busy && visible && !document.hidden) raf = requestAnimationFrame(frame);
+          else state.last = 0;
+        };
+
+        const wake = () => {
+          if (!raf && visible && !document.hidden) raf = requestAnimationFrame(frame);
+        };
+        wakeRef.current = wake;
+
+        const onVisibility = () => {
+          if (document.hidden) {
+            cancelAnimationFrame(raf);
+            raf = 0;
+            state.last = 0;
+          } else wake();
+        };
+
+        const resize = new ResizeObserver(() => {
+          measure();
+          wake();
+        });
+        resize.observe(root);
+
+        const io = new IntersectionObserver(([entry]) => {
+          visible = entry.isIntersecting;
+          if (visible) wake();
+          else {
+            cancelAnimationFrame(raf);
+            raf = 0;
+            state.last = 0;
+          }
+        });
+        io.observe(root);
+
+        const onWheel = (event) => {
+          const s = settingsRef.current;
+          if (!s.draggable) return;
+          const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : 0;
+          if (!delta) return;
+          event.preventDefault();
+          const perPixel = 180 / (Math.PI * s.radius * state.fit);
+          state.target = null;
+          state.angle -= delta * perPixel * (s.layout.inward ? -1 : 1);
+          state.velocity = -delta * perPixel * (s.layout.inward ? -1 : 1) * 30;
+          state.holdUntil = performance.now() + 1600;
+          clearTimeout(state.wheelTimer);
+          state.wheelTimer = setTimeout(() => {
+            if (settingsRef.current.snap) state.target = nearest(state.angle + state.velocity * 0.12);
+            wake();
+          }, 140);
+          wake();
+        };
+        root.addEventListener('wheel', onWheel, { passive: false });
+        document.addEventListener('visibilitychange', onVisibility);
+
+        measure();
+        render(settingsRef.current, performance.now());
+        wake();
+
+        return () => {
+          cancelAnimationFrame(raf);
+          resize.disconnect();
+          io.disconnect();
+          clearTimeout(state.wheelTimer);
+          root.removeEventListener('wheel', onWheel);
+          document.removeEventListener('visibilitychange', onVisibility);
+        };
+      }, []);
+
+      useLayoutEffect(() => {
+        measureRef.current();
+        wakeRef.current();
+      }, [radius, cardW, cardH, tiltValue, perspective, preset, captions, count]);
+
+      useEffect(() => {
+        wakeRef.current();
+      });
+
+      const focusIndex = useCallback((index) => {
+        const state = stateRef.current;
+        const s = settingsRef.current;
+        let target = -index * s.step;
+        target += 360 * Math.round((state.angle - target) / 360);
+        state.target = target;
+        state.holdUntil = performance.now() + 2800;
+        wakeRef.current();
+      }, []);
+
+      const stepBy = useCallback((delta) => {
+        const state = stateRef.current;
+        const s = settingsRef.current;
+        const base = state.target ?? Math.round(state.angle / s.step) * s.step;
+        state.target = base - delta * s.step * (s.layout.inward ? -1 : 1);
+        state.holdUntil = performance.now() + 2800;
+        wakeRef.current();
+      }, []);
+
+      const updatePointer = (event) => {
+        const rect = rootRef.current.getBoundingClientRect();
+        const pointer = stateRef.current.pointer;
+        pointer.x = clamp(((event.clientX - rect.left) / rect.width) * 2 - 1, -1, 1);
+        pointer.y = clamp(((event.clientY - rect.top) / rect.height) * 2 - 1, -1, 1);
+      };
+
+      const handlePointerDown = (event) => {
+        const state = stateRef.current;
+        state.suppressClick = false;
+        if (!draggable || event.button !== 0) return;
+        state.press = {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          angle: state.angle,
+          moved: false,
+          origin: 0,
+          samples: [{ time: performance.now(), angle: state.angle }],
+        };
+      };
+
+      const handlePointerMove = (event) => {
+        const state = stateRef.current;
+        if (event.pointerType === 'mouse') {
+          state.pointer.inside = true;
+          updatePointer(event);
+        }
+        const press = state.press;
+        if (!press || press.id !== event.pointerId) {
+          wakeRef.current();
+          return;
+        }
+        const s = settingsRef.current;
+        const delta = s.axis === 'x' ? event.clientY - press.y : event.clientX - press.x;
+        const cross = s.axis === 'x' ? event.clientX - press.x : event.clientY - press.y;
+        if (!press.moved) {
+          if (Math.abs(delta) < DRAG_THRESHOLD) return;
+          if (Math.abs(cross) > Math.abs(delta) * 1.2 && event.pointerType !== 'mouse') {
+            state.press = null;
+            return;
+          }
+          press.moved = true;
+          press.origin = delta;
+          state.drag = true;
+          state.target = null;
+          state.velocity = 0;
+          setDragging(true);
+          try {
+            rootRef.current.setPointerCapture(event.pointerId);
+          } catch (err) {}
+        }
+        const perPixel = 180 / (Math.PI * s.radius * state.fit);
+        state.angle = press.angle + (delta - press.origin) * perPixel * (s.layout.inward ? -1 : 1);
+        const now = performance.now();
+        press.samples.push({ time: now, angle: state.angle });
+        while (press.samples.length > 2 && now - press.samples[0].time > 110) press.samples.shift();
+        wakeRef.current();
+      };
+
+      const releasePointer = (event) => {
+        const state = stateRef.current;
+        const press = state.press;
+        if (!press || press.id !== event.pointerId) return;
+        state.press = null;
+        if (!press.moved) return;
+        state.drag = false;
+        setDragging(false);
+        state.suppressClick = true;
+        const s = settingsRef.current;
+        const first = press.samples[0];
+        const last = press.samples[press.samples.length - 1];
+        const span = (last.time - first.time) / 1000;
+        const velocity = span > 0.008 ? clamp((last.angle - first.angle) / span, -1400, 1400) : 0;
+        state.velocity = velocity;
+        if (Math.abs(velocity) > 60) state.dir = Math.sign(velocity);
+        const coasting = s.autoplay === 'drift' && !(s.pauseOnHover && state.hover && event.pointerType === 'mouse');
+        if (s.snap && !coasting) {
+          const tau = 0.18 + s.momentum * 1.5;
+          state.target = Math.round((state.angle + velocity * tau * 0.55) / s.step) * s.step;
+        }
+        wakeRef.current();
+      };
+
+      const handlePointerEnter = (event) => {
+        if (event.pointerType !== 'mouse') return;
+        stateRef.current.hover = true;
+        wakeRef.current();
+      };
+
+      const handlePointerLeave = (event) => {
+        const state = stateRef.current;
+        if (event.pointerType === 'mouse') {
+          state.hover = false;
+          state.pointer.inside = false;
+        }
+        wakeRef.current();
+      };
+
+      const handleClick = (event) => {
+        const state = stateRef.current;
+        if (state.suppressClick) {
+          state.suppressClick = false;
+          return;
+        }
+        const card = event.target.closest?.('[data-cc-index]');
+        if (!card) return;
+        const index = Number(card.getAttribute('data-cc-index'));
+        if (focusOnClick) focusIndex(index);
+        if (onItemClick) onItemClick(list[index], index);
+      };
+
+      const handleKeyDown = (event) => {
+        const forward = axis === 'x' ? 'ArrowDown' : 'ArrowRight';
+        const backward = axis === 'x' ? 'ArrowUp' : 'ArrowLeft';
+        if (event.key === forward) stepBy(1);
+        else if (event.key === backward) stepBy(-1);
+        else if (event.key === 'Home') focusIndex(0);
+        else if (event.key === 'End') focusIndex(count - 1);
+        else if (event.key === 'Enter' || event.key === ' ') {
+          if (onItemClick) onItemClick(list[activeRef.current], activeRef.current);
+        } else return;
+        event.preventDefault();
+      };
+
+      const current = list[active] || list[0];
+      const label = current ? current.title || current.alt || `Image ${active + 1}` : '';
+
+      const renderTile = (item, tile, back, index) => {
+        const strip = back ? tile.total - 1 - tile.index : tile.index;
+        const first = strip === 0;
+        const last = strip === tile.total - 1;
+        const r = 'var(--cc-radius)';
+        const frameRadius =
+          axis === 'x'
+            ? `${first ? r : 0} ${first ? r : 0} ${last ? r : 0} ${last ? r : 0}`
+            : `${first ? r : 0} ${last ? r : 0} ${last ? r : 0} ${first ? r : 0}`;
+        const offset = back ? along - tile.end : tile.start;
+        const size = tile.size;
+        const box =
+          axis === 'x'
+            ? { left: -cardW / 2, top: -size / 2, width: cardW, height: size }
+            : { left: -size / 2, top: -cardH / 2, width: size, height: cardH };
+        const photoStyle =
+          axis === 'x'
+            ? { left: 0, top: -offset, width: cardW, height: cardH }
+            : { left: -offset, top: 0, width: cardW, height: cardH };
+        const flip = axis === 'x' ? ' rotateX(180deg)' : ' rotateY(180deg)';
+        const gone = leaving?.items[index];
+        return h(
+          'div',
+          {
+            key: `${back ? 'b' : 'f'}${tile.index}`,
+            className: 'circular-carousel__tile',
+            style: { ...box, transform: tile.move + (back ? flip : '') },
+            'aria-hidden': 'true',
+          },
+          h(
+            'div',
+            {
+              className: 'circular-carousel__frame',
+              style: { height: axis === 'x' ? size : cardH, borderRadius: frameRadius },
+            },
+            h('img', {
+              className: 'circular-carousel__photo',
+              src: item.src,
+              alt: '',
+              draggable: false,
+              decoding: 'async',
+              style: photoStyle,
+            }),
+            gone
+              ? h('img', {
+                  key: `leaving-${leaving.id}`,
+                  className: 'circular-carousel__photo circular-carousel__photo--leaving',
+                  src: gone.src,
+                  alt: '',
+                  draggable: false,
+                  decoding: 'async',
+                  style: { ...photoStyle, animationDelay: `${Math.round(leaving.delays[index])}ms` },
+                })
+              : null,
+            back ? h('div', { className: 'circular-carousel__inner' }) : null,
+            h('div', { className: 'circular-carousel__shade' })
+          )
+        );
+      };
+
+      return h(
+        'div',
+        {
+          ref: rootRef,
+          className: `circular-carousel ${className}`.trim(),
+          style: {
+            ...style,
+            '--cc-fade': fadeColor,
+            '--cc-radius': `${Math.max(0, cornerRadius)}px`,
+            '--cc-inner': (1 - clamp(innerShade, 0, 1)).toFixed(3),
+          },
+          role: 'region',
+          'aria-roledescription': 'carousel',
+          'aria-label': 'Kota capabilities carousel',
+          tabIndex: 0,
+          'data-axis': axis,
+          'data-shape': shape,
+          'data-ready': ready ? '' : undefined,
+          'data-draggable': draggable ? '' : undefined,
+          'data-dragging': dragging ? '' : undefined,
+          onPointerDown: handlePointerDown,
+          onPointerMove: handlePointerMove,
+          onPointerUp: releasePointer,
+          onPointerCancel: releasePointer,
+          onPointerEnter: handlePointerEnter,
+          onPointerLeave: handlePointerLeave,
+          onClick: handleClick,
+          onKeyDown: handleKeyDown,
+        },
+        h(
+          'div',
+          { className: 'circular-carousel__view' },
+          h(
+            'div',
+            { ref: stageRef, className: 'circular-carousel__stage' },
+            h(
+              'div',
+              { ref: cameraRef, className: 'circular-carousel__camera' },
+              h(
+                'div',
+                { ref: ringRef, className: 'circular-carousel__ring' },
+                list.map((item, index) =>
+                  h(
+                    'div',
+                    {
+                      key: index,
+                      ref: (el) => {
+                        cardRefs.current[index] = el;
+                      },
+                      className: 'circular-carousel__card',
+                      'data-cc-index': index,
+                      role: 'group',
+                      'aria-roledescription': 'slide',
+                      'aria-label': `${item.title || item.alt || `Card ${index + 1}`}, ${index + 1} of ${count}`,
+                    },
+                    tiles.map((tile) => renderTile(item, tile, false, index)),
+                    layout.backfaces ? tiles.map((tile) => renderTile(item, tile, true, index)) : null
+                  )
+                )
+              )
+            )
+          )
+        ),
+        captions && current
+          ? h(
+              'div',
+              { className: 'circular-carousel__caption', 'aria-hidden': 'true' },
+              h(
+                'span',
+                { key: active, className: 'circular-carousel__title' },
+                current.title || current.alt,
+                current.subtitle ? h('span', { className: 'circular-carousel__subtitle' }, current.subtitle) : null
+              ),
+              h(
+                'span',
+                { className: 'circular-carousel__count' },
+                h(Digits, { value: active + 1 }),
+                h('span', { className: 'circular-carousel__slash' }, '/'),
+                h('span', null, String(count).padStart(2, '0'))
+              )
+            )
+          : null,
+        h(
+          'div',
+          { className: 'circular-carousel__live', 'aria-live': 'polite', 'aria-atomic': 'true' },
+          `${label}, ${active + 1} of ${count}`
+        )
+      );
+    };
+
+    const CAROUSEL_ITEMS = [
+      {
+        src: '/assets/kota/flip-cards/multi-agent.webp',
+        alt: 'Multi-Agent',
+        title: 'Multi-Agent',
+        subtitle: 'Up to eight CLI agents collaborating in one shared project room.',
+      },
+      {
+        src: '/assets/kota/flip-cards/perpetual-memory.webp',
+        alt: 'Perpetual Memory',
+        title: 'Perpetual Memory',
+        subtitle: 'Raw sessions materialized into structured history & recall.',
+      },
+      {
+        src: '/assets/kota/flip-cards/cross-project.webp',
+        alt: 'Cross Project',
+        title: 'Cross Project',
+        subtitle: 'Agents coordinate across repositories via the Bulletin Board.',
+      },
+      {
+        src: '/assets/kota/flip-cards/cross-device.webp',
+        alt: 'Cross Device',
+        title: 'Cross Device',
+        subtitle: 'Synchronized worktrees and rooms with conflict-safe gates.',
+      },
+      {
+        src: '/assets/kota/flip-cards/remote-access.webp',
+        alt: 'Remote Access',
+        title: 'Remote Access',
+        subtitle: 'Dispatch tasks and talk to your project room from anywhere.',
+      },
+      {
+        src: '/assets/kota/flip-cards/self-planning.webp',
+        alt: 'Self Planning',
+        title: 'Self Planning',
+        subtitle: 'Scheduled prompts, recurring routines, and idle triggers.',
+      },
+      {
+        src: '/assets/kota/flip-cards/team-learning.webp',
+        alt: 'Team Learning',
+        title: 'Team Learning',
+        subtitle: 'Shared user portrait and personal marks that evolve nightly.',
+      },
+    ];
+
+    this._flipCardsRoot = window.ReactDOM.createRoot(gridEl);
+    this._flipCardsRoot.render(
+      h(CircularCarousel, {
+        items: CAROUSEL_ITEMS,
+        preset: 'cylinder',
+        intro: 'rise',
+        cardWidth: 292,
+        aspectRatio: 0.75,
+        gap: 36,
+        speed: 14,
+        fadeColor: '#0c0b0a',
+        cornerRadius: 16,
+        captions: false,
+      })
+    );
   }
 
   // ---- CardSwap window stack (GSAP-driven) ----
@@ -874,13 +2428,13 @@ class Component extends DCLogic {
 
   _data() {
     return [
-      { title: 'One room, many agents', tag: 'ROOMS', aud: ['H', 'A'], img: '/assets/screenshots/room-tavern.png', fit: 'cover',
+      { title: 'One room, many agents', tag: 'ROOMS', aud: ['H', 'A'], img: '/assets/screenshots/room-tavern.webp', fit: 'cover',
         summary: 'One room, many agents, many providers, one shared timeline.',
         detail: 'One room per project, with up to 8 sitting agents from different providers, shared context, and a shared timeline.' },
-      { title: 'Agent-to-agent, human-to-agent', tag: 'CHAT', aud: ['H', 'A'], img: '/assets/screenshots/room-chat.png', fit: 'cover',
+      { title: 'Agent-to-agent, human-to-agent', tag: 'CHAT', aud: ['H', 'A'], img: '/assets/screenshots/room-chat.webp', fit: 'cover',
         summary: 'Agent to agent, human to agent, naturally and seamlessly.',
         detail: 'Agent-to-agent communication and cross-project agent discussion, with humans in the loop, group chat or silo conversation.' },
-      { title: 'Agents from templates', tag: 'AGENTS', aud: ['H'], img: '/assets/screenshots/heroes.png', fit: 'cover',
+      { title: 'Agents from templates', tag: 'AGENTS', aud: ['H'], img: '/assets/screenshots/heroes.webp', fit: 'cover',
         summary: 'Create agents from templates; freely edit every template and persona.',
         detail: "Create an agent from a template, set provider, model, effort level, etc. Then freely modify each template and each agent's persona. (Or ask an agent to do it.)" },
       { title: 'Your CLI, in parallel', tag: 'CLI', aud: ['H'], img: '/assets/kota/icons/shell.svg', fit: 'contain',
@@ -965,14 +2519,14 @@ class Component extends DCLogic {
       const mainStyle = { flex: '1 1 0', minWidth: 0, display: 'flex' };
       const frontImg = ({ CLI_SINGLE_DISABLED: '' })[d.tag] || '';
       const splitMap = {
-        ROOMS: { tl: 'ROOMS-tl.png', tlSize: '161%', tlPos: '42% 100%', br: 'ROOMS-br.png', brSize: '70%', brPos: '97% 42%', dw: 0, diag: 'tlbr-out' },
-        CHAT: { tl: 'CHAT-tl.png', tlSize: '106%', tlPos: '50% 50%', br: 'CHAT-br.png', brSize: '152%', brPos: '60% 100%', dw: 0, diag: 'tlbr-out' },
-        AGENTS: { tl: 'AGENTS-tl.png', tlSize: '82%', tlPos: '0% 32%', br: 'AGENTS-br.png', brSize: '101%', brPos: '0% 20%', dw: 0, diag: 'tlbr-out' },
-        CLI: { tl: 'CLI-tl.png', tlSize: '125%', tlPos: '0% 0%', br: 'CLI-br.png', brSize: '100%', brPos: '100% 100%', dw: 0, diag: 'trbl-out' },
-        PTY: { tl: 'PTY-tl.png', tlSize: '151%', tlPos: '0% 7%', br: 'PTY-br.png', brSize: '166%', brPos: '4% 0%', dw: 0, diag: 'trbl-out' },
-        RULES: { tl: 'RULES-tl.png', tlSize: '104%', tlPos: '92% 6%', br: 'RULES-br.png', brSize: '104%', brPos: '1% 100%', dw: 0, diag: 'tlbr-out' },
-        SYNC: { tl: 'SYNC-tl.png', tlSize: '73%', tlPos: '100% 0%', br: 'SYNC-br.png', brSize: '93%', brPos: '0% 100%', dw: 0, diag: 'trbl-out' },
-        REMOTE: { tl: 'REMOTE-tl.png', tlSize: '163%', tlPos: '0% 0%', br: 'REMOTE-br.png', brSize: '273%', brPos: '0% 80.8%', dw: 0, diag: 'tlbr-out' },
+        ROOMS: { tl: 'ROOMS-tl.webp', tlSize: '161%', tlPos: '42% 100%', br: 'ROOMS-br.webp', brSize: '70%', brPos: '97% 42%', dw: 0, diag: 'tlbr-out' },
+        CHAT: { tl: 'CHAT-tl.webp', tlSize: '106%', tlPos: '50% 50%', br: 'CHAT-br.webp', brSize: '152%', brPos: '60% 100%', dw: 0, diag: 'tlbr-out' },
+        AGENTS: { tl: 'AGENTS-tl.webp', tlSize: '82%', tlPos: '0% 32%', br: 'AGENTS-br.webp', brSize: '101%', brPos: '0% 20%', dw: 0, diag: 'tlbr-out' },
+        CLI: { tl: 'CLI-tl.webp', tlSize: '125%', tlPos: '0% 0%', br: 'CLI-br.webp', brSize: '100%', brPos: '100% 100%', dw: 0, diag: 'trbl-out' },
+        PTY: { tl: 'PTY-tl.webp', tlSize: '151%', tlPos: '0% 7%', br: 'PTY-br.webp', brSize: '166%', brPos: '4% 0%', dw: 0, diag: 'trbl-out' },
+        RULES: { tl: 'RULES-tl.webp', tlSize: '104%', tlPos: '92% 6%', br: 'RULES-br.webp', brSize: '104%', brPos: '1% 100%', dw: 0, diag: 'tlbr-out' },
+        SYNC: { tl: 'SYNC-tl.webp', tlSize: '73%', tlPos: '100% 0%', br: 'SYNC-br.webp', brSize: '93%', brPos: '0% 100%', dw: 0, diag: 'trbl-out' },
+        REMOTE: { tl: 'REMOTE-tl.webp', tlSize: '163%', tlPos: '0% 0%', br: 'REMOTE-br.webp', brSize: '273%', brPos: '0% 80.8%', dw: 0, diag: 'tlbr-out' },
       };
       const sp = splitMap[d.tag];
       const splitMode = !!sp;
@@ -984,14 +2538,14 @@ class Component extends DCLogic {
       const splitBRStyle = splitMode ? { position: 'absolute', inset: '0', backgroundImage: `url("/assets/kota/card-front/split/${sp.br}")`, backgroundSize: sp.brSize, backgroundPosition: sp.brPos, backgroundRepeat: 'no-repeat', clipPath: clipB } : { display: 'none' };
       const splitDividerStyle = (splitMode && sp.dw) ? { position: 'absolute', inset: '0', pointerEvents: 'none', background: `linear-gradient(${dividerDir}, transparent calc(50% - ${sp.dw / 2}px), #14100c calc(50% - ${sp.dw / 2}px), #14100c calc(50% + ${sp.dw / 2}px), transparent calc(50% + ${sp.dw / 2}px))`, zIndex: 3 } : { display: 'none' };
       const singleMap = {
-        SKILLS: { img: 'SKILLS.png', size: '106%', pos: '0% 7.8%' },
-        HISTORY: { img: 'HISTORY.png', size: '103%', pos: '51% 41%' },
-        SHELL: { img: 'SHELL.png', size: '100%', pos: '55% 32%' },
-        BBS: { img: 'BBS.png', size: '140%', pos: '0% 7%' },
-        DIFF: { img: 'DIFF.png', size: '101%', pos: '75% 49%' },
-        CANVAS: { img: 'CANVAS.png', size: '78%', pos: '56% 47%' },
-        TIMED: { img: 'TIMED.png', size: '152%', pos: '0% 0%' },
-        DREAMS: { img: 'DREAMS.png', size: '268%', pos: '67% 80%' },
+        SKILLS: { img: 'SKILLS.webp', size: '106%', pos: '0% 7.8%' },
+        HISTORY: { img: 'HISTORY.webp', size: '103%', pos: '51% 41%' },
+        SHELL: { img: 'SHELL.webp', size: '100%', pos: '55% 32%' },
+        BBS: { img: 'BBS.webp', size: '140%', pos: '0% 7%' },
+        DIFF: { img: 'DIFF.webp', size: '101%', pos: '75% 49%' },
+        CANVAS: { img: 'CANVAS.webp', size: '78%', pos: '56% 47%' },
+        TIMED: { img: 'TIMED.webp', size: '152%', pos: '0% 0%' },
+        DREAMS: { img: 'DREAMS.webp', size: '268%', pos: '67% 80%' },
       };
       const sg = singleMap[d.tag];
       const singleMode = !!sg;
@@ -1016,7 +2570,7 @@ class Component extends DCLogic {
       const stubStyle = { flex: '0 0 26%', minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'space-between', padding: '11px 4px', borderLeft: `1.5px dashed ${ink2}` };
       const aud = d.aud || ['H', 'A'];
       const human = aud.includes('H'), agent = aud.includes('A');
-      const backImg = ({ ROOMS: '/assets/kota/card-back/ROOMS.png', CHAT: '/assets/kota/card-back/CHAT.png', AGENTS: '/assets/kota/card-back/AGENTS.png', CLI: '/assets/kota/card-back/CLI.png', PTY: '/assets/kota/card-back/PTY.png', SKILLS: '/assets/kota/card-back/SKILLS.png', RULES: '/assets/kota/card-back/RULES.png', SYNC: '/assets/kota/card-back/SYNC.png', HISTORY: '/assets/kota/card-back/HISTORY.png', SHELL: '/assets/kota/card-back/SHELL.png', BBS: '/assets/kota/card-back/BBS.png', REMOTE: '/assets/kota/card-back/REMOTE.png', DIFF: '/assets/kota/card-back/DIFF.png', CANVAS: '/assets/kota/card-back/CANVAS.png', TIMED: '/assets/kota/card-back/TIMED.png', DREAMS: '/assets/kota/card-back/DREAMS.png' })[d.tag] || '';
+      const backImg = ({ ROOMS: '/assets/kota/card-back/ROOMS.webp', CHAT: '/assets/kota/card-back/CHAT.webp', AGENTS: '/assets/kota/card-back/AGENTS.webp', CLI: '/assets/kota/card-back/CLI.webp', PTY: '/assets/kota/card-back/PTY.webp', SKILLS: '/assets/kota/card-back/SKILLS.webp', RULES: '/assets/kota/card-back/RULES.webp', SYNC: '/assets/kota/card-back/SYNC.webp', HISTORY: '/assets/kota/card-back/HISTORY.webp', SHELL: '/assets/kota/card-back/SHELL.webp', BBS: '/assets/kota/card-back/BBS.webp', REMOTE: '/assets/kota/card-back/REMOTE.webp', DIFF: '/assets/kota/card-back/DIFF.webp', CANVAS: '/assets/kota/card-back/CANVAS.webp', TIMED: '/assets/kota/card-back/TIMED.webp', DREAMS: '/assets/kota/card-back/DREAMS.webp' })[d.tag] || '';
       const backIsAvatar = backImg.indexOf('/avatars/') >= 0;
       const backImgStyle = backIsAvatar
         ? { width: '84%', aspectRatio: '1', objectFit: 'cover', borderRadius: '50%', transform: 'scale(1.34)', margin: 'auto', display: 'block' }
@@ -1116,17 +2670,15 @@ class Component extends DCLogic {
     const wnVersion = (wn && wn.version) ? wn.version : '0.1';
     const wnDate = (wn && wn.date) ? fmtDate(wn.date) : 'June 25, 2026';
     const wnTitle = (wn && wn.title) ? wn.title : 'first public release';
-    const icon = (slug) => `https://api.iconify.design/simple-icons/${slug}.svg?color=%23e9e1d0`;
-    const iconStyle = (slug) => ({ width: '16px', height: '16px', backgroundImage: `url(${icon(slug)})`, backgroundSize: 'contain', backgroundRepeat: 'no-repeat', backgroundPosition: 'center' });
     const iconLocal = (path) => ({ width: '16px', height: '16px', backgroundImage: `url(${path})`, backgroundSize: 'contain', backgroundRepeat: 'no-repeat', backgroundPosition: 'center' });
     const clis = [
-      { name: 'Claude Code', iconStyle: iconStyle('claude') },
-      { name: 'Codex', iconStyle: iconStyle('openai') },
-      { name: 'Gemini', iconStyle: iconStyle('googlegemini') },
-      { name: 'OpenCode', iconStyle: iconStyle('opencode') },
+      { name: 'Claude Code', iconStyle: iconLocal('/assets/kota/icons/claude.svg') },
+      { name: 'Codex', iconStyle: iconLocal('/assets/kota/icons/openai.svg') },
+      { name: 'Gemini', iconStyle: iconLocal('/assets/kota/icons/googlegemini.svg') },
+      { name: 'OpenCode', iconStyle: iconLocal('/assets/kota/icons/opencode.svg') },
       { name: 'Pi', iconStyle: iconLocal('/assets/kota/icons/pi.svg') },
       { name: 'Kimi Code', iconStyle: iconLocal('/assets/kota/icons/kimi.svg') },
-      { name: 'GitHub', iconStyle: iconStyle('github') },
+      // { name: 'GitHub', iconStyle: iconLocal('/assets/kota/icons/github.svg') },
     ];
     const footerCols = [
       { head: 'Product', links: [
@@ -1146,10 +2698,10 @@ class Component extends DCLogic {
 
     // ---- CardSwap window stack ----
     const shotData = [
-      { title: 'Project room', file: 'kota — atlas / room', tag: 'ROOMS', image: '/assets/screenshots/room-tavern.png', size: '132%', pos: '42.8% 20%' },
-      { title: 'Room chat', file: 'kota — atlas / chat', tag: 'CHAT', image: '/assets/screenshots/room-chat.png', size: '171%', pos: '0% 97%' },
-      // { title: 'Agent setup', file: 'kota — atlas / agent', tag: 'AGENT', image: '/assets/screenshots/agent-profile.png', size: '164%', pos: '82.9% 32.3%' }, // 暂时隐藏 (老无) — 取消注释即可恢复
-      { title: 'Source heroes', file: 'kota — atlas / heroes', tag: 'HEROES', image: '/assets/screenshots/heroes.png', size: '109%', pos: '49.7% 21.8%' },
+      { title: 'Project room', file: 'kota — atlas / room', tag: 'ROOMS', image: '/assets/screenshots/room-tavern.webp', size: '132%', pos: '42.8% 20%' },
+      { title: 'Room chat', file: 'kota — atlas / chat', tag: 'CHAT', image: '/assets/screenshots/room-chat.webp', size: '171%', pos: '0% 97%' },
+      // { title: 'Agent setup', file: 'kota — atlas / agent', tag: 'AGENT', image: '/assets/screenshots/agent-profile.webp', size: '164%', pos: '82.9% 32.3%' }, // 暂时隐藏 (老无) — 取消注释即可恢复
+      { title: 'Source heroes', file: 'kota — atlas / heroes', tag: 'HEROES', image: '/assets/screenshots/heroes.webp', size: '109%', pos: '49.7% 21.8%' },
     ];
     const N = shotData.length;
     const M0 = this._swapMetrics(540, N);

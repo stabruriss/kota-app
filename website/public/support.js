@@ -153,11 +153,13 @@
     runtime.markFetched(rootName);
     runtime.setRootName(rootName);
     runtime.adoptParsed(rootName, parsed);
-    fetch(location.href).then((res) => res.ok ? res.text() : "").then((t) => {
-      const raw = t ? parseDcText(t) : null;
-      if (raw?.template) runtime.updateHtml(rootName, raw.template);
-    }).catch(() => {
-    });
+    if (/<(x-import|dc-import)\b/i.test(parsed.template || "")) {
+      fetch(location.href).then((res) => res.ok ? res.text() : "").then((t) => {
+        const raw = t ? parseDcText(t) : null;
+        if (raw?.template) runtime.updateHtml(rootName, raw.template);
+      }).catch(() => {
+      });
+    }
     const dc = doc.querySelector("x-dc");
     const hostEl = doc.createElement("div");
     hostEl.id = "dc-root";
@@ -1240,6 +1242,8 @@
             const key = "SCRIPT|" + (child.getAttribute("src") || child.textContent || "");
             if (mounted.has(key)) continue;
             mounted.add(key);
+            const src = child.getAttribute("src");
+            if (src && doc.head.querySelector(`script[src="${CSS.escape(src)}"]`)) continue;
             const el = doc.createElement("script");
             for (const { name: an, value } of [...child.attributes])
               el.setAttribute(an, value);
@@ -1250,6 +1254,8 @@
             const key = tag + "|" + (child.getAttribute("href") || child.getAttribute("src") || child.outerHTML);
             if (mounted.has(key)) continue;
             mounted.add(key);
+            const href = child.getAttribute("href");
+            if (tag === "LINK" && href && doc.head.querySelector(`link[href="${CSS.escape(href)}"]`)) continue;
             doc.head.appendChild(child.cloneNode(true));
           } else {
             const key = name + "|" + i;
@@ -1491,25 +1497,91 @@
   }
 
   // src/index.ts
-  var REACT_URL = "https://unpkg.com/react@18.3.1/umd/react.production.min.js";
+  var REACT_URL = "/assets/vendor/react-18.3.1.production.min.js";
   var REACT_SRI = "sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z";
-  var REACT_DOM_URL = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js";
+  var REACT_DOM_URL = "/assets/vendor/react-dom-18.3.1.production.min.js";
   var REACT_DOM_SRI = "sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1";
-  function hideRawTemplate() {
-    const s = document.createElement("style");
-    s.textContent = "x-dc{display:none!important}";
-    document.head.appendChild(s);
+  var LOAD_TIMEOUT_MS = 5e3;
+  var hideStyleEl = null;
+  var hideTimer = null;
+  function removeHideStyle() {
+    if (typeof window !== "undefined" && window) {
+      window.__dcPrehideRevealed = true;
+    }
+    if (hideTimer !== null) {
+      if (typeof clearTimeout === "function") clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+    if (hideStyleEl) {
+      hideStyleEl.remove();
+      hideStyleEl = null;
+    }
+    const pre = typeof document !== "undefined" && document.getElementById ? document.getElementById("dc-prehide") : null;
+    if (pre && typeof pre.remove === "function") pre.remove();
   }
-  function loadScript(src, integrity) {
+  function remainingBootTimeoutMs() {
+    if (typeof window !== "undefined" && window) {
+      if (window.__dcPrehideRevealed) return 0;
+      if (typeof window.__dcPrehideDeadline === "number") {
+        return Math.max(0, window.__dcPrehideDeadline - Date.now());
+      }
+    }
+    return LOAD_TIMEOUT_MS;
+  }
+  function hideRawTemplate() {
+    if (typeof window !== "undefined" && window) {
+      window.__dcRemoveHide = removeHideStyle;
+    }
+    const rem = remainingBootTimeoutMs();
+    if (rem <= 0) {
+      removeHideStyle();
+      return;
+    }
+    const pre = typeof document !== "undefined" && document.getElementById ? document.getElementById("dc-prehide") : null;
+    if (pre) {
+      hideStyleEl = pre;
+    } else {
+      const s = document.createElement("style");
+      s.id = "dc-prehide";
+      s.textContent = "x-dc{display:none!important}";
+      document.head.appendChild(s);
+      hideStyleEl = s;
+    }
+    if (typeof setTimeout === "function") {
+      hideTimer = setTimeout(removeHideStyle, rem);
+    }
+  }
+  function loadScript(src, integrity, timeoutMs = LOAD_TIMEOUT_MS) {
     return new Promise((resolve2, reject) => {
       //! nosemgrep: create-script-element
       const s = document.createElement("script");
+      let settled = false;
+      const timer = typeof setTimeout === "function" ? setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        s.onload = null;
+        s.onerror = null;
+        if (typeof s.remove === "function") s.remove();
+        reject(new Error(`timed out loading ${src} after ${timeoutMs}ms`));
+      }, timeoutMs) : null;
       s.src = src;
-      s.integrity = integrity;
-      s.crossOrigin = "anonymous";
+      if (integrity && /^https?:/i.test(src)) {
+        s.integrity = integrity;
+        s.crossOrigin = "anonymous";
+      }
       s.async = false;
-      s.onload = () => resolve2();
-      s.onerror = () => reject(new Error(`failed to load ${src}`));
+      s.onload = () => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null && typeof clearTimeout === "function") clearTimeout(timer);
+        resolve2();
+      };
+      s.onerror = () => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null && typeof clearTimeout === "function") clearTimeout(timer);
+        reject(new Error(`failed to load ${src}`));
+      };
       document.head.appendChild(s);
     });
   }
@@ -1561,8 +1633,12 @@
       /** Editor bridge — the *original* (decoded) template source. */
       __dcTemplateSource: (name) => runtime.templateSource(name),
       __dcBoot: () => {
-        rootName = boot(runtime, document) ?? rootName;
-        notifyHost();
+        try {
+          rootName = boot(runtime, document) ?? rootName;
+          notifyHost();
+        } finally {
+          removeHideStyle();
+        }
       },
       __dcRegistry: runtime.registry.entries,
       getDC: (name) => runtime.getDC(name),
@@ -1577,7 +1653,7 @@
   }
   hideRawTemplate();
   loadReactUmd().then(init).catch((err) => {
+    removeHideStyle();
     console.error("[dc] failed to load React or boot:", err);
-    throw err;
   });
 })();
