@@ -44,7 +44,7 @@ it.each([
   await userEvent.click(await screen.findByRole('button', { name: new RegExp(`^${name}\\b`) }));
   const dialog = () => screen.getByRole('dialog', { name: `${name} profile` });
   const edit = async () => {
-    await userEvent.click(within(dialog()).getByRole('button', { name: 'Edit Shell' }));
+    await userEvent.click(within(dialog()).getByRole('button', { name: 'Edit' }));
     return within(dialog()).getAllByRole('combobox');
   };
   let fields = await edit();
@@ -55,7 +55,7 @@ it.each([
   await userEvent.clear(fields[0]);
   await userEvent.type(fields[0], 'chosen/custom-model');
   if (fields[1]) await userEvent.type(fields[1], 'high');
-  await userEvent.click(within(dialog()).getByRole('button', { name: 'Save Shell' }));
+  await userEvent.click(within(dialog()).getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(disk.find((p) => p.heroId === heroId)).toMatchObject({
     model: 'chosen/custom-model', effort: fields[1] ? 'high' : null, ghost: factory.ghost, skills: ['frontend-design'],
   }));
@@ -70,7 +70,7 @@ it.each([
   await userEvent.clear(fields[0]);
   await userEvent.type(fields[0], 'default');
   if (fields[1]) await userEvent.clear(fields[1]);
-  await userEvent.click(within(dialog()).getByRole('button', { name: 'Save Shell' }));
+  await userEvent.click(within(dialog()).getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(disk.find((p) => p.heroId === heroId)).toMatchObject({ model: 'default', effort: null }));
   view.rerender(<TavernModal open={false} onClose={onClose} />);
   view.rerender(<TavernModal open onClose={onClose} />);

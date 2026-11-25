@@ -16,6 +16,7 @@ import type { Centerpiece } from './chrome/Hearth';
 import { HotMemoryPopup } from './popups/HotMemoryPopup';
 import { RowPopup } from './popups/RowPopup';
 import { FileTree } from './chrome/FileTree';
+import { useSidebarRailAppSync } from './lib/sidebar-rail';
 import { SmartTerminal } from './chrome/SmartTerminal';
 import { AgentWindowsLayer, type AgentWindowsLayerHandle } from './chrome/AgentWindowsLayer';
 import { BroadcastTargetPopover } from './chrome/BroadcastTargetPopover';
@@ -43,6 +44,7 @@ import {
   type TavernTab,
   type TavernHeroIncarnationProfile,
 } from './chrome/TavernModal';
+import { GithubSignInDialog } from './chrome/GithubSignInDialog';
 import { ProjectSetupModal } from './chrome/ProjectSetupModal';
 import { Hearth } from './chrome/Hearth';
 import {
@@ -53,8 +55,16 @@ import { LocalWorkbenchHost } from './chrome/LocalWorkbenchHost';
 import { EMPTY_LOCAL_QUEUE_GUARDS, localQueueGuardKey } from './lib/local-queue';
 import { KOTA_LOCAL_ENABLED, localInputTargets, submitLocal, type LocalComposerInput } from './lib/local-rpc';
 import { KOTA_LOCAL_LINK_EVENT, type KotaLocalLinkTarget } from './lib/local-auth';
-import { GITHUB_LINK_EVENT, openGithubAccounts } from './lib/github-account-flow';
+import { GITHUB_LINK_EVENT } from './lib/github-account-flow';
 import { PROJECT_CONNECTION_CHANGED, mergeWorkspaceConnection } from './lib/project-connection-ui';
+import {
+  completeResetRelayAndDismiss,
+  dismissResetRelayImmediately,
+  isResetRelayActive,
+  resolveResetRelayAction,
+  setResetRelayStage,
+  subscribeResetRelayActive,
+} from './lib/reset-relay';
 import { recruitFromIncarnation, type IncarnationRecruitSource, type RecruitPreview } from './lib/reincarnation';
 import {
   isAgentCli,
@@ -69,7 +79,6 @@ import {
   commendProjectAgent,
   dismissProjectAgent,
   emberSchedulerTick,
-  ghAuthStatus,
   hasTauriRuntime,
   incarnateTavernHero,
   inspectProjectAgentIdentities,
@@ -109,7 +118,6 @@ import {
   supportedShellsStatus,
   terminalEnhancementStatus,
   workspaceStatus,
-  type GhAuthInfo,
   type LmSelected,
   type ProjectAgentCommendSource,
   type ProjectAgentDetail,
@@ -497,6 +505,7 @@ function profileDraftForIncarnation(
     provider: profile.provider,
     model: profile.model,
     effort: profile.effort ?? null,
+    autoRoute: profile.autoRoute,
     avatarId: profile.avatarId,
     skills: [...profile.skills],
     ghost: profile.ghost,
@@ -1127,7 +1136,6 @@ export function App() {
   const [workspaceInitialLoadComplete, setWorkspaceInitialLoadComplete] = useState(() => !hasTauriRuntime());
   const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceProject[]>([]);
   const [fileTreeRefreshToken, setFileTreeRefreshToken] = useState(0);
-  const [ghAuth, setGhAuth] = useState<GhAuthInfo | null>(null);
   const [recruitProjectRoot, setRecruitProjectRoot] = useState<string>(() => {
     try {
       return localStorage.getItem(LS_DEV_PROJECT_ROOT) ?? BROWSER_DEV_PROJECT_ROOT;
@@ -1337,6 +1345,18 @@ export function App() {
       return null;
     });
   }, []);
+  const roomComposerHasDraftRef = useRef(false);
+  const localQueueHasDraftRef = useRef(false);
+  const handleRoomComposerHasDraftChange = useCallback((hasDraft: boolean) => {
+    roomComposerHasDraftRef.current = hasDraft;
+  }, []);
+  const handleLocalQueueHasDraftChange = useCallback((hasDraft: boolean) => {
+    localQueueHasDraftRef.current = hasDraft;
+  }, []);
+  const hasExternalComposerDraft = useCallback(
+    () => roomComposerHasDraftRef.current || localQueueHasDraftRef.current,
+    [],
+  );
   const chooseSoulDismiss = useCallback((choice: SoulDismissChoice) => {
     const resolve = soulDismissResolveRef.current;
     soulDismissResolveRef.current = null;
@@ -1554,6 +1574,45 @@ export function App() {
   const activeProjectName = projectTabs.find((p) => p.id === activeProjectId)?.name ?? activeProjectId;
   const showProjectLoadingState = hasTauriRuntime() && !workspaceInitialLoadComplete;
   const showProjectEmptyState = hasTauriRuntime() && workspaceInitialLoadComplete && !activeWorkspace;
+  const closeArchiveOnCollapse = useCallback(() => setArchiveOpen(false), []);
+  useSidebarRailAppSync(!showProjectLoadingState && !showProjectEmptyState, closeArchiveOnCollapse);
+
+  const [resetRelayActive, setResetRelayActive] = useState(() => isResetRelayActive());
+
+  useEffect(() => {
+    if (!resetRelayActive) return undefined;
+    if (!isResetRelayActive()) {
+      setResetRelayActive(false);
+      return undefined;
+    }
+    return subscribeResetRelayActive(setResetRelayActive);
+  }, [resetRelayActive]);
+
+  useEffect(() => {
+    if (!resetRelayActive) return;
+    const action = resolveResetRelayAction({
+      hasTauri: hasTauriRuntime(),
+      workspaceInitialLoadComplete,
+      hasActiveWorkspace: !!activeWorkspace,
+      agentsHydrating,
+      hasHydrationFailure: !!activeAgentHydrationFailure,
+    });
+    if (action.kind === 'hold_stage_2') {
+      setResetRelayStage(2);
+    } else if (action.kind === 'advance_stage_3') {
+      setResetRelayStage(3);
+    } else if (action.kind === 'complete_stage_4') {
+      completeResetRelayAndDismiss();
+    } else {
+      dismissResetRelayImmediately();
+    }
+  }, [
+    resetRelayActive,
+    workspaceInitialLoadComplete,
+    activeWorkspace,
+    agentsHydrating,
+    activeAgentHydrationFailure,
+  ]);
 
   const clearIncarnationProgressHideTimer = useCallback(() => {
     if (incarnationProgressHideTimerRef.current !== null) {
@@ -1790,32 +1849,6 @@ export function App() {
       })
       .catch(() => {});
   }, []);
-
-  const refreshGhAuth = useCallback(async () => {
-    try {
-      setGhAuth(await ghAuthStatus());
-    } catch (err) {
-      setGhAuth({
-        authenticated: false,
-        username: null,
-        scopes: [],
-        error: String(err),
-        cliMissing: false,
-      });
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshGhAuth();
-  }, [refreshGhAuth]);
-
-  useEffect(() => {
-    if (ghAuth?.authenticated) return;
-    const interval = window.setInterval(() => {
-      void refreshGhAuth();
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [ghAuth?.authenticated, refreshGhAuth]);
 
   useEffect(() => preloadTavernAssets(), []);
 
@@ -4612,9 +4645,6 @@ export function App() {
         tavernOpen={tavernOpen}
         tavernPreparing={tavernPreparing}
         hideProjectTabs={tavernOpen || tavernPreparing}
-        ghAuth={ghAuth}
-        workspace={activeWorkspace}
-        onGhAuthClick={openGithubAccounts}
       />
       <>
         <>
@@ -4669,6 +4699,7 @@ export function App() {
                     minimizedAgents={minimized}
                     shortcutAgentsOrdered={shortcutAgentsOrdered}
                     agentsHydrating={agentsHydrating}
+                    suppressRoomRestoreOverlay={resetRelayActive}
                     agentHydrationProgress={activeAgentHydrationProgress}
                     agentHydrationFailed={!!activeAgentHydrationFailure}
                     onRetryAgentHydration={retryAgentHydration}
@@ -4742,7 +4773,7 @@ export function App() {
                         />
                       ) : null
                     }
-                    composer={<>
+                    composer={(
                       <RoomComposer
                         ref={inputBarRef}
                         targetAgent={targetAgent}
@@ -4759,6 +4790,7 @@ export function App() {
                         onPrivacyToggle={PRIVATE_CHAT_UI_ENABLED ? togglePrivacyMode : undefined}
                         onSend={handleSend}
                         onDraftChange={clearPartialSessionSend}
+                        onHasDraftChange={handleRoomComposerHasDraftChange}
                         onPasteImage={handlePasteComposerImage}
                         onMaterializeAttachments={handleMaterializeComposerAttachments}
                         modelControls={!danceEnabled && targetAgent && violetProjectRoot && isLocalAgent(targetAgent) ?
@@ -4771,8 +4803,12 @@ export function App() {
                         onWhiteboardOpen={toggleWhiteboard}
                         onFocus={() => setTerminalFocusedAgent(null)}
                       />
-                      {danceEnabled && danceSendError?.root === violetProjectRoot && <p className="dance-send-error" role="alert">{danceSendError.text}</p>}
-                    </>}
+                    )}
+                    composerFooter={
+                      danceEnabled && danceSendError?.root === violetProjectRoot
+                        ? <p className="dance-send-error" role="alert">{danceSendError.text}</p>
+                        : null
+                    }
                   />
                 </>
               )}
@@ -4799,6 +4835,7 @@ export function App() {
               onInsertComposerAttachment={insertComposerAttachment}
               onPasteImage={handlePasteComposerImage}
               onMaterializeAttachments={handleMaterializeComposerAttachments}
+              hasComposerDraft={hasExternalComposerDraft}
               footerSlot={(
                 <button
                   type="button"
@@ -4825,7 +4862,8 @@ export function App() {
               open={localWorkbench && localWorkbench.projectRoot === violetProjectRoot && isLocalAgent(localWorkbench.agentId) && !showProjectLoadingState && !showProjectEmptyState ? localWorkbench : null}
               agents={agentMeta} records={agentRecords} targets={shortcutTargetAgents} privateAgents={effectivePrivateAgents}
               onClose={closeLocalWorkbench} onDetails={setProjectAgentDetailId} onFresh={handleStartFreshSession}
-              onResume={wakeAgentForLocalWorkbench} onSend={handleSend} onGuardsChange={updateLocalQueueGuards} />
+              onResume={wakeAgentForLocalWorkbench} onSend={handleSend} onGuardsChange={updateLocalQueueGuards}
+              onHasDraftChange={handleLocalQueueHasDraftChange} />
             {/* W3 — floating agent windows. Mounted as workspace overlay
                 so it covers Stage but not TopBar / Smart Terminal. W4 lifts
                 minimized state up so AgentRibbon and AgentWindowsLayer
@@ -4980,6 +5018,7 @@ export function App() {
             tone: 'danger',
           })}
         />
+        <GithubSignInDialog />
       </>
     </>
   );

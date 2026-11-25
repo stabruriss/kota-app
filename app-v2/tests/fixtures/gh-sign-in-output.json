@@ -1,0 +1,62 @@
+{
+ "waiting": {
+  "exit": null,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\n"
+ },
+ "color": {
+  "exit": null,
+  "output": "\n\u001b[0;33m!\u001b[0m First copy your one-time code: \u001b[0;1;39mWDJB-MJHT\u001b[0m\n\u001b[0;1;39mOpen this URL\u001b[0m to continue in your web browser: http://github.localhost/login/device\n"
+ },
+ "success": {
+  "exit": 0,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\n✓ Authentication complete.\n- gh config set -h github.localhost git_protocol https\n✓ Configured git protocol\n! Authentication credentials saved in plain text\n✓ Logged in as fable-indigo\n"
+ },
+ "declined": {
+  "exit": 1,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\nfailed to authenticate via web browser: The authorization request was denied. (access_denied)\n"
+ },
+ "expired": {
+  "exit": 1,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\nfailed to authenticate via web browser: The device_code has expired. (expired_token)\n"
+ },
+ "local-expiry": {
+  "exit": 1,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\nfailed to authenticate via web browser: context deadline exceeded\n"
+ },
+ "slow-down": {
+  "exit": 1,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\nfailed to authenticate via web browser: slow_down\n"
+ },
+ "drop-once": {
+  "exit": 1,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\nfailed to authenticate via web browser: Post \"http://github.localhost/login/oauth/access_token\": EOF\n"
+ },
+ "drop-while-waiting": {
+  "exit": 1,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\nfailed to authenticate via web browser: Post \"http://github.localhost/login/oauth/access_token\": EOF\n"
+ },
+ "unavailable-while-waiting": {
+  "exit": 1,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\nfailed to authenticate via web browser: HTTP 503\n"
+ },
+ "no-connection": {
+  "exit": 1,
+  "output": "\nfailed to authenticate via web browser: Post \"http://github.localhost/login/device/code\": EOF\n"
+ },
+ "server-error": {
+  "exit": 1,
+  "output": "\nfailed to authenticate via web browser: HTTP 503\n"
+ },
+ "rate-limited": {
+  "exit": 1,
+  "output": "\nfailed to authenticate via web browser: Too many requests (slow_down)\n"
+ },
+ "cannot-store": {
+  "exit": 1,
+  "output": "\n! First copy your one-time code: WDJB-MJHT\nOpen this URL to continue in your web browser: http://github.localhost/login/device\n✓ Authentication complete.\n- gh config set -h github.localhost git_protocol https\n✓ Configured git protocol\nopen /fixture/config/hosts.yml: permission denied\n"
+ },
+ "no-such-host": {
+  "exit": 1,
+  "output": "\nerror connecting to github.invalid\ncheck your internet connection or https://githubstatus.com\n"
+ }
+}

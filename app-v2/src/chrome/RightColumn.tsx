@@ -3,7 +3,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react';
 import type { BbsPromptProject } from '../bbs-config';
 import { watchDreamSubmissions } from '../lib/ember-dream-run';
 import { openGithubAccounts } from '../lib/github-account-flow';
@@ -110,10 +110,24 @@ import { LaughingManSettings } from './LaughingManSettings';
 import { LaughingManCloudflareWarning } from './LaughingManCloudflareWarning';
 import { cloudflareSummary } from '../lib/lm-cloudflare';
 import { PuppeteerDanceCard } from './PuppeteerDanceCard';
+import { RailCard, RailCardGrows, RailCards } from './RailCards';
 import type { DanceController } from '../lib/dance-settings';
 import { MarkdownText } from './VioletRoomPanel';
 import { EmberScheduleInstrument } from './EmberScheduleInstrument';
 import { KotaVersionLabel } from './KotaVersionLabel';
+import {
+  SystemLoadConfirmDialog,
+  SystemLoadPanel,
+  useSystemLoadController,
+  type SystemLoadConfirmKind,
+} from './SystemLoadInstrument';
+import {
+  isWithinResetPostLoadCooldown,
+  lampCssVariables,
+  reloadKotaWindow,
+} from '../lib/system-load';
+import { publishRightRailSystemLoadLamp } from '../lib/sidebar-rail';
+import { SidebarRailSlot } from './SidebarRailCollapse';
 import type { Agent, AgentId } from '../types/scene';
 import type { LogRow as LogRowType } from '../types/scene';
 import { avatarClassForAgentFallback, avatarClassForId, avatarImageStyleForId } from '../lib/hero-avatars';
@@ -168,7 +182,7 @@ const CLOCK_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
   hour: 'numeric',
   minute: '2-digit',
 });
-let emberWorkSessionStartedAt = Date.now();
+const emberWorkSessionStartedAt = Date.now();
 type DreamOverlayState = 'off' | 'wrapping' | 'countdown' | 'dreaming' | 'finished';
 type DreamVideoPhase = Exclude<DreamOverlayState, 'off'>;
 type DreamVideoSet = {
@@ -462,6 +476,7 @@ export function VioletSummaryFault({ error, provider }: { error: string | null; 
       {fault.open && (
         <div className="violet-summary-fault-body">
           <pre className="violet-summary-fault-text">{fault.text}</pre>
+          <RailCardGrows />
         </div>
       )}
     </div>
@@ -804,10 +819,16 @@ function useSecondClockNow(): number {
 
 function EmberWorkedMeter({
   workStartedAt,
-  onReset,
+  expanded,
+  expandDisabled,
+  expandButtonRef,
+  onToggleExpand,
 }: {
   workStartedAt: number;
-  onReset: () => void;
+  expanded: boolean;
+  expandDisabled: boolean;
+  expandButtonRef: RefObject<HTMLButtonElement>;
+  onToggleExpand: () => void;
 }) {
   const now = useSecondClockNow();
   const workedDurationParts = formatWorkedDurationParts(now - workStartedAt);
@@ -816,7 +837,6 @@ function EmberWorkedMeter({
   const daybarVelRef = useRef(0);
   const daybarDragRef = useRef<{ startX: number; startOffset: number } | null>(null);
   const daybarRafRef = useRef<number | null>(null);
-  const resetWorkedRef = useRef<HTMLButtonElement | null>(null);
 
   const stepDaybar = useCallback(() => {
     if (!daybarDragRef.current) {
@@ -859,16 +879,6 @@ function EmberWorkedMeter({
     if (daybarRafRef.current != null) cancelAnimationFrame(daybarRafRef.current);
   }, []);
 
-  const resetWorked = useCallback(() => {
-    onReset();
-    const el = resetWorkedRef.current;
-    if (el) {
-      el.classList.remove('spring');
-      void el.offsetWidth;
-      el.classList.add('spring');
-    }
-  }, [onReset]);
-
   const daybarStyle = {
     '--ember-daybar-x': `${daybarPositionX(now)}px`,
   } as CSSProperties;
@@ -889,22 +899,22 @@ function EmberWorkedMeter({
         <span className="ember-worked-window-track" />
         <span className="ember-worked-window-glass" />
       </span>
-      <span className="ember-worked-flip" aria-hidden="true">
-        <span className="ember-worked-flip-group">
+      <span className="ember-worked-flip">
+        <span className="ember-worked-flip-group" aria-hidden="true">
           <span className="ember-worked-flip-cards">
             <span className="ember-worked-flip-card"><span>{workedDurationParts.hours[0]}</span></span>
             <span className="ember-worked-flip-card"><span>{workedDurationParts.hours[1]}</span></span>
           </span>
           <span className="ember-worked-flip-label">HRS</span>
         </span>
-        <span className="ember-worked-flip-group">
+        <span className="ember-worked-flip-group" aria-hidden="true">
           <span className="ember-worked-flip-cards">
             <span className="ember-worked-flip-card"><span>{workedDurationParts.minutes[0]}</span></span>
             <span className="ember-worked-flip-card"><span>{workedDurationParts.minutes[1]}</span></span>
           </span>
           <span className="ember-worked-flip-label">MIN</span>
         </span>
-        <span className="ember-worked-flip-group">
+        <span className="ember-worked-flip-group" aria-hidden="true">
           <span className="ember-worked-flip-cards">
             <span className="ember-worked-flip-card"><span>{workedDurationParts.seconds[0]}</span></span>
             <span className="ember-worked-flip-card"><span>{workedDurationParts.seconds[1]}</span></span>
@@ -913,18 +923,17 @@ function EmberWorkedMeter({
         </span>
         <button
           type="button"
-          className="ember-worked-reset"
-          ref={resetWorkedRef}
-          tabIndex={-1}
-          aria-label="Reset worked timer"
-          title="Reset worked timer"
-          onClick={resetWorked}
-          onAnimationEnd={() => resetWorkedRef.current?.classList.remove('spring')}
+          className="ember-worked-reset ram-expand"
+          ref={expandButtonRef}
+          aria-label="SYSTEM LOAD"
+          aria-controls="system-load-panel"
+          aria-expanded={expanded}
+          disabled={expandDisabled}
+          onClick={onToggleExpand}
         >
           <span className="ember-worked-reset-stud">
-            <svg viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.9">
-              <path d="M18.6 7.6 A7.2 7.2 0 1 0 19.3 12.4" />
-              <path d="M18.7 3.4 L18.7 7.9 L14.2 7.9" />
+            <svg viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" aria-hidden="true">
+              <path d="m5 8 7 7 7-7" />
             </svg>
           </span>
         </button>
@@ -984,11 +993,6 @@ function localTimeInput(ms: number): string {
 function localDateTimeIso(dateValue: string, timeValue: string): string {
   const parsed = new Date(`${dateValue || localDateInput(Date.now())}T${timeValue || '09:00'}:00`);
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : new Date().toISOString();
-}
-
-function resetEmberWorkSessionStartedAt(): number {
-  emberWorkSessionStartedAt = Date.now();
-  return emberWorkSessionStartedAt;
 }
 
 function scheduleDateFromIso(value: string | null | undefined): string {
@@ -1114,7 +1118,7 @@ function RockerSwitch({
   label: string;
   disabled?: boolean;
   className?: string;
-  onClick: () => void;
+  onClick: (button: HTMLButtonElement) => void;
 }) {
   const [coverOpen, setCoverOpen] = useState(false);
   const closeTimerRef = useRef<number | null>(null);
@@ -1141,7 +1145,7 @@ function RockerSwitch({
     setCoverOpen(false);
   }, [clearCloseTimer, disabled]);
 
-  const handlePress = useCallback(() => {
+  const handlePress = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
     if (disabled) return;
     if (!coverOpen) {
       setCoverOpen(true);
@@ -1149,7 +1153,7 @@ function RockerSwitch({
       return;
     }
     clearCloseTimer();
-    onClick();
+    onClick(event.currentTarget);
     scheduleCoverClose();
   }, [clearCloseTimer, coverOpen, disabled, onClick, scheduleCoverClose]);
 
@@ -1211,6 +1215,7 @@ export function RightColumn({
   onDreamingStatusAgentsChange,
   danceController,
   danceSeedTarget = null,
+  hasComposerDraft,
 }: {
   sceneKey: SceneKey;
   onOpenHotMem: () => void;
@@ -1235,6 +1240,7 @@ export function RightColumn({
   danceController?: DanceController;
   /** Composer's selected agent (null for a group send); seeds the sentinel when Dance turns on. */
   danceSeedTarget?: AgentId | null;
+  hasComposerDraft?: () => boolean;
 }) {
   const scene = SCENES[sceneKey]!;
   const { hotMem } = scene;
@@ -1395,7 +1401,7 @@ export function RightColumn({
   const emberStateLoadedRef = useRef(false);
   const emberPersistedSignatureRef = useRef<string | null>(null);
   const emberSaveTimerRef = useRef<number | null>(null);
-  const [workStartedAt, setWorkStartedAt] = useState(() => emberWorkSessionStartedAt);
+  const [workStartedAt] = useState(() => emberWorkSessionStartedAt);
   const [dreamOverlay, setDreamOverlay] = useState<DreamOverlayState>('off');
   const [dreamDueAt, setDreamDueAt] = useState<number | null>(null);
   const [dreamCountdownPaused, setDreamCountdownPaused] = useState(false);
@@ -1408,8 +1414,27 @@ export function RightColumn({
   const [dreamVigilReady, setDreamVigilReady] = useState(false);
   const [dreamAgentOverlay, setDreamAgentOverlay] = useState<ReadonlyMap<AgentId, DreamAgentOverlay>>(() => new Map());
   const [dreamDigestWaitActive, setDreamDigestWaitActive] = useState(false);
+  const roomHeadRef = useRef<HTMLDivElement>(null);
+  const systemLoadExpandBtnRef = useRef<HTMLButtonElement>(null);
+  const emberComposerHasDraftRef = useRef(false);
+  const [systemLoadExpanded, setSystemLoadExpanded] = useState(false);
+  const [systemLoadResetting, setSystemLoadResetting] = useState(false);
+  const systemLoadResettingRef = useRef(false);
+  const [systemLoadConfirm, setSystemLoadConfirm] = useState<{
+    kind: SystemLoadConfirmKind;
+    opener: HTMLElement | null;
+  } | null>(null);
+  const { lamp: systemLoadLamp, readState: readSystemLoadState } = useSystemLoadController(
+    systemLoadExpanded && dreamOverlay === 'off',
+  );
+  useEffect(() => {
+    publishRightRailSystemLoadLamp(systemLoadLamp);
+  }, [systemLoadLamp]);
+  const handleCollapseRail = useCallback(() => {
+    setSystemLoadExpanded(false);
+  }, []);
   const previousWorkingAgentsRef = useRef<ReadonlySet<AgentId>>(new Set());
-  const clearDreamState = useCallback((options?: { resetWorkSession?: boolean }) => {
+  const clearDreamState = useCallback(() => {
     setDreamOverlay('off');
     setDreamDueAt(null);
     setDreamCountdownPaused(false);
@@ -1426,7 +1451,6 @@ export function RightColumn({
     dreamConsolidatingRef.current = false;
     dreamStartedAtRef.current = 0;
     dreamParticipantsRef.current = [];
-    if (options?.resetWorkSession) setWorkStartedAt(resetEmberWorkSessionStartedAt());
   }, []);
   const [violetSummary, setVioletSummary] = useState<VioletSummaryState | null>(null);
   const [violetSummaryBusy, setVioletSummaryBusy] = useState(false);
@@ -2420,9 +2444,78 @@ export function RightColumn({
     pauseDreamCountdown();
   }, [dreamCountdownPaused, pauseDreamCountdown, resumeDreamCountdown]);
 
+  const triggerResetReload = useCallback(() => {
+    if (systemLoadResettingRef.current) return;
+    systemLoadResettingRef.current = true;
+    setSystemLoadResetting(true);
+    reloadKotaWindow();
+  }, []);
+
+  const hasAnyComposerDraft = useCallback((): boolean => {
+    if (hasComposerDraft?.()) return true;
+    if (bbsOpen && (bbsView === 'detail' || bbsView === 'compose')) {
+      if (bbsEditorState.hasContent || bbsEditorState.preparing) return true;
+      const bbsInput = bbsView === 'detail' ? bbsReplyInputRef.current : bbsComposeInputRef.current;
+      const snap = bbsInput?.snapshot();
+      if (snap && (snap.preparing || snap.body.trim().length > 0 || snap.attachments.length > 0)) {
+        return true;
+      }
+    }
+    if (emberModalOpen && emberEditorTarget !== null) {
+      if (emberComposerHasDraftRef.current || emberText.trim().length > 0) return true;
+    }
+    return false;
+  }, [
+    bbsEditorState.hasContent,
+    bbsEditorState.preparing,
+    bbsOpen,
+    bbsView,
+    emberEditorTarget,
+    emberModalOpen,
+    emberText,
+    hasComposerDraft,
+  ]);
+
+  const handleRequestResetKota = useCallback((opener: HTMLButtonElement) => {
+    if (systemLoadResettingRef.current || systemLoadConfirm !== null) return;
+    if (isWithinResetPostLoadCooldown()) return;
+    if (hasAnyComposerDraft()) {
+      setSystemLoadConfirm({ kind: 'reset', opener });
+      return;
+    }
+    triggerResetReload();
+  }, [hasAnyComposerDraft, systemLoadConfirm, triggerResetReload]);
+
+  const handleRequestGoodNight = useCallback((opener: HTMLButtonElement) => {
+    if (systemLoadResettingRef.current || systemLoadConfirm !== null || dreamOverlay !== 'off') return;
+    if (hasAnyComposerDraft()) {
+      setSystemLoadConfirm({ kind: 'dream', opener });
+      return;
+    }
+    setSystemLoadExpanded(false);
+    startDreamCountdown();
+  }, [dreamOverlay, hasAnyComposerDraft, startDreamCountdown, systemLoadConfirm]);
+
+  const handleSystemLoadConfirmClose = useCallback((confirmed: boolean) => {
+    const pending = systemLoadConfirm;
+    setSystemLoadConfirm(null);
+    if (!confirmed || !pending) return;
+    if (pending.kind === 'reset') {
+      triggerResetReload();
+      return;
+    }
+    setSystemLoadExpanded(false);
+    startDreamCountdown();
+  }, [startDreamCountdown, systemLoadConfirm, triggerResetReload]);
+
   const cancelDreamCountdown = useCallback(() => {
+    if (systemLoadResettingRef.current || systemLoadConfirm !== null) return;
+    if (dreamVigilReady || dreamOverlay === 'finished') {
+      clearDreamState();
+      triggerResetReload();
+      return;
+    }
     const promptAlreadySent = dreamOverlay === 'dreaming'
-      || dreamOverlay === 'finished'
       || dreamConsolidationPending;
     if (promptAlreadySent) {
       setDreamOverlay('off');
@@ -2435,11 +2528,10 @@ export function RightColumn({
       setDreamVigilReady(false);
       setDreamAgentOverlay(new Map());
       setDreamDigestWaitActive(false);
-      setWorkStartedAt(resetEmberWorkSessionStartedAt());
       return;
     }
-    clearDreamState({ resetWorkSession: true });
-  }, [clearDreamState, dreamConsolidationPending, dreamOverlay]);
+    clearDreamState();
+  }, [clearDreamState, dreamConsolidationPending, dreamOverlay, dreamVigilReady, systemLoadConfirm, triggerResetReload]);
 
   useEffect(() => {
     const refresh = () => setBartenderPromptVersion((version) => version + 1);
@@ -3127,6 +3219,17 @@ export function RightColumn({
     : `Sync ${roomChangeLabel} in room`;
   const githubBehindLabel = githubBehindCount === 1 ? '1 change' : `${githubBehindCount} changes`;
   const hasUpstreamBehind = canUseGithub && githubBehindCount > 0;
+  const canPull = canUseGithub && roomChangeCount === 0 && githubBehindCount > 0;
+  const canPush = canUseGithub && (githubChangeCount > 0 || githubNeedsInitialPush);
+  const pullButtonLabel = activeBusyAction === 'pull' ? 'Pulling GitHub' : `Pull ${githubBehindLabel} from GitHub`;
+  const pushButtonLabel = activeBusyAction === 'push'
+    ? 'Pushing GitHub'
+    : githubNeedsInitialPush
+      ? 'Initial push to GitHub'
+      : `Push ${githubChangeCount} changes to GitHub`;
+  // Two actions share one row and use their short labels.
+  const bartenderPair = (roomChangeCount > 0 || canPull) && canPush;
+  const bartenderTodo = roomChangeCount > 0 ? syncButtonLabel : canPull ? pullButtonLabel : canPush ? pushButtonLabel : null;
   const conflictBlockerText = conflictBlocker
     ? `${conflictBlocker.agentName} resolving`
     : '';
@@ -3238,11 +3341,6 @@ export function RightColumn({
     ? emberHistory.find((record) => record.id === emberHistoryDetailId) ?? null
     : null;
   const emberEditing = emberEditorTarget !== null;
-  // Reset key (right of SECONDS): zero the worked session, then keep counting.
-  // Reuses the same reset Good Night uses, so launch auto-start is unaffected.
-  const onResetWorked = useCallback(() => {
-    setWorkStartedAt(resetEmberWorkSessionStartedAt());
-  }, []);
 
   const dreamCountdownInfoLabel = dreamDigestWaitActive ? DREAM_DIGEST_WAIT_MESSAGE : null;
   const dreamStatusLabel = dreamScope
@@ -3619,22 +3717,43 @@ export function RightColumn({
 
   return (
     <>
-      <aside className={`sidebar-right ${dreamOverlay !== 'off' ? 'night-active' : ''}`}>
-      <div className="sr-head ember-room-head">
-        <EmberWorkedMeter workStartedAt={workStartedAt} onReset={onResetWorked} />
+      <SidebarRailSlot side="right" onCollapse={handleCollapseRail}>
+      <aside
+        id="right-column"
+        className={`sidebar-right ${dreamOverlay !== 'off' ? 'night-active' : ''}`}
+      >
+      <div
+        ref={roomHeadRef}
+        className={`sr-head ember-room-head${systemLoadLamp.light > 0 ? ' ram-lit' : ''}`}
+        style={systemLoadLamp.light > 0 ? (lampCssVariables(systemLoadLamp) as unknown as CSSProperties) : undefined}
+      >
+        <EmberWorkedMeter
+          workStartedAt={workStartedAt}
+          expanded={systemLoadExpanded && dreamOverlay === 'off' && !systemLoadResetting}
+          expandDisabled={systemLoadResetting || systemLoadConfirm !== null}
+          expandButtonRef={systemLoadExpandBtnRef}
+          onToggleExpand={() => {
+            if (systemLoadResettingRef.current || systemLoadConfirm !== null || dreamOverlay !== 'off') return;
+            setSystemLoadExpanded((open) => !open);
+          }}
+        />
         <RockerSwitch
           checked={dreamOverlay === 'off'}
           label={dreamOverlay === 'off' ? 'Good Night' : 'Back to Kota'}
-          disabled={dreamOverlay === 'off' && (!emberProjectRoot || dreamTargetProjects.length === 0)}
+          disabled={systemLoadResetting || (dreamOverlay === 'off' && (!emberProjectRoot || dreamTargetProjects.length === 0))}
           className="room-night-switch"
-          onClick={() => {
-            if (dreamOverlay === 'off') startDreamCountdown();
+          onClick={(button) => {
+            if (dreamOverlay === 'off') handleRequestGoodNight(button);
             else cancelDreamCountdown();
           }}
         />
       </div>
-      <div className="sr-body">
-        <div className="system-agent-stack">
+      <RailCards>
+        <RailCard
+          id="violet"
+          label="Violet"
+          notice={violetSummaryError ? { text: 'Summary failed', fault: true } : violetOutstanding > 0 && { text: `${summaryMessageLabel(violetOutstanding)} outstanding` }}
+        >
           <section
             className="violet-card"
             role="button"
@@ -3649,7 +3768,7 @@ export function RightColumn({
           >
             <div className="violet-card-head">
               <span className="system-agent-avatar tavern-avatar-art system-violet" aria-hidden>
-                <img src={violetAvatarUrl} alt="" />
+                <img src={violetAvatarUrl} alt="" draggable={false} />
               </span>
               <span className="system-agent-copy violet-summary-title" title={violetSummaryRange ?? undefined}>
                 <b>Violet</b>
@@ -3682,6 +3801,14 @@ export function RightColumn({
             </ul>
             <VioletSummaryFault error={violetSummaryError} provider={violetSummaryConfig.provider} />
           </section>
+        </RailCard>
+        <RailCard
+          id="bartender"
+          label="Bartender"
+          notice={conflictBlocker ? { text: conflictBlockerText, fault: true }
+            : canUseGithub && pullConflict ? { text: 'GitHub pull conflicted', fault: true }
+              : bartenderTodo !== null && { text: bartenderTodo }}
+        >
           <div className={`bartender-card ${status?.state ?? 'idle'} ${activeBusyAction ? 'busy' : ''}`}>
             <div className="bartender-row">
               <div className="bartender-avatar tavern-avatar-art system-bartender" aria-hidden>
@@ -3756,11 +3883,12 @@ export function RightColumn({
                       type="button"
                       className={`bartender-action sync ${activeBusyAction === 'sync' ? 'running' : ''}`}
                       disabled={activeBusyAction !== null}
-                      title={activeBusyAction === 'sync' && activeSyncProgress ? activeSyncProgress.message : undefined}
+                      title={activeBusyAction === 'sync' && activeSyncProgress ? activeSyncProgress.message : bartenderPair ? syncButtonLabel : undefined}
+                      aria-label={syncButtonLabel}
                       onClick={() => void runSync('manual')}
                     >
                       {activeBusyAction === 'sync' && <span className="bartender-action-spinner" aria-hidden />}
-                      {syncButtonLabel}
+                      <span className="bartender-action-label">{bartenderPair && activeBusyAction !== 'sync' ? `Sync ${roomChangeCount}` : syncButtonLabel}</span>
                     </button>
                     {hasUpstreamBehind && (
                       <span
@@ -3771,7 +3899,7 @@ export function RightColumn({
                     )}
                   </motion.div>
                 )}
-                {canUseGithub && !conflictBlocker && roomChangeCount === 0 && githubBehindCount > 0 && (
+                {canPull && !conflictBlocker && (
                   <motion.button
                     key="pull"
                     type="button"
@@ -3781,13 +3909,15 @@ export function RightColumn({
                     exit={{ opacity: 0, y: -4, height: 0 }}
                     transition={{ duration: 0.18, ease: 'easeOut' }}
                     disabled={activeBusyAction !== null}
+                    title={bartenderPair ? pullButtonLabel : undefined}
+                    aria-label={pullButtonLabel}
                     onClick={() => void runPull()}
                   >
                     {activeBusyAction === 'pull' && <span className="bartender-action-spinner" aria-hidden />}
-                    {activeBusyAction === 'pull' ? 'Pulling GitHub' : `Pull ${githubBehindLabel} from GitHub`}
+                    <span className="bartender-action-label">{bartenderPair && activeBusyAction !== 'pull' ? `Pull ${githubBehindCount}` : pullButtonLabel}</span>
                   </motion.button>
                 )}
-                {canUseGithub && !conflictBlocker && (githubChangeCount > 0 || githubNeedsInitialPush) && (
+                {canPush && !conflictBlocker && (
                   <motion.button
                     key="push"
                     type="button"
@@ -3797,15 +3927,14 @@ export function RightColumn({
                     exit={{ opacity: 0, y: -4, height: 0 }}
                     transition={{ duration: 0.18, ease: 'easeOut' }}
                     disabled={activeBusyAction !== null || hasUpstreamBehind}
-                    title={hasUpstreamBehind ? 'Pull from GitHub first' : undefined}
+                    title={hasUpstreamBehind ? 'Pull from GitHub first' : bartenderPair ? pushButtonLabel : undefined}
+                    aria-label={pushButtonLabel}
                     onClick={() => void runPush()}
                   >
                     {activeBusyAction === 'push' && <span className="bartender-action-spinner" aria-hidden />}
-                    {activeBusyAction === 'push'
-                      ? 'Pushing GitHub'
-                      : githubNeedsInitialPush
-                        ? 'Initial push to GitHub'
-                        : `Push ${githubChangeCount} changes to GitHub`}
+                    <span className="bartender-action-label">
+                      {!bartenderPair || activeBusyAction === 'push' ? pushButtonLabel : githubNeedsInitialPush ? 'Initial push' : `Push ${githubChangeCount}`}
+                    </span>
                   </motion.button>
                 )}
               </AnimatePresence>
@@ -3848,10 +3977,12 @@ export function RightColumn({
                       </span>
                     )}
                   </div>
+                  <RailCardGrows />
                 </div>
               )}
             </div>
           </div>
+        </RailCard>
           {HOT_MEMORY_TEASER_ENABLED && (
             <button className="hot-mem-teaser" onClick={onOpenHotMem}>
               <span className="hm-fire">🔥</span>
@@ -3865,6 +3996,7 @@ export function RightColumn({
               <span className="hm-chev">›</span>
             </button>
           )}
+        <RailCard id="ember" label="Ember" notice={hasEmberDeliveryFailure && { text: EMBER_NOT_DELIVERED, fault: true }}>
           <section
             className={`ember-card ${dreamOverlay !== 'off' ? 'dream-active' : ''}`}
             role="button"
@@ -3897,10 +4029,18 @@ export function RightColumn({
                 {emberDraftCount > 0 && <span><b>{emberDraftCount}</b> Drafts</span>}
               </span>
             </div>
-            {emberMessage && <div className="ember-status">{emberMessage}</div>}
+            {emberMessage && <div className="ember-status" title={emberMessage}>{emberMessage}</div>}
           </section>
-          {danceController && <PuppeteerDanceCard controller={danceController} owner={workspace?.displayName || workspace?.repoFullName || workspace?.projectId || 'This project'} seedTarget={danceSeedTarget}
-            agents={roomAgents.map(id => ({ id, name: agentMeta?.[id]?.name ?? id, avatarId: agentMeta?.[id]?.avatarId }))} />}
+        </RailCard>
+        {danceController && <RailCard id="dance" label="Puppeteer">
+          <PuppeteerDanceCard controller={danceController} owner={workspace?.displayName || workspace?.repoFullName || workspace?.projectId || 'This project'} seedTarget={danceSeedTarget}
+            agents={roomAgents.map(id => ({ id, name: agentMeta?.[id]?.name ?? id, avatarId: agentMeta?.[id]?.avatarId }))} />
+        </RailCard>}
+        <RailCard
+          id="lm"
+          label="Laughing Man"
+          notice={lm?.lastError ? { text: 'Connection error', fault: true } : lmCloudflare && { text: 'Standby unavailable', fault: true }}
+        >
           <div
             className={`lm-card ${lm?.lastError ? 'error' : ''} ${lmCloudflare || lm?.selected?.muted ? 'muted' : ''}`}
             role="button"
@@ -4030,6 +4170,8 @@ export function RightColumn({
               <div className="lm-muted-note">Telegram Messaging Paused</div>
             )}
           </div>
+        </RailCard>
+        <RailCard id="bbs" label="BBS" notice={bbsNewCount > 0 && { text: `${bbsNewCount} new` }}>
           <div className={`ember-bbs-card bbs-card ${bbsNewCount > 0 ? 'has-new' : ''}`}>
             <div className="ember-bbs-row">
               <div className="ember-bbs-avatar tavern-avatar-art system-bbs" aria-hidden>
@@ -4073,11 +4215,12 @@ export function RightColumn({
               </button>
             </div>
           </div>
-          {footerSlot && <div className="sr-footer-slot">{footerSlot}</div>}
-        </div>
-      </div>
+        </RailCard>
+        {footerSlot && <div className="sr-footer-slot">{footerSlot}</div>}
+      </RailCards>
       <KotaVersionLabel />
-    </aside>
+      </aside>
+      </SidebarRailSlot>
     {emberModalOpen && (
       <div className="ember-modal-shade" role="presentation">
         <section className={`ember-modal ${emberEditing ? 'editing' : ''}`} role="dialog" aria-modal="true" aria-label="Ember scheduled prompts">
@@ -4237,6 +4380,9 @@ export function RightColumn({
                       variant="embedded"
                       value={emberText}
                       onChange={setEmberText}
+                      onHasDraftChange={(hasDraft) => {
+                        emberComposerHasDraftRef.current = hasDraft;
+                      }}
                       agentMeta={agentMeta}
                       mentionAgentIds={roomAgents}
                       placeholder="Write the prompt Ember should send later..."
@@ -4934,6 +5080,29 @@ export function RightColumn({
           </div>
         </section>
       </div>
+    )}
+    {systemLoadExpanded && dreamOverlay === 'off' && (
+      <SystemLoadPanel
+        state={readSystemLoadState()}
+        anchorRef={roomHeadRef}
+        expandButtonRef={systemLoadExpandBtnRef}
+        resetDisabled={systemLoadResetting}
+        hidden={systemLoadConfirm !== null || systemLoadResetting}
+        onRequestReset={handleRequestResetKota}
+        onCollapse={(restoreFocus) => {
+          setSystemLoadExpanded(false);
+          if (restoreFocus) {
+            systemLoadExpandBtnRef.current?.focus({ preventScroll: true });
+          }
+        }}
+      />
+    )}
+    {systemLoadConfirm !== null && (
+      <SystemLoadConfirmDialog
+        kind={systemLoadConfirm.kind}
+        opener={systemLoadConfirm.opener}
+        onClose={handleSystemLoadConfirmClose}
+      />
     )}
     </>
   );

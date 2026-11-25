@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::integrations::IntegrationManager;
 use crate::message_origin::MessageOrigin;
-use crate::pty::{agent::AgentSpawnRequest, PtyManager};
+use crate::pty::{agent::{AgentSpawnRequest, NotTaken}, PtyManager};
 use crate::violet::{self, ActorMessageRecord};
 
 #[path = "local_rpc/actor.rs"]
@@ -748,11 +748,18 @@ impl AgentBusManager {
     }
 }
 
-fn submit_with_resume(mut submit: impl FnMut() -> Result<()>, resume: impl FnOnce(anyhow::Error) -> Result<()>) -> Result<()> {
-    match submit() {
-        Ok(()) => Ok(()),
-        Err(error) if error.is::<crate::violet::ownership::Unavailable>() => Err(error),
-        Err(error) => { resume(error)?; submit() },
+fn submit_with_resume(mut submit: impl FnMut() -> Result<()>, mut resume: impl FnMut(anyhow::Error) -> Result<()>) -> Result<()> {
+    let result = match submit() {
+        Err(error) if !error.is::<crate::violet::ownership::Unavailable>() && !error.is::<NotTaken>() => {
+            resume(error)?;
+            submit()
+        }
+        result => result,
+    };
+    match result {
+        // The process ended on its first message, woken for it or not: one launch more.
+        Err(error) if NotTaken::exited(&error) => { resume(error)?; submit() }
+        result => result,
     }
 }
 
@@ -1806,6 +1813,35 @@ mod ownership_delivery_tests {
         ).unwrap();
         assert_eq!(submits.get(), 2);
         assert_eq!(resumes.get(), 1);
+    }
+
+    #[test]
+    fn a_process_that_exits_on_its_first_message_is_launched_once_more() {
+        let run = |outcomes: &[fn() -> Result<()>]| {
+            let (submits, resumes) = (Cell::new(0), Cell::new(0));
+            let result = submit_with_resume(
+                || { submits.set(submits.get() + 1); outcomes[submits.get() - 1]() },
+                |_| { resumes.set(resumes.get() + 1); Ok(()) },
+            );
+            (submits.get(), resumes.get(), result.err().map(|error| error.to_string()))
+        };
+        let taken: fn() -> Result<()> = || Ok(());
+        let dead: fn() -> Result<()> = || Err(anyhow!("dead process"));
+        let exited: fn() -> Result<()> = || Err(NotTaken::Exited.into());
+        let no_echo: fn() -> Result<()> = || Err(NotTaken::NoEcho.into());
+        let replaced: fn() -> Result<()> = || Err(NotTaken::Replaced.into());
+        let text = |why: NotTaken| Some(why.to_string());
+        // It ran but had had no message, and its first screen ended it.
+        assert_eq!(run(&[exited, taken]), (2, 1, None));
+        // The wake has spent the ordinary resume: one round more, and only one.
+        assert_eq!(run(&[dead, exited, taken]), (3, 2, None));
+        assert_eq!(run(&[dead, exited, exited]), (3, 2, text(NotTaken::Exited)));
+        assert_eq!(run(&[exited, exited]), (2, 1, text(NotTaken::Exited)));
+        assert_eq!(run(&[exited, dead]), (2, 1, Some("dead process".into())));
+        // A running process is left alone.
+        assert_eq!(run(&[no_echo]), (1, 0, text(NotTaken::NoEcho)));
+        assert_eq!(run(&[dead, no_echo]), (2, 1, text(NotTaken::NoEcho)));
+        assert_eq!(run(&[replaced]), (1, 0, text(NotTaken::Replaced)));
     }
 
     #[test]

@@ -52,12 +52,12 @@ async function open(state: pty.TavernHeroSourceState) {
 }
 it.each(['linked','dangling'] as const)('%s content stays read-only while Ghost can be viewed without writing raw files',async state=>{
  const dialog=await open(state);const q=within(dialog);
- expect(q.getByRole('button',{name:'Edit Shell'})).toBeDisabled();
- expect(q.getByRole('button',{name:'Read only'})).toBeDisabled();
+ expect(q.getByRole('button',{name: 'Edit'})).toBeDisabled();
+ expect(q.getByText('Read only')).toBeInTheDocument();
  expect(q.getByRole('button',{name:'Open raw file'})).toBeDisabled();
- expect(q.getByRole('button',{name:'Rowan'})).toBeDisabled();
  expect(q.getByRole('button',{name:'Change avatar'})).toBeDisabled();
- for(const checkbox of q.queryAllByRole('checkbox'))expect(checkbox).toBeDisabled();
+ expect(q.queryByLabelText('Given name')).not.toBeInTheDocument();
+ expect(q.queryAllByRole('checkbox')).toHaveLength(0);
  if(state==='linked'){
    expect(q.getByText('from project Atlas · read only')).toHaveAttribute('title','from project Atlas · read only');
    expect(q.getByText('SHELL, GHOST and skills are read from the source incarnation.')).toBeInTheDocument();
@@ -66,8 +66,9 @@ it.each(['linked','dangling'] as const)('%s content stays read-only while Ghost 
    expect(q.queryByText('from project Atlas · read only')).not.toBeInTheDocument();
  }
  expect(screen.queryByText('Turns',{exact:true})).not.toBeInTheDocument();expect(screen.queryByText('Commends',{exact:true})).not.toBeInTheDocument();
- await userEvent.click(q.getByRole('button',{name:'Source Ghost, unchanged.'}));
- expect(q.getByRole('textbox')).toHaveAttribute('readonly');
+ // The whole Ghost reads in place; no editor opens for it.
+ expect(q.getByLabelText('GHOST text')).toHaveTextContent('Source Ghost, unchanged.');
+ expect(q.queryByRole('textbox')).not.toBeInTheDocument();
  await userEvent.click(q.getByRole('button',{name:'Open raw file'}));
  await userEvent.click(q.getByRole('button',{name:'Back'}));
  await act(async()=>{await new Promise(resolve=>setTimeout(resolve,300));});
@@ -76,15 +77,99 @@ it.each(['linked','dangling'] as const)('%s content stays read-only while Ghost 
 it.each(['native','relic'] as const)('%s has normal editable controls and no source badge',async state=>{
  const dialog=await open(state);const q=within(dialog);
  expect(q.queryByText(/from project/)).not.toBeInTheDocument();
- expect(q.getByRole('button',{name:'Edit Shell'})).toBeEnabled();
- await userEvent.click(q.getByRole('button',{name:'Edit GHOST'}));
- const textarea=q.getByRole('textbox');expect(textarea).not.toHaveAttribute('readonly');
+ expect(q.queryByText('Read only')).not.toBeInTheDocument();
+ await userEvent.click(q.getByRole('button',{name: 'Edit'}));
+ const textarea=q.getByRole('textbox',{name:'GHOST text'});
  fireEvent.change(textarea,{target:{value:'Edited Ghost.'}});
- await userEvent.click(q.getByRole('button',{name:'Save GHOST'}));
+ await act(async()=>{await new Promise(resolve=>setTimeout(resolve,300));});
+ expect(pty.saveTavernHeroProfiles).not.toHaveBeenCalled(); // Typing is staged; only Save writes.
+ await userEvent.click(q.getByRole('button',{name:'Save'}));
  await waitFor(()=>expect(pty.saveTavernHeroProfiles).toHaveBeenCalled());
  const saved=disk.find(p=>p.heroId==='invited-fixture')!;
  expect(saved.ghost).toBe('Edited Ghost.');
  if(state==='relic')expect(saved.source).toMatchObject({dismissedAt:'2026-10-15T12:00:00Z'});
+});
+it('stages name, avatar, Ghost and skills together and writes them with one Save',async()=>{
+ const dialog=await open('native');const q=within(dialog);
+ expect(q.queryByRole('textbox')).not.toBeInTheDocument();expect(q.queryByRole('checkbox')).not.toBeInTheDocument();
+ expect(q.queryByRole('button',{name:'Save'})).not.toBeInTheDocument();
+ await userEvent.click(q.getByRole('button',{name:'Edit'}));
+ expect(q.getByText('Editing')).toBeInTheDocument();expect(q.getByText('No changes yet')).toBeInTheDocument();
+ expect(q.getByRole('button',{name:'Save'})).toBeDisabled();
+ expect(q.queryByRole('button',{name:'Remove Hero'})).not.toBeInTheDocument();
+ expect(q.queryByRole('button',{name:'Open raw file'})).not.toBeInTheDocument();
+ fireEvent.change(q.getByLabelText('Given name'),{target:{value:'Juniper'}});
+ fireEvent.change(q.getByRole('textbox',{name:'GHOST text'}),{target:{value:'Edited Ghost.'}});
+ const skill=q.getAllByRole('checkbox').find(box=>(box as HTMLInputElement).checked)!;
+ await userEvent.click(skill);
+ await userEvent.click(q.getByRole('button',{name:'Change avatar'}));
+ await userEvent.click(q.getAllByRole('radio').find(option=>option.getAttribute('aria-checked')!=='true')!);
+ expect(q.getByText('Unsaved changes')).toBeInTheDocument();
+ await act(async()=>{await new Promise(resolve=>setTimeout(resolve,300));});
+ expect(pty.saveTavernHeroProfiles).not.toHaveBeenCalled();
+ const before=hero('native');
+ await userEvent.click(q.getByRole('button',{name:'Save'}));
+ await waitFor(()=>expect(disk.find(p=>p.heroId==='invited-fixture')).toMatchObject({name:'Juniper',ghost:'Edited Ghost.',skills:[]}));
+ expect(disk.find(p=>p.heroId==='invited-fixture')!.avatarId).not.toBe(before.avatarId);
+ expect(disk.find(p=>p.heroId==='invited-fixture')).toMatchObject({provider:before.provider,model:before.model,effort:before.effort});
+ const saved=within(screen.getByRole('dialog',{name:'Juniper profile'}));
+ expect(saved.getByText('Saved')).toBeInTheDocument();expect(saved.queryByText('Editing')).not.toBeInTheDocument();
+ expect(saved.queryByRole('textbox')).not.toBeInTheDocument();
+ expect(saved.getByLabelText('GHOST text')).toHaveTextContent('Edited Ghost.');
+ expect(saved.getByText('No active skills.')).toBeInTheDocument();
+});
+it('asks before Cancel or Back drops staged Hero edits, and writes only on Save and Leave',async()=>{
+ const dialog=await open('native');const q=within(dialog);
+ await userEvent.click(q.getByRole('button',{name:'Edit'}));
+ fireEvent.change(q.getByRole('textbox',{name:'GHOST text'}),{target:{value:'Draft Ghost.'}});
+ await userEvent.click(q.getByRole('button',{name:'Cancel'}));
+ let prompt=within(screen.getByRole('alertdialog',{name:'Discard changes?'}));
+ expect(prompt.getByText('Your changes to GHOST will be lost.')).toBeInTheDocument();
+ await userEvent.keyboard('{Escape}');
+ expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+ expect(q.getByRole('textbox',{name:'GHOST text'})).toHaveValue('Draft Ghost.');
+ await userEvent.keyboard('{Escape}');
+ await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button',{name:'Discard Changes'}));
+ expect(q.getByLabelText('GHOST text')).toHaveTextContent('Source Ghost, unchanged.');
+ await act(async()=>{await new Promise(resolve=>setTimeout(resolve,300));});
+ expect(pty.saveTavernHeroProfiles).not.toHaveBeenCalled();
+ await userEvent.click(q.getByRole('button',{name:'Edit'}));
+ fireEvent.change(q.getByRole('textbox',{name:'GHOST text'}),{target:{value:'Kept Ghost.'}});
+ await userEvent.click(q.getByRole('button',{name:'Back'}));
+ prompt=within(screen.getByRole('alertdialog',{name:'Save changes before leaving?'}));
+ expect(prompt.getByText('You have unsaved changes to GHOST.')).toBeInTheDocument();
+ await userEvent.click(prompt.getByRole('button',{name:'Save and Leave'}));
+ await waitFor(()=>expect(disk.find(p=>p.heroId==='invited-fixture')?.ghost).toBe('Kept Ghost.'));
+ expect(screen.queryByRole('dialog',{name:'Rowan profile'})).not.toBeInTheDocument();
+});
+it('holds Save and says why while a Hero name is empty or taken',async()=>{
+ disk=[hero('native'),{...hero('native'),heroId:'other-fixture',name:'Taken',nameFields:{given:'Taken'}}];
+ render(<TavernModal open onClose={vi.fn()} />);
+ await userEvent.click(await screen.findByTestId('tavern-hero-invited-fixture'));
+ const q=within(await screen.findByRole('dialog',{name:'Rowan profile'}));
+ await userEvent.click(q.getByRole('button',{name:'Edit'}));
+ const given=q.getByLabelText('Given name');
+ fireEvent.change(given,{target:{value:' '}});
+ expect(q.getByText('Enter a given name to save')).toBeInTheDocument();expect(q.getByRole('button',{name:'Save'})).toBeDisabled();
+ fireEvent.change(given,{target:{value:'Taken'}});
+ expect(q.getByText('Name already exists in Tavern.')).toBeInTheDocument();expect(q.getByRole('button',{name:'Save'})).toBeDisabled();
+ fireEvent.change(given,{target:{value:'Juniper'}});
+ expect(q.getByText('Unsaved changes')).toBeInTheDocument();expect(q.getByRole('button',{name:'Save'})).toBeEnabled();
+});
+it('returns to the saved model, effort and avatar when the staged provider goes back to the saved one',async()=>{
+ const dialog=await open('native');const q=within(dialog);
+ await userEvent.click(q.getByRole('button',{name:'Edit'}));
+ await userEvent.click(q.getByRole('button',{name:/^Provider /}));
+ await userEvent.click(q.getAllByRole('option').find(option=>!/Codex/.test(option.textContent??'')&&!(option as HTMLButtonElement).disabled)!);
+ expect(q.getByText('Unsaved changes')).toBeInTheDocument();
+ await userEvent.click(q.getByRole('button',{name:/^Provider /}));
+ await userEvent.click(q.getByRole('option',{name:/^Codex\b/}));
+ expect(q.getByText('No changes yet')).toBeInTheDocument();
+ expect(q.getByPlaceholderText('Exact model ID')).toHaveValue('test-model');
+ await userEvent.click(q.getByRole('button',{name:'Cancel'}));
+ expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+ await act(async()=>{await new Promise(resolve=>setTimeout(resolve,300));});
+ expect(pty.saveTavernHeroProfiles).not.toHaveBeenCalled();
 });
 it('Remove Hero archives a live invitation through the Tavern saver without deleting its source',async()=>{
  const dialog=await open('linked');

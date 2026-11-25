@@ -1,8 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi, type MockInstance } from 'vitest';
-import { TavernModal, loadTavernHeroIncarnationProfile, loadTavernWorkingHeroes } from '../src/chrome/TavernModal';
+import { App } from '../src/App';
+import { TavernModal, loadTavernHeroIncarnationProfile, loadTavernWorkingHeroes, syncTavernHeroStorageFromProfiles } from '../src/chrome/TavernModal';
 import type { LocalAuthAvailability, LocalModelCatalog } from '../src/lib/local-auth';
+import * as localRpc from '../src/lib/local-rpc';
+import { stringGroupYaml } from '../src/lib/string-routing';
 import * as pty from '../src/pty-client';
 
 const ipc = vi.hoisted(() => ({
@@ -77,7 +80,7 @@ async function openHero() {
   return profile();
 }
 async function editShell() {
-  await userEvent.click(within(profile()).getByRole('button', { name: 'Edit Shell' }));
+  await userEvent.click(within(profile()).getByRole('button', { name: 'Edit' }));
   const shell = within(profile());
   const localModel = shell.queryByRole('button', {name:'Local model'});
   return localModel ? [localModel, shell.getByRole('combobox', {name:'Thinking'})] : shell.getAllByRole('combobox');
@@ -100,16 +103,18 @@ it.each(['Escape', 'close button', 'backdrop'])('explains disabled Hero saving a
   else await userEvent.click(within(editor).getByRole('button', { name: 'Close model picker' }));
   expect(screen.queryByRole('dialog', { name: 'Auto String' })).not.toBeInTheDocument();
   const shell = within(profile());
-  expect(shell.getByRole('button', { name: 'Save Shell' })).toBeDisabled();
+  expect(shell.getByRole('button', { name: 'Save' })).toBeDisabled();
   expect(shell.getByText('Finish the Auto String configuration before saving.')).toHaveClass('project-agent-shell-apply-note');
-  expect(shell.queryByText('Apply on Next Incarnation')).not.toBeInTheDocument();
+  expect(shell.getByText('Finish SHELL settings to save')).toBeVisible();
+  expect(shell.queryByText('SHELL changes apply to the next incarnation.')).not.toBeInTheDocument();
   expect(saves).not.toHaveBeenCalled();
   await userEvent.click(shell.getByRole('button', { name: 'Edit routing' }));
   expect(screen.getByRole('textbox', { name: 'Model 2 intent' })).toHaveValue('');
-  fireEvent.change(screen.getByRole('textbox', { name: 'Model 2 intent' }), { target: { value: 'Easy tasks.' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Model 2 intent' }), { target: { value: 'Simple tasks.' } });
   await userEvent.click(screen.getByRole('button', { name: 'OK' }));
-  expect(shell.getByRole('button', { name: 'Save Shell' })).toBeEnabled();
-  expect(shell.getByText('Apply on Next Incarnation')).toBeVisible();
+  expect(shell.getByRole('button', { name: 'Save' })).toBeEnabled();
+  expect(shell.getByText('Unsaved changes')).toBeVisible();
+  expect(shell.getByText('SHELL changes apply to the next incarnation.')).toBeVisible();
 });
 
 it('shows the Anthropic credit marker in Hero candidates and saved labels, using provider identity instead of model names', async () => {
@@ -126,7 +131,7 @@ it('shows the Anthropic credit marker in Hero candidates and saved labels, using
   expect(within(screen.getByRole('option',{name:/Claude fixture OpenRouter/})).queryByText('(Use Credit)')).not.toBeInTheDocument();
   await userEvent.click(choice);
   expect(within(profile()).getByText('(Use Credit)')).toHaveClass('local-model-credit');
-  await userEvent.click(within(profile()).getByRole('button',{name:'Save Shell'}));
+  await userEvent.click(within(profile()).getByRole('button',{name: 'Save'}));
   await waitFor(() => expect(disk.find(entry => entry.heroId === 'hero-local-fixture')?.model).toBe('anthropic/claude-fixture'));
   expect(within(profile()).getByLabelText('Current SHELL settings')).toHaveTextContent('anthropic/claude-fixture(Use Credit)');
   [model] = await editShell();
@@ -190,14 +195,14 @@ it('offers only linked models and saves concrete native-supported thinking, pres
   expect(within(profile()).getByText('1 model from signed-in providers')).toBeInTheDocument();
   expect(model).toHaveTextContent('Quill Two');
   expect(thinking).toHaveValue('off');
-  expect(within(profile()).getByRole('button', { name: 'Save Shell' })).toBeDisabled();
+  expect(within(profile()).getByRole('button', { name: 'Save' })).toBeDisabled();
   await userEvent.click(model);
   expect(screen.getByRole('option', { name: /Sol One OpenAI Codex/ })).toBeInTheDocument();
   expect(screen.queryByRole('option', { name: /Quill Two/ })).not.toBeInTheDocument();
   expect(within(profile()).queryByRole('option', { name: /default/i })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole('option', { name: /Sol One OpenAI Codex/ }));
   expect(thinking).toHaveValue('low'); // Existing explicit off clamps upward for this model.
-  await userEvent.click(within(profile()).getByRole('button', { name: 'Save Shell' }));
+  await userEvent.click(within(profile()).getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(disk.find(entry => entry.heroId === 'hero-local-fixture')).toMatchObject({ model: 'openai-codex/sol-1', effort: 'low' }));
   const recruit = loadTavernHeroIncarnationProfile('hero-local-fixture')!;
   expect(recruit.args).toEqual(['--model', 'openai-codex/sol-1', '--thinking', 'low']);
@@ -217,7 +222,7 @@ it('the Hero Local thinking menu lists every supported level and saves the one p
   await userEvent.type(thinking, '{Backspace}');
   expect(thinking).toHaveValue('medium');
   await userEvent.selectOptions(thinking, 'high');
-  await userEvent.click(within(profile()).getByRole('button', { name: 'Save Shell' }));
+  await userEvent.click(within(profile()).getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(disk.find(entry => entry.heroId === 'hero-local-fixture')).toMatchObject({ model: 'openai-codex/sol-1', effort: 'high' }));
 });
 
@@ -283,6 +288,77 @@ it('a late pre-Link response cannot restore Ready after returning to a signed-ou
   expect(chip()).not.toHaveTextContent('Ready');
 });
 
+const ghostField = () => within(profile()).getByRole('textbox', { name: 'GHOST text' });
+const leavePrompt = () => screen.getByRole('alertdialog', { name: 'Save changes before leaving?' });
+const savedGhosts = () => saves.mock.calls.map(([profiles]) => profiles.find(entry => entry.heroId === 'hero-local-fixture')?.ghost);
+const localHero = () => disk.find(entry => entry.heroId === 'hero-local-fixture')!;
+
+it('a Hero still on the old Local default opens Edit unchanged and saves its GHOST without choosing a model', async () => {
+  await openHero(); await editShell();
+  expect(within(profile()).getByText('No changes yet')).toBeVisible();
+  expect(within(profile()).getByRole('button', { name: 'Save' })).toBeDisabled();
+  fireEvent.change(ghostField(), { target: { value: 'New ghost' } });
+  expect(within(profile()).getByText('Unsaved changes')).toBeVisible();
+  await userEvent.click(within(profile()).getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(localHero().ghost).toBe('New ghost'));
+  expect(localHero().model).toBe('default');
+  expect(within(profile()).getByRole('button', { name: 'Edit' })).toBeEnabled();
+});
+
+it('asks before Sign in replaces a Hero card with staged changes', async () => {
+  ipc.handlers.set('local_rpc_auth_availability', () => ({ schema: 1, summary: 'not_ready', providers: [] }));
+  disk[0].model = 'openai-codex/sol-1'; disk[0].effort = 'high';
+  disk[0].shell = 'provider: kota-local\nmodel: openai-codex/sol-1\neffort: high\n';
+  await openHero();
+  await userEvent.click(within(profile()).getByRole('button', { name: 'Edit' }));
+  await waitFor(() => expect(authNote()).toHaveTextContent('Not signed in'));
+  fireEvent.change(ghostField(), { target: { value: 'Staged ghost' } });
+
+  await userEvent.click(within(authNote()).getByRole('button', { name: /Sign in/ }));
+  expect(leavePrompt()).toHaveTextContent('You have unsaved changes to GHOST.');
+  expect(screen.queryByTestId('tavern-kota-local')).not.toBeInTheDocument();
+  await userEvent.click(within(leavePrompt()).getByRole('button', { name: 'Keep Editing' }));
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  expect(ghostField()).toHaveValue('Staged ghost');
+
+  await userEvent.click(within(authNote()).getByRole('button', { name: /Sign in/ }));
+  await userEvent.click(within(leavePrompt()).getByRole('button', { name: 'Discard Changes' }));
+  await waitFor(() => expect(document.activeElement?.id).toBe('link-kota-local'));
+  expect(screen.queryByRole('dialog', { name: 'Aster profile' })).not.toBeInTheDocument();
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
+  expect(localHero().ghost).toBe('Fixture');
+  expect(savedGhosts()).not.toContain('Staged ghost');
+});
+
+it.each(['picker menu', 'warning row'])('saves staged Hero changes before Jev settings replaces the card (%s)', async place => {
+  disk[0].model = 'kota/auto'; disk[0].effort = 'off';
+  disk[0].autoRoute = { threshold: .85, defaultModel: 'model-1', models: [
+    { id: 'model-1', providerId: 'openai-codex', modelId: 'sol-1', thinkingLevel: 'high', intent: 'Hard tasks.' },
+    { id: 'model-2', providerId: 'openai-codex', modelId: 'sol-1', thinkingLevel: 'low', intent: 'Easy tasks.' },
+  ] };
+  await openHero();
+  const [model] = await editShell();
+  expect(within(profile()).getByText('No changes yet')).toBeVisible();
+  fireEvent.change(ghostField(), { target: { value: 'Staged ghost' } });
+
+  if (place === 'picker menu') {
+    await userEvent.click(model);
+    await userEvent.click(within(screen.getByRole('dialog', { name: 'Choose a Local model' })).getByRole('button', { name: 'Jev settings' }));
+  } else {
+    await userEvent.click(await within(profile()).findByRole('button', { name: 'Jev settings' }));
+  }
+  expect(leavePrompt()).toHaveTextContent('You have unsaved changes to GHOST.');
+  expect(document.getElementById('puppeteer-jev')).toBeNull();
+  expect(savedGhosts()).not.toContain('Staged ghost');
+
+  await userEvent.click(within(leavePrompt()).getByRole('button', { name: 'Save and Leave' }));
+  await waitFor(() => expect(document.activeElement?.id).toBe('puppeteer-jev'));
+  expect(screen.queryByRole('dialog', { name: 'Aster profile' })).not.toBeInTheDocument();
+  await waitFor(() => expect(localHero().ghost).toBe('Staged ghost'));
+  expect(localHero().model).toBe('kota/auto');
+  expect(localHero().autoRoute).toMatchObject({ threshold: .85, defaultModel: 'model-1' });
+});
+
 it('choosing Local from a CLI template requires a supported model before saving, without discovery', async () => {
   disk[0].provider = 'codex'; disk[0].model = 'existing-model'; disk[0].effort = 'high';
   disk[0].shell = 'provider: codex\nmodel: existing-model\neffort: high\n';
@@ -294,14 +370,14 @@ it('choosing Local from a CLI template requires a supported model before saving,
   const thinking = within(profile()).getByRole('combobox', {name:'Thinking'});
   expect(model).toHaveTextContent('Choose a model');
   expect(thinking).toBeDisabled(); expect(thinking).toHaveTextContent('Choose a model first');
-  expect(within(profile()).getByRole('button', { name: 'Save Shell' })).toBeDisabled();
+  expect(within(profile()).getByRole('button', { name: 'Save' })).toBeDisabled();
   expect(within(profile()).getByText('Choose a model before saving.')).toBeInTheDocument();
   await userEvent.click(model);
   expect(within(profile()).queryByRole('option', { name: /default/i })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole('option', { name: /Sol One OpenAI Codex/ }));
   expect(thinking).toHaveValue('medium');
-  expect(within(profile()).getByText('Apply on Next Incarnation')).toBeInTheDocument();
-  await userEvent.click(within(profile()).getByRole('button', { name: 'Save Shell' }));
+  expect(within(profile()).getByText('SHELL changes apply to the next incarnation.')).toBeInTheDocument();
+  await userEvent.click(within(profile()).getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(disk.find(entry => entry.heroId === 'hero-local-fixture')).toMatchObject({ provider: 'kota-local', model: 'openai-codex/sol-1', effort: 'medium' }));
   expect(loadTavernHeroIncarnationProfile('hero-local-fixture')!.args).toEqual(['--model', 'openai-codex/sol-1', '--thinking', 'medium']);
   expect(ipc.calls).not.toContain('local_rpc_discover');
@@ -312,17 +388,17 @@ it('keeps an old Local default template in batch saves while another Hero change
   render(<TavernModal open onClose={() => {}} />);
   await userEvent.click(await screen.findByRole('button', { name: /^Quill\b/ }));
   const quill = screen.getByRole('dialog', { name: 'Quill profile' });
-  await userEvent.click(within(quill).getByRole('button', { name: 'Edit Shell' }));
+  await userEvent.click(within(quill).getByRole('button', { name: 'Edit' }));
   const [model] = within(quill).getAllByRole('combobox');
   await userEvent.clear(model); await userEvent.type(model, 'explicit-terminal-model');
-  await userEvent.click(within(quill).getByRole('button', { name: 'Save Shell' }));
+  await userEvent.click(within(quill).getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(disk.find(entry => entry.heroId === 'hero-terminal-fixture')?.model).toBe('explicit-terminal-model'));
   expect(disk.find(entry => entry.heroId === 'hero-local-fixture')?.model).toBe('default');
   expect(saves.mock.calls.some(([profiles]) => profiles.some(entry => entry.heroId === 'hero-local-fixture' && entry.model === 'default') && profiles.some(entry => entry.heroId === 'hero-terminal-fixture' && entry.model === 'explicit-terminal-model'))).toBe(true);
   expect(loadTavernWorkingHeroes().find(hero => hero.id === 'hero-local-fixture')).toMatchObject({ available: false, unavailableReason: 'Choose a model for this Hero in Tavern.' });
 });
 
-it('stages a complete Hero String group until Save Shell, then copies its quoted configuration to new incarnations', async () => {
+it('stages a complete Hero String group until Save, then copies its quoted configuration to new incarnations', async () => {
   const savedHero = () => disk.find(hero => hero.heroId === 'hero-local-fixture')!;
   disk[0].model = 'openai-codex/sol-1'; disk[0].effort = 'high';
   disk[0].shell = 'provider: kota-local\nmodel: openai-codex/sol-1\neffort: high\n';
@@ -348,8 +424,8 @@ it('stages a complete Hero String group until Save Shell, then copies its quoted
   expect(savedHero().model).toBe('openai-codex/sol-1');
   expect(within(profile()).getByRole('combobox',{name:'Thinking'})).toBeDisabled();
   expect(within(profile()).getByRole('combobox',{name:'Thinking'})).toHaveDisplayValue('By Auto String');
-  expect(within(profile()).getByRole('button',{name:'Save Shell'})).toBeEnabled();
-  await userEvent.click(within(profile()).getByRole('button',{name:'Save Shell'}));
+  expect(within(profile()).getByRole('button',{name: 'Save'})).toBeEnabled();
+  await userEvent.click(within(profile()).getByRole('button',{name: 'Save'}));
   await waitFor(() => expect(savedHero().model).toBe('kota/auto'));
   expect(savedHero().autoRoute).toMatchObject({threshold:.5,defaultModel:'model-1',models:[
     {id:'model-1',providerId:'openai-codex',modelId:'sol-1',thinkingLevel:'medium'},
@@ -361,4 +437,36 @@ it('stages a complete Hero String group until Save Shell, then copies its quoted
   expect(recruit.shell).toContain('effort: "off"');
   expect(recruit.shell).toContain('default-model: "model-1"');
   expect(ipc.calls).not.toContain('local_rpc_control');
+});
+
+it('sends the complete saved Auto String group when recruiting a Local hero', async () => {
+  const group = {
+    threshold: 0.75, defaultModel: 'model-2', models: [
+      { id: 'model-1', providerId: 'openai-codex', modelId: 'sol-1', thinkingLevel: 'high', intent: 'Plan changes.' },
+      { id: 'model-2', providerId: 'anthropic', modelId: 'family/quill-2', thinkingLevel: 'off', intent: 'Write prose.' },
+      { id: 'model-3', providerId: 'magpie', modelId: 'copilot/qwen3:32b', thinkingLevel: 'low', intent: 'Find references.' },
+    ],
+  };
+  const routeYaml = stringGroupYaml(group);
+  disk[0] = {
+    ...disk[0], model: 'kota/auto', effort: 'off', autoRoute: group,
+    shell: `provider: kota-local\nmodel: kota/auto\neffort: off\n${routeYaml}\n`,
+  };
+  syncTavernHeroStorageFromProfiles(await pty.loadTavernHeroProfiles());
+  const recruit = vi.spyOn(pty, 'incarnateTavernHero');
+  vi.spyOn(localRpc, 'localSnapshot').mockImplementation(async agentId => ({
+    scope: { projectRoot: '/tmp/kota-dev', agentId, sessionId: 'fixture', epoch: 1 },
+    state: 'ready', queued: 0, compacting: false, childPid: null, model: null, thinkingLevel: null, error: null,
+  }));
+
+  render(<App />);
+  await userEvent.click(screen.getByTestId('ribbon-add'));
+  await userEvent.click(await screen.findByRole('button', { name: /^Show all/ }));
+  await userEvent.click(await screen.findByTestId(`incarnate-shortcut-${disk[0].heroId}`));
+
+  await waitFor(() => expect(recruit).toHaveBeenCalledOnce());
+  const { agentId, profile } = recruit.mock.calls[0][0];
+  await screen.findByTestId(`chip-${agentId}`);
+  expect(profile.shell).toContain(routeYaml);
+  expect(profile.autoRoute).toEqual(group);
 });

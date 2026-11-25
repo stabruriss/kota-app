@@ -10,6 +10,10 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
+use super::agent::{
+    decoder_cursor_report, terminal_query_responses, TerminalQueryState, CURSOR_POSITION_QUERY,
+    DEVICE_ATTRIBUTES_QUERY, MODIFY_OTHER_KEYS_QUERY, OSC_11_QUERY, TERMINAL_NAME_QUERY,
+};
 use super::ansi::{AnsiLineDecoder, GridSnapshot};
 use super::path_env::{augmented_path, resolve_on_augmented_path};
 
@@ -27,6 +31,14 @@ const SMART_STATUS_EVENT: &str = "pty://smart/status";
 const SMART_TUI_EXIT_EVENT: &str = "pty://smart/tui-exit";
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
+/// The queries agent terminals answer.
+const ANSWERED_QUERIES: [&[u8]; 5] = [
+    OSC_11_QUERY,
+    TERMINAL_NAME_QUERY,
+    MODIFY_OTHER_KEYS_QUERY,
+    DEVICE_ATTRIBUTES_QUERY,
+    CURSOR_POSITION_QUERY,
+];
 const MAGI_TRANSLATE_PROMPT_FILE: &str = "magi-nl-translate.md";
 const MAGI_TRANSLATE_PROMPT_TEMPLATE: &str = include_str!("../../prompts/magi-nl-translate.md");
 
@@ -120,7 +132,7 @@ pub enum TranslateKind {
 
 struct SmartProcess {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     decoder: Arc<Mutex<AnsiLineDecoder>>,
 }
@@ -219,14 +231,11 @@ impl SmartTerminalPty {
         let process = process_guard
             .as_mut()
             .ok_or_else(|| anyhow!("smart terminal process missing"))?;
-        process
-            .writer
+        let mut writer = process.writer.lock().expect("smart writer poisoned");
+        writer
             .write_all(input.as_bytes())
             .context("write smart terminal input")?;
-        process
-            .writer
-            .flush()
-            .context("flush smart terminal input")?;
+        writer.flush().context("flush smart terminal input")?;
         Ok(())
     }
 
@@ -335,8 +344,9 @@ impl SmartTerminalPty {
         let process = process_guard
             .as_mut()
             .ok_or_else(|| anyhow!("smart terminal process missing"))?;
-        process.writer.write_all(&[0x03])?;
-        process.writer.flush()?;
+        let mut writer = process.writer.lock().expect("smart writer poisoned");
+        writer.write_all(&[0x03])?;
+        writer.flush()?;
         Ok(())
     }
 
@@ -419,7 +429,9 @@ impl SmartTerminalPty {
         let shell_pid = child.process_id();
 
         let mut reader = pair.master.try_clone_reader().context("clone PTY reader")?;
-        let writer = pair.master.take_writer().context("take PTY writer")?;
+        let writer = Arc::new(Mutex::new(
+            pair.master.take_writer().context("take PTY writer")?,
+        ));
         let killer = child.clone_killer();
         let decoder = Arc::new(Mutex::new(AnsiLineDecoder::new(size.cols, size.rows)));
         // Reader thread pushes bytes + sets `dirty`; emitter thread
@@ -433,11 +445,15 @@ impl SmartTerminalPty {
         let state = Arc::clone(&self.inner);
         let decode_handle = Arc::clone(&decoder);
         let dirty_handle = Arc::clone(&dirty);
+        // Weak: dropping the writer sends the shell its EOF, so closing the
+        // terminal must not wait for this thread.
+        let writer_handle = Arc::downgrade(&writer);
 
         thread::Builder::new()
             .name(format!("kota-smart-pty-reader-{}", state.pty_id))
             .spawn(move || {
                 let mut buffer = [0u8; 8192];
+                let mut unfinished_query: Vec<u8> = Vec::new();
                 loop {
                     if state.generation.load(Ordering::SeqCst) != generation {
                         break;
@@ -474,6 +490,18 @@ impl SmartTerminalPty {
                                         "[smart] decoder push panicked; resetting decoder",
                                     );
                                     *dec = AnsiLineDecoder::new(size.cols, size.rows);
+                                }
+                            }
+                            let replies =
+                                query_replies(&mut unfinished_query, &buffer[..n], || {
+                                    decoder_cursor_report(&decode_handle, &state.pty_id)
+                                });
+                            if !replies.is_empty() {
+                                if let Some(writer) = writer_handle.upgrade() {
+                                    if let Ok(mut writer) = writer.lock() {
+                                        let _ = writer.write_all(&replies);
+                                        let _ = writer.flush();
+                                    }
                                 }
                             }
                             dirty_handle.store(true, Ordering::Release);
@@ -673,6 +701,51 @@ impl SmartTerminalPty {
             },
         );
     }
+}
+
+/// What the terminal writes back for the queries in `output`, in the order
+/// they were asked. A shell runs many programs, so unlike in an agent terminal
+/// a query is answered every time it is asked. `unfinished` keeps the start of
+/// a query that the next read may complete.
+fn query_replies(
+    unfinished: &mut Vec<u8>,
+    output: &[u8],
+    cursor: impl Fn() -> (u16, u16),
+) -> Vec<u8> {
+    unfinished.extend_from_slice(output);
+    let mut replies = Vec::new();
+    let mut position = None;
+    let mut at = 0;
+    while at < unfinished.len() {
+        let rest = &unfinished[at..];
+        if rest[0] != 0x1b {
+            at += 1;
+        } else if let Some(query) = ANSWERED_QUERIES
+            .into_iter()
+            .find(|query| rest.starts_with(query))
+        {
+            let reports = usize::from(query == CURSOR_POSITION_QUERY);
+            if reports > 0 && position.is_none() {
+                position = Some(cursor());
+            }
+            replies.extend(terminal_query_responses(
+                query,
+                &mut TerminalQueryState::default(),
+                position.unwrap_or((1, 1)),
+                reports,
+            ));
+            at += query.len();
+        } else if ANSWERED_QUERIES
+            .into_iter()
+            .any(|query| query.starts_with(rest))
+        {
+            break;
+        } else {
+            at += 1;
+        }
+    }
+    unfinished.drain(..at);
+    replies
 }
 
 fn resolve_shell(cli: Option<&str>) -> String {
@@ -900,6 +973,110 @@ mod tests {
         let home = PathBuf::from("/Users/example");
         let cwd = home.join("work");
         assert!(resolve_cd_target(&home, &cwd, "cd foo && ls").is_none());
+    }
+
+    /// Feeds one read through the parser and the query replies, as the reader thread does.
+    fn read(
+        decoder: &Arc<Mutex<AnsiLineDecoder>>,
+        unfinished: &mut Vec<u8>,
+        output: &[u8],
+    ) -> Vec<u8> {
+        let _ = decoder.lock().expect("decoder").push_bytes(output);
+        query_replies(unfinished, output, || {
+            decoder_cursor_report(decoder, "smart")
+        })
+    }
+
+    fn query_decoder() -> Arc<Mutex<AnsiLineDecoder>> {
+        Arc::new(Mutex::new(AnsiLineDecoder::new(80, 24)))
+    }
+
+    #[test]
+    fn answers_the_cursor_position_from_its_own_parser() {
+        let decoder = query_decoder();
+        let mut unfinished = Vec::new();
+        assert_eq!(
+            read(&decoder, &mut unfinished, b"one\r\ntwo \x1b[6n"),
+            b"\x1b[2;5R"
+        );
+        assert_eq!(
+            read(&decoder, &mut unfinished, b"\x1b[999;999f\x1b[6n"),
+            b"\x1b[24;80R"
+        );
+    }
+
+    #[test]
+    fn answers_a_query_every_time_it_is_asked() {
+        let mut unfinished = Vec::new();
+        for query in ANSWERED_QUERIES {
+            let first = query_replies(&mut unfinished, query, || (1, 1));
+            assert!(!first.is_empty(), "{query:?}");
+            let again = [query, &[b'x'; 2000]].concat();
+            assert_eq!(
+                query_replies(&mut unfinished, &again, || (1, 1)),
+                first,
+                "{query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn answers_several_queries_of_one_read_in_order() {
+        let decoder = query_decoder();
+        let replies = read(
+            &decoder,
+            &mut Vec::new(),
+            b"\x1b[6n\x1b]11;?\x1b\\\x1b[>q\x1b[>4;?m\x1b]11;?\x1b\\\x1b[c",
+        );
+        assert_eq!(
+            replies,
+            b"\x1b[1;1R\x1b]11;rgb:1a/18/20\x1b\\\x1bP>|Kota\x1b\\\x1b[>4;0m\x1b]11;rgb:1a/18/20\x1b\\\x1b[?1;2c"
+        );
+    }
+
+    #[test]
+    fn answers_a_query_split_between_two_reads_once() {
+        for query in ANSWERED_QUERIES {
+            let whole = query_replies(&mut Vec::new(), query, || (1, 1));
+            for split in 1..query.len() {
+                let mut unfinished = Vec::new();
+                let first = [b"prompt ".as_slice(), &query[..split]].concat();
+                let second = [&query[split..], b" more".as_slice()].concat();
+                assert!(
+                    query_replies(&mut unfinished, &first, || (1, 1)).is_empty(),
+                    "{query:?} at {split}"
+                );
+                assert_eq!(
+                    query_replies(&mut unfinished, &second, || (1, 1)),
+                    whole,
+                    "{query:?} at {split}"
+                );
+                assert!(query_replies(&mut unfinished, b"later output", || (1, 1)).is_empty());
+                assert!(unfinished.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn leaves_other_queries_unanswered() {
+        let decoder = query_decoder();
+        let mut unfinished = Vec::new();
+        for other in [
+            b"\x1b[5n".as_slice(),
+            b"\x1b[?6n",
+            b"\x1b[>c",
+            b"\x1b]10;?\x1b\\",
+            b"\x1b[18t",
+            b"\x1b[0m\x1b[2K",
+        ] {
+            assert!(
+                read(&decoder, &mut unfinished, other).is_empty(),
+                "{other:?}"
+            );
+        }
+        // The start of one query, followed by a different, complete one.
+        assert_eq!(read(&decoder, &mut unfinished, b"\x1b]11;?\x1b"), b"");
+        assert_eq!(read(&decoder, &mut unfinished, b"[c"), b"\x1b[?1;2c");
     }
 
     #[test]

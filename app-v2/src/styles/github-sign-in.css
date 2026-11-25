@@ -1,0 +1,28 @@
+/* The GitHub sign-in dialog: kota-local-link.css plus two steps and gh's own words.
+   Above the Connect dialog (.github-dialog-layer, 24000), which can open it; the shared layer stays where it is. */
+.local-auth-layer:has(> .github-sign-in-dialog) { z-index:24100; }
+.github-sign-in-dialog:focus { outline:none; }
+.github-sign-in-dialog button:focus-visible { outline:2px solid var(--brass-hi); outline-offset:2px; }
+.github-steps { list-style:none; display:flex; flex-direction:column; gap:14px; margin:0; padding:0; min-width:0; }
+.github-step { display:flex; flex-direction:column; gap:10px; min-width:0; }
+.github-step-title { color:var(--text-3); font:13px/1.5 var(--font-sans); overflow-wrap:anywhere; }
+.github-step[aria-current] .github-step-title { color:var(--text); }
+.github-step-title span { font-weight:800; white-space:nowrap; }
+.github-step-actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px; }
+/* Goes to the browser: a link, so it never reads as the button that moves on. */
+.github-open-link { display:inline-flex; align-items:center; gap:7px; padding:4px 0; border:0; background:none; color:var(--sky-hi); font:600 12.5px var(--font-sans); cursor:pointer; }
+.github-open-link span { text-decoration:underline; text-underline-offset:3px; }
+.github-open-link img { width:15px; height:15px; }
+.github-open-link svg { width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; }
+.github-open-link:hover { color:var(--text); }
+.github-device-address { margin-top:9px; color:var(--text-2); font:11.5px var(--font-mono); user-select:text; -webkit-user-select:text; }
+.github-sign-in-dialog .local-auth-device-code { user-select:text; -webkit-user-select:text; }
+.github-sign-in-dialog .local-auth-device-expiry.ending { color:var(--terra-hi); }
+/* Small above the code, or in place of the code when no code can be read. */
+.github-gh-line { color:var(--text-3); font:11px/1.5 var(--font-mono); overflow-wrap:anywhere; user-select:text; -webkit-user-select:text; }
+.github-gh-line span { white-space:nowrap; }
+.github-sign-in-dialog pre.github-gh-output { margin:4px 0 2px; padding:0; border:0; border-radius:0; background:none; box-shadow:none; color:var(--text); font:12px/1.6 var(--font-mono); white-space:pre-wrap; overflow-wrap:anywhere; user-select:text; -webkit-user-select:text; }
+.github-sign-in-dialog .local-auth-device pre.github-gh-output { margin:2px 0 12px; }
+.github-sign-in-dialog .local-auth-result pre.github-gh-output { color:var(--text-2); font-size:11px; max-height:180px; overflow:auto; }
+.github-account-row.is-landing { animation:localAuthLanding 2.4s var(--ease-out) 1; border-radius:8px; }
+@media (prefers-reduced-motion: reduce) { .github-account-row.is-landing { animation:none; box-shadow:0 0 0 1px rgba(242,198,126,.75); } }

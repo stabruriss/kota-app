@@ -46,7 +46,7 @@ it.each([
     await userEvent.click(screen.getByRole('button', { name: 'New Hero create template' }));
     const first = within(screen.getByRole('dialog', { name: 'New Hero profile' }));
     expect(first.getByRole('button', { name: `Provider ${providerName}` })).toHaveClass(`provider-${providerId}`);
-    await userEvent.click(first.getByRole('button', { name: 'Edit Shell' }));
+    await userEvent.click(first.getByRole('button', { name: 'Edit' }));
     await userEvent.click(first.getByRole('button', { name: `Provider ${providerName}` }));
     const localOption = first.getByRole('option', { name: /^Kota Local\b/ });
     expect(localOption).toBeEnabled();
@@ -54,11 +54,11 @@ it.each([
     await waitFor(() => expect(availability).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(localStatus).toHaveTextContent('Ready'));
     expect(first.getByRole('button', { name: 'Provider Kota Local' })).toBeInTheDocument();
-    expect(first.getByRole('button', { name: 'Save Shell' })).toBeDisabled();
+    expect(first.getByRole('button', { name: 'Save' })).toBeDisabled();
     const localModel = first.getByRole('button', {name:'Local model'});
     await userEvent.click(localModel);
     await userEvent.click(screen.getByRole('option', { name: /Fixture model OpenAI/ }));
-    await userEvent.click(first.getByRole('button', { name: 'Save Shell' }));
+    await userEvent.click(first.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(first.getByRole('button', { name: 'Provider Kota Local' })).toBeDisabled());
     expect(local.discoverLocal).not.toHaveBeenCalled();
     await userEvent.click(first.getByRole('button', { name: 'Back' }));
@@ -66,7 +66,7 @@ it.each([
     await userEvent.click(screen.getByRole('button', { name: 'New Hero create template' }));
     const next = within(screen.getByRole('dialog', { name: /^New Hero.* profile$/ }));
     expect(next.getByRole('button', { name: `Provider ${providerName}` })).toHaveClass(`provider-${providerId}`);
-    await userEvent.click(next.getByRole('button', { name: 'Edit Shell' }));
+    await userEvent.click(next.getByRole('button', { name: 'Edit' }));
     await userEvent.click(next.getByRole('button', { name: `Provider ${providerName}` }));
     expect(next.getAllByRole('option').at(-1)).toHaveTextContent('Kota Local');
     expect(next.getByRole('option', { name: /^Kota Local\b/ })).toBeEnabled();

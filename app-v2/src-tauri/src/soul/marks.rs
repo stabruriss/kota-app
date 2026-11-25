@@ -73,7 +73,8 @@ pub(crate) enum Edited {
 }
 
 pub(crate) enum Deleted {
-    Deleted(Marks),
+    /// `mark` is the mark that was removed.
+    Deleted { mark: Mark, marks: Marks },
     NotFound,
 }
 
@@ -158,12 +159,12 @@ pub(crate) fn delete(paths: &SoulPaths, id: &str, ts: &str) -> Result<Deleted, S
     let mark = marks.marks[index].clone();
     episodes::append(
         paths,
-        &[episodes::Episode::retired_mark(mark.id, mark.project, ts, mark.text)],
+        &[episodes::Episode::retired_mark(mark.id.clone(), mark.project.clone(), ts, mark.text.clone())],
     )?;
     marks.marks.remove(index);
     marks.revision += 1;
     write(paths, &marks)?;
-    Ok(Deleted::Deleted(marks))
+    Ok(Deleted::Deleted { mark, marks })
 }
 
 /// Tallies pushes on the marks' own ids. The caller holds the soul lock; the revision

@@ -1,15 +1,33 @@
+.tavern-section.github-accounts-card { gap:0; padding:18px; }
 .github-accounts-head { display:flex; align-items:center; justify-content:space-between; gap:16px; }
 .github-accounts-head p,.github-accounts-hint,.github-sign-in p { color:var(--text-3); font:12px/1.6 var(--font-sans); margin:5px 0; }
-.github-account-list { display:flex; flex-direction:column; margin:16px 0; }
-.github-account-row { display:flex; align-items:center; gap:12px; padding:14px 0; border-top:1px solid var(--border); }
+.github-accounts-card button { flex-shrink:0; }
+.tavern-section.github-accounts-card button { width:fit-content; height:30px; padding:0 12px; border-radius:999px; border:1px solid rgba(218,214,204,.24); background:rgba(0,0,0,.2); color:var(--brass-hi); font:900 10px var(--font-display); letter-spacing:.7px; white-space:nowrap; }
+.tavern-section.github-accounts-card button:hover:not(:disabled) { color:var(--brass-bright); border-color:var(--border-strong); background:rgba(218,214,204,.06); }
+.github-account-add { display:inline-flex; align-items:center; gap:6px; }
+.github-account-add-symbol { font:500 17px/1 var(--font-sans); letter-spacing:0; }
+.github-account-list { display:flex; flex-direction:column; margin:18px 0 0; }
+.github-account-list > p { padding:22px 0; border-top:1px solid var(--border); color:var(--text-3); font:12px/1.6 var(--font-sans); }
+.github-account-row { display:flex; align-items:center; gap:12px; padding:16px 0; border-top:1px solid var(--border); }
 .github-account-avatar { width:36px; height:36px; flex:0 0 36px; border:1px solid var(--border-hi); border-radius:50%; display:grid; place-items:center; background:var(--bg-panel); color:var(--text-2); font:600 16px var(--font-sans); }
 .github-account-name { flex:1; min-width:0; }
+.github-account-name-line { display:flex; flex-wrap:wrap; align-items:center; gap:7px 10px; }
 .github-account-name strong,.github-account-name small { display:block; overflow-wrap:anywhere; font-family:var(--font-sans); }
 .github-account-name strong { color:var(--text); font-size:13px; }
 .github-account-name small { color:var(--text-3); margin-top:4px; font-size:11px; }
-.github-account-default { color:var(--copper-hi); border:1px solid var(--border); border-radius:12px; padding:3px 8px; font:10px var(--font-sans); }
+.github-account-light { flex:none; width:7px; height:7px; border-radius:50%; background:#d4a358; box-shadow:0 0 6px rgba(212,163,88,.5); }
+.github-account-light.signed-in { background:#6fbf73; box-shadow:0 0 6px rgba(111,191,115,.5); }
+.github-account-default { display:inline-flex; align-items:center; color:var(--copper-hi); border:1px solid var(--border); border-radius:12px; padding:2px 8px; font:10px/16px var(--font-sans); }
 .github-account-actions,.github-sign-in { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.github-account-actions { justify-content:flex-end; }
+.github-accounts-footer { border-top:1px solid var(--border); padding-top:14px; }
+.github-accounts-hint { margin:0; }
 .github-sign-in { margin:10px 0; }
 .github-sign-in p { flex-basis:100%; }
 .github-sign-in .tavern-status.error { color:var(--danger); }
-@media(max-width:600px) { .github-account-row { flex-wrap:wrap; } .github-account-actions { flex-basis:100%; padding-left:48px; } }
+@media(max-width:600px) {
+  .tavern-section.github-accounts-card { padding:14px; }
+  .github-accounts-head { gap:12px; }
+  .github-account-row { flex-wrap:wrap; }
+  .github-account-actions { flex-basis:100%; padding-left:48px; justify-content:flex-start; }
+}

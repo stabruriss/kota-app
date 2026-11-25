@@ -212,7 +212,6 @@ function Preview() {
         onNewProject={noop}
         onCloseProject={noop}
         onOpenTavern={noop}
-        ghAuth={null}
       />
       <main className="ps-mock-stage" ref={stage}>
         <Stage

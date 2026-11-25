@@ -8,9 +8,77 @@
     <link rel="stylesheet" href="/src/styles/kota-tokens.css" />
     <link rel="stylesheet" href="/src/styles/canvas.css" />
     <link rel="stylesheet" href="/src/styles/human-entry.css" />
+    <link rel="stylesheet" href="/src/styles/system-load.css" />
   </head>
   <body>
     <div id="root"></div>
+    <div id="kota-reset-relay" class="reset-relay-layer" data-stage="2" hidden>
+      <section class="reset-relay-card" role="status" aria-live="polite" aria-label="RESET KOTA">
+        <div class="hud-screen relay-screen">
+          <header class="hud-caption relay-caption">
+            <span class="hud-title">RESET KOTA</span>
+            <svg class="hud-rail" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+              <path class="rail-base" d="M0 6.5H30L35 2.5H65L70 6.5H100" />
+              <path class="rail-cool" d="M0 6.5H30L35 2.5H65L70 6.5H100" />
+            </svg>
+            <span class="relay-stage-label" data-relay-label>LOADING UI</span>
+          </header>
+          <div class="relay-body">
+            <div class="relay-gauge" aria-hidden="true">
+              <div class="relay-segments">
+                <span class="relay-seg" data-lit="true" data-head="false"></span>
+                <span class="relay-seg" data-lit="true" data-head="true"></span>
+                <span class="relay-seg" data-lit="false" data-head="false"></span>
+                <span class="relay-seg" data-lit="false" data-head="false"></span>
+              </div>
+              <div class="relay-ticks">
+                <i data-lit="true"></i>
+                <i data-lit="true"></i>
+                <i data-lit="false"></i>
+                <i data-lit="false"></i>
+              </div>
+            </div>
+            <span class="relay-count" data-relay-count>2/4</span>
+          </div>
+        </div>
+      </section>
+    </div>
+    <script id="kota-reset-relay-bootstrap">
+      (function () {
+        var marker = null;
+        try {
+          marker = window.sessionStorage.getItem('kota-v2.reset-handoff');
+        } catch (_e) {
+          return;
+        }
+        if (marker !== '1') return;
+        try {
+          window.sessionStorage.removeItem('kota-v2.reset-handoff');
+        } catch (_e) {}
+        var el = document.getElementById('kota-reset-relay');
+        if (!el) return;
+        el.hidden = false;
+        var state = {
+          active: true,
+          stage: 2,
+          hardTimerId: 0,
+          holdTimerId: 0,
+          onChange: null
+        };
+        state.hardTimerId = window.setTimeout(function () {
+          if (!state.active) return;
+          state.active = false;
+          state.hardTimerId = 0;
+          if (state.holdTimerId) {
+            window.clearTimeout(state.holdTimerId);
+            state.holdTimerId = 0;
+          }
+          el.hidden = true;
+          if (typeof state.onChange === 'function') state.onChange(false);
+        }, 12000);
+        window.__KOTA_RESET_RELAY__ = state;
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

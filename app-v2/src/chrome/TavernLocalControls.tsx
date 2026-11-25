@@ -10,20 +10,21 @@ export const TAVERN_LOCAL_LABELS: Record<TavernLocalState, string> = {
   error: 'Status unavailable',
 };
 
-export function TavernLocalStatus({ state, onRetry }: { state: TavernLocalState; onRetry: () => void }) {
+export function TavernLocalStatus({ state, onRetry, onSignIn }: { state: TavernLocalState; onRetry: () => void; onSignIn?: () => void }) {
   return (
     <div className="tavern-local-auth-note" data-auth={state} role="status">
       <span className="tavern-local-auth-dot" aria-hidden="true" />
       <span>{TAVERN_LOCAL_LABELS[state]}</span>
-      <TavernLocalAction state={state} onRetry={onRetry} />
+      <TavernLocalAction state={state} onRetry={onRetry} onSignIn={onSignIn} />
     </div>
   );
 }
 
-export function TavernLocalAction({ state, onRetry }: { state: TavernLocalState; onRetry: () => void }) {
+/** Sign in opens the Local card in Link. A page that must ask before it is left passes its own `onSignIn`. */
+export function TavernLocalAction({ state, onRetry, onSignIn }: { state: TavernLocalState; onRetry: () => void; onSignIn?: () => void }) {
   if (state === 'error') return <button type="button" onClick={onRetry}>Retry</button>;
   if (state === 'not_ready' || state === 'invalid') {
-    return <button type="button" onClick={() => requestKotaLocalLink('kota-local')}>Sign in <span aria-hidden="true">→</span></button>;
+    return <button type="button" onClick={() => onSignIn ? onSignIn() : requestKotaLocalLink('kota-local')}>Sign in <span aria-hidden="true">→</span></button>;
   }
   return null;
 }

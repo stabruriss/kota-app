@@ -123,6 +123,10 @@ pub(crate) fn saved_thinking(value: Option<&str>) -> &str {
         .unwrap_or(INITIAL_THINKING_LEVEL)
 }
 
+pub(crate) fn valid_model_identifiers(provider: &str, id: &str) -> bool {
+    identifier(provider, 128) && !provider.contains('/') && identifier(id, 1024)
+}
+
 fn validate_model(model: &ModelSelection) -> LocalResult<()> {
     // Pi 1.1 renamed the Azure provider, but not its API. Leave old owned
     // credentials/SHELL files intact; selecting the retired ID needs a new
@@ -130,10 +134,7 @@ fn validate_model(model: &ModelSelection) -> LocalResult<()> {
     if model.provider_id == RETIRED_AZURE_PROVIDER {
         return Err(LocalError::provider("model_not_found", &model.provider_id));
     }
-    if !identifier(&model.provider_id, 128)
-        || model.provider_id.contains('/')
-        || !identifier(&model.model_id, 1024)
-    {
+    if !valid_model_identifiers(&model.provider_id, &model.model_id) {
         return Err(LocalError::new("model_not_found"));
     }
     Ok(())

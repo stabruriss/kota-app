@@ -3,7 +3,7 @@ import {
   projectConnectionApply, projectConnectionCandidates, projectConnectionCheck,
   type ConnectionCandidates, type ConnectionError, type WorkspaceProject,
 } from '../pty-client';
-import { beginGithubSignIn, openGithubAccounts, refreshGithubAccounts, useGithubAccounts } from '../lib/github-account-flow';
+import { beginGithubSignIn, refreshGithubAccounts, useGithubAccounts } from '../lib/github-account-flow';
 import { connectionChanged } from '../lib/project-connection-ui';
 import { ProjectConnectionDialog, REPOSITORY_STATES, repositoryCanConnect, type ConnectionDraft, type RepositoryCheckView } from './ProjectConnectionDialog';
 import { ProjectConnectionConfirm } from './ProjectConnectionConfirm';
@@ -36,6 +36,10 @@ export function ProjectConnectDialog({ workspace, login, loginReady, switchOrigi
   const saving = useRef(false), alive = useRef(true), checkSequence = useRef(0), modeTouched = useRef(false);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => { void refreshGithubAccounts(); }, []);
+  const signedIn = flow.signIn?.phase === 'done' ? flow.signIn.result.login : null;
+  useEffect(() => {
+    if (signedIn) setDraft(value => value.accountLogin === signedIn ? value : { ...value, accountLogin: signedIn, repoFullName: '' });
+  }, [signedIn]);
   useEffect(() => {
     if (!draft.accountLogin && flow.view?.defaultLogin) setDraft(value => ({ ...value, accountLogin: flow.view!.defaultLogin! }));
   }, [draft.accountLogin, flow.view?.defaultLogin]);
@@ -117,7 +121,7 @@ export function ProjectConnectDialog({ workspace, login, loginReady, switchOrigi
       repos={candidates?.candidates ?? []} reposLoading={loading} check={check} error={error} busy={busy}
       onDraft={changeDraft} onCancel={onCancel} onContinue={() => { if (accountReady && repositoryCanConnect(check?.kind)) setConfirm(true); }}
       onRetry={() => { setError(null); if (!candidates || draft.mode === 'new') setListRetry(value => value + 1); else setProbeRetry(value => value + 1); }}
-      onAddAccount={() => { onCancel(); openGithubAccounts(); void beginGithubSignIn(); }} />
+      onAddAccount={() => void beginGithubSignIn()} />
     {confirm && <ProjectConnectionConfirm change={replacing ? 'account' : 'connect'} name={name}
       from={replacing ? `GH ID ${login ?? '—'}\n${workspace.repoFullName}` : 'Local only'}
       to={`GH ID ${draft.accountLogin}\n${draft.mode === 'new' ? `${draft.accountLogin}/${draft.name.trim()}` : draft.repoFullName}`}

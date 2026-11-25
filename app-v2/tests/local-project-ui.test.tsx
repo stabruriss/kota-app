@@ -2,14 +2,16 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, expect, it, vi } from 'vitest';
 import { ProjectSetupModal } from '../src/chrome/ProjectSetupModal';
 import * as ipc from '../src/pty-client';
-import { finishGithubSignIn, refreshGithubAccounts } from '../src/lib/github-account-flow';
+import { GithubSignInDialog } from '../src/chrome/GithubSignInDialog';
+import { closeGithubSignIn, continueGithubSignIn, refreshGithubAccounts } from '../src/lib/github-account-flow';
+import { fakeGithubSignIn } from './github-sign-in-fake';
 
 vi.mock('../src/pty-client', async importOriginal => ({
   ...await importOriginal<typeof ipc>(),
   ghAuthStatus: vi.fn(), githubAccountsRead: vi.fn(), githubListRepos: vi.fn(),
   listWorkspaceProjects: vi.fn(), githubCreateRepo: vi.fn(), prepareGithubProject: vi.fn(),
   createLocalProject: vi.fn(), gitAvailability: vi.fn(), installGitCommandLineTools: vi.fn(),
-  githubAccountAddBegin: vi.fn(), githubAccountAddFinish: vi.fn(),
+  githubSignInStart: vi.fn(), githubSignInCancel: vi.fn(), onGithubSignIn: vi.fn(), openExternalUrl: vi.fn(),
 }));
 const local: ipc.WorkspaceProject = { projectId:'local_fixture', displayName:'Copper / Notes', connection:{kind:'local'},
   repoFullName:'', remoteUrl:'', githubHtmlUrl:'', sourceDir:'/fixture/local', localRoot:'/fixture/state',
@@ -18,6 +20,7 @@ const repo: ipc.GithubRepo = { fullName:'project-account/fixture',name:'fixture'
   defaultBranch:'main',cloneUrl:'https://github.com/project-account/fixture.git',htmlUrl:'https://github.com/project-account/fixture' };
 const ready = { defaultLogin:'project-account',accounts:[{login:'project-account',default:true,state:'ok' as const,source:'gh-cli' as const}] };
 const mount = () => { const prepared=vi.fn(); const view=render(<ProjectSetupModal open onClose={vi.fn()} onWorkspacePrepared={prepared}/>);return{...view,prepared}; };
+let gh: ReturnType<typeof fakeGithubSignIn>;
 beforeEach(async () => {
   vi.clearAllMocks();
   vi.mocked(ipc.ghAuthStatus).mockResolvedValue({authenticated:false,username:null,scopes:[],error:null,cliMissing:true});
@@ -29,8 +32,8 @@ beforeEach(async () => {
   vi.mocked(ipc.githubCreateRepo).mockResolvedValue(repo);
   vi.mocked(ipc.prepareGithubProject).mockResolvedValue({...local,repoFullName:repo.fullName,connection:{kind:'github',accountLogin:'project-account'}});
   vi.mocked(ipc.installGitCommandLineTools).mockResolvedValue();
-  vi.mocked(ipc.githubAccountAddFinish).mockResolvedValue({added:[],active:null,restoreFailed:false,view:{defaultLogin:null,accounts:[]}});
-  await finishGithubSignIn(); await refreshGithubAccounts(); vi.clearAllMocks();
+  closeGithubSignIn(); await refreshGithubAccounts(); vi.clearAllMocks();
+  gh = fakeGithubSignIn(ipc);
 });
 it('creates a local project without GitHub, locks the switch off and never creates a remote', async () => {
   const {prepared}=mount();
@@ -107,21 +110,58 @@ it('does not let an old shared read replace a newer sign-in result after reopeni
   rerender(<ProjectSetupModal open={false} onClose={vi.fn()} onWorkspacePrepared={vi.fn()}/>);
   vi.mocked(ipc.githubAccountsRead).mockResolvedValue({ ...ready, accounts:ready.accounts.map(a=>({...a,state:'needs_login'})) });
   rerender(<ProjectSetupModal open onClose={vi.fn()} onWorkspacePrepared={vi.fn()}/>);
-  vi.mocked(ipc.githubAccountAddFinish).mockResolvedValue({added:[],active:null,restoreFailed:false,view:{...ready,accounts:ready.accounts.map(a=>({...a,state:'needs_login'}))}});
-  await act(finishGithubSignIn);
+  await act(async()=>{void continueGithubSignIn();});
+  await gh.signIn({login:'project-account',view:{...ready,accounts:ready.accounts.map(a=>({...a,state:'needs_login' as const}))}});
+  act(closeGithubSignIn);
   await act(async()=>resolve(ready));
   await screen.findByText('Sign in required');
   expect(screen.getByRole('switch')).toBeDisabled();expect(screen.getByRole('switch')).toHaveAttribute('aria-checked','false');
 });
 
-it('uses the shared explicit add flow with zero accounts and reads repositories after Check sign-in',async()=>{
+const signIn = async (result: Parameters<typeof gh.signIn>[0]) => {
+  fireEvent.click(await screen.findByRole('button', { name: /^(Add GitHub account|Sign in)$/ }));
+  const next = await screen.findByRole('button', { name: 'Signed in, next' });
+  await act(async () => { fireEvent.click(next); });
+  await gh.signIn(result);
+};
+it('signs in to the first account in place and reads its repositories',async()=>{
  vi.mocked(ipc.ghAuthStatus).mockResolvedValue({authenticated:false,username:null,scopes:[],error:null,cliMissing:false});
- vi.mocked(ipc.githubAccountAddBegin).mockResolvedValue('previous');
- mount();const login=await screen.findByRole('button',{name:'Login GitHub'});await waitFor(()=>expect(login).toBeEnabled());
- fireEvent.click(login);await screen.findByText('Complete sign-in in Smart Terminal.');
- expect(ipc.githubAccountAddFinish).not.toHaveBeenCalled();
- vi.mocked(ipc.githubAccountAddFinish).mockResolvedValue({added:['project-account'],active:'previous',restoreFailed:false,view:ready});
- fireEvent.click(screen.getByRole('button',{name:'Check sign-in'}));
+ mount();render(<GithubSignInDialog/>);
+ const add=await screen.findByRole('button',{name:'Add GitHub account'});await waitFor(()=>expect(add).toBeEnabled());
+ await signIn({login:'project-account',view:ready});
  await waitFor(()=>expect(ipc.githubListRepos).toHaveBeenCalledWith('project-account'));
- expect(ipc.githubAccountAddFinish).toHaveBeenCalledWith('previous');
+ expect(screen.getByText('project-account added')).toBeInTheDocument();
+});
+it('chooses the account just added, not the default',async()=>{
+ vi.mocked(ipc.ghAuthStatus).mockResolvedValue({authenticated:true,username:'x',scopes:[],error:null,cliMissing:false});
+ vi.mocked(ipc.githubAccountsRead).mockResolvedValue(ready);
+ mount();render(<GithubSignInDialog/>);
+ await waitFor(()=>expect(ipc.githubListRepos).toHaveBeenCalledWith('project-account'));
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Add GitHub account'})).toBeEnabled());
+ await signIn({login:'second',view:{...ready,accounts:[...ready.accounts,{login:'second',default:false,state:'ok',source:'gh-cli'}]}});
+ await waitFor(()=>expect(ipc.githubListRepos).toHaveBeenLastCalledWith('second'));
+ expect(screen.getByRole('combobox',{name:'Repository account'})).toHaveValue('second');
+});
+it('signs in again to the account it shows',async()=>{
+ vi.mocked(ipc.ghAuthStatus).mockResolvedValue({authenticated:false,username:null,scopes:[],error:null,cliMissing:false});
+ vi.mocked(ipc.githubAccountsRead).mockResolvedValue({...ready,accounts:ready.accounts.map(a=>({...a,state:'needs_login' as const}))});
+ mount();render(<GithubSignInDialog/>);
+ await screen.findByText('Sign in required');
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Sign in'})).toBeEnabled());
+ await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Sign in'}));});
+ expect(screen.getByRole('dialog',{name:'Sign in to GitHub'})).toHaveTextContent('sign in to GitHub as project-account');
+});
+it('looks for GitHub CLI only while it is missing',async()=>{
+ vi.useFakeTimers({toFake:['setInterval','clearInterval']});
+ try{
+  mount();
+  fireEvent.click(await screen.findByRole('button',{name:'Install GitHub CLI'}));
+  expect(ipc.openExternalUrl).toHaveBeenCalledWith(ipc.GITHUB_CLI_INSTALL_URL);
+  vi.mocked(ipc.ghAuthStatus).mockClear();
+  vi.mocked(ipc.ghAuthStatus).mockResolvedValue({authenticated:false,username:null,scopes:[],error:null,cliMissing:false});
+  await act(async()=>{vi.advanceTimersByTime(3000);});
+  await screen.findByRole('button',{name:'Add GitHub account'});
+  await act(async()=>{vi.advanceTimersByTime(60_000);});
+  expect(ipc.ghAuthStatus).toHaveBeenCalledTimes(1);
+ }finally{vi.useRealTimers();}
 });

@@ -7,17 +7,7 @@ import { LocalModelPicker, localCatalogChoices, localModelName, type LocalModelC
 import { StringRoutingEditor } from './StringRoutingEditor';
 import { loadProjectAgentDetail } from '../pty-client';
 import type { RuleFileTarget } from './CopyRuleFilePath';
-import { LocalModelCredit } from './LocalModelCredit';
 import type { StringSource } from '../lib/string-agent-targets';
-
-export function StringRoutingSummary({ group, catalog, surface }: { group: AutoRouteGroup; catalog: LocalModelCatalog | null; surface: 'hero' | 'profile' }) {
-  return <div className="string-selected-summary" aria-label="Auto String configuration">
-    <small>String · {group.models.length} models</small><div className="string-summary-models">{group.models.map((item, index) => {
-      const model = catalogModel(catalog, item.providerId, item.modelId);
-      return <div key={item.id}><b>{localModelName(item.providerId, model?.name || item.modelId, item.modelId)} <LocalModelCredit providerId={item.providerId} /> · {item.thinkingLevel}</b><small>Model {index + 1}{item.id === group.defaultModel ? ' · Default' : ''}</small></div>;
-    })}</div><div className="string-summary-threshold"><span>Probability threshold</span><b>{group.threshold.toFixed(2)}</b>{surface === 'hero' && <small>Copied to new incarnations.</small>}</div>
-  </div>;
-}
 
 /** Each owner retains its own editor. Only complete groups leave this component. */
 export function StringLocalModelPicker({ ownerKey, owner, surface, model, group, catalog, jev, disabled, busy,
@@ -107,7 +97,7 @@ export function StringLocalModelPicker({ ownerKey, owner, surface, model, group,
     clearTimeout(timer.current);
     if (!complete) { pending.current = null; if (running.current !== generation.current) setSaving(false); return; }
     if (surface !== 'workbench') {
-      // These owners already have Save Shell / Save; editing only stages data.
+      // These owners already have their own Save; editing only stages data.
       void latest.current.onAutoRouteChange(complete);
       return;
     }
@@ -159,7 +149,6 @@ export function StringLocalModelPicker({ ownerKey, owner, surface, model, group,
     {model === AUTO_ROUTE_MODEL && !ready && <p className="local-model-warning" role="status">{jev.loading ? 'Checking Jev…' : jev.failed ? 'Jev settings unavailable. Retry in Puppeteer.' : rejected ? 'Jev key rejected. Update it in Puppeteer.' : 'Set up Jev to use Auto String'} <button type="button" className="local-model-text" onClick={onJevSettings}>Jev settings</button></p>}
     {model === AUTO_ROUTE_MODEL && surface !== 'profile' && <button type="button" className="local-model-text string-edit-routing" disabled={disabled || !ready || saving}
       onClick={openEditor}>Edit routing</button>}
-    {model === AUTO_ROUTE_MODEL && group && surface === 'hero' && <StringRoutingSummary group={group} catalog={catalog} surface={surface} />}
     {error && !editing && <p className="local-model-warning" role="status">{error}</p>}
     {editing && <StringRoutingEditor draft={draft} catalog={catalog} owner={owner} surface={surface} enabled={ready && !disabled} applySource={applySource}
       busy={busy || saving} error={error} ruleFile={ruleFile} ruleFileDirty={ruleFileDirty || saving || JSON.stringify(draft) !== savedDraft.current} onRuleFilePrepared={readRuleFile} onChange={update} onClose={closeEditor} onCatalogOpen={onOpen} returnFocus={modelTrigger} />}

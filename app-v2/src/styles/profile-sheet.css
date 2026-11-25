@@ -1,0 +1,456 @@
+/* Project agent and Hero template profiles.
+   The card takes the height the window gives it and never grows past it: Back
+   and the footer stay on screen, and GHOST and SKILLS scroll inside their own
+   panes. One Edit button opens the whole card for editing; Save commits once. */
+
+.tavern-profile-overlay.profile-sheet-overlay {
+  --sheet-gap: clamp(10px, 2vh, 22px);
+  padding: var(--sheet-gap) clamp(10px, 3vw, 34px);
+  overflow: hidden;
+}
+
+.tavern-profile-card.profile-sheet {
+  --sheet-pad: clamp(14px, 2vw, 24px);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* 48px is the app bar the overlay sits below. */
+  height: min(760px, calc(100dvh - 48px - 2 * var(--sheet-gap)));
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  transition: border-color 180ms;
+}
+.tavern-profile-card.profile-sheet.editing {
+  border-color: rgba(214,167,107,0.5);
+}
+
+/* Row 1: always on screen. */
+.profile-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px var(--sheet-pad) 4px;
+}
+.tavern-profile-card.profile-sheet .tavern-profile-back {
+  position: static;
+  padding: 6px 3px;
+}
+.profile-sheet-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: rgb(214,167,107);
+  font: 10px var(--font-display);
+  font-weight: 900;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+}
+.profile-sheet-mode::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Row 2: three panes of equal height. SHELL keeps its menus unclipped, so it
+   does not scroll; GHOST and SKILLS scroll inside themselves. */
+.tavern-profile-card.profile-sheet .tavern-profile-layout {
+  grid-template-columns: minmax(0, 0.86fr) minmax(0, 1.15fr) minmax(0, 0.86fr);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  gap: clamp(12px, 2.2vw, 30px);
+  min-height: 0;
+  padding: 4px var(--sheet-pad) 14px;
+}
+.tavern-profile-card.profile-sheet .tavern-profile-panel,
+.tavern-profile-card.profile-sheet .tavern-profile-center {
+  justify-content: flex-start;
+  min-height: 0;
+  max-height: none;
+}
+.tavern-profile-card.profile-sheet .tavern-profile-panel {
+  gap: 12px;
+  padding: 14px;
+}
+.tavern-profile-card.profile-sheet .tavern-profile-center {
+  gap: 8px;
+}
+.tavern-profile-card.profile-sheet .tavern-profile-panel-title {
+  flex: none;
+}
+.tavern-profile-card.profile-sheet .tavern-avatar-art.profile {
+  width: clamp(68px, 10vh, 96px);
+  height: clamp(68px, 10vh, 96px);
+}
+.tavern-profile-card.profile-sheet .hero-avatar-trigger:disabled {
+  opacity: 1;
+}
+.tavern-profile-card.profile-sheet .hero-avatar-trigger:disabled small {
+  display: none;
+}
+
+/* SHELL: the same labelled rows in both states; text swaps for controls. */
+.tavern-profile-card.profile-sheet .project-agent-shell-core {
+  flex: none;
+  align-content: start;
+  padding: 2px 0 0;
+}
+/* The provider block lines up with the Model and Effort rows under it. */
+.tavern-profile-card.profile-sheet .project-agent-shell-provider {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  justify-self: stretch;
+  justify-items: stretch;
+  margin: 0 0 5px;
+}
+.tavern-profile-card.profile-sheet .project-agent-shell-provider-copy {
+  justify-items: stretch;
+}
+.tavern-profile-card.profile-sheet .project-agent-shell-provider-select {
+  width: 100%;
+}
+.tavern-profile-card.profile-sheet .tavern-shell-provider-control {
+  justify-self: stretch;
+}
+.tavern-profile-card.profile-sheet .project-agent-shell-summary {
+  gap: 12px;
+}
+.tavern-profile-card.profile-sheet .project-agent-shell-summary code {
+  min-height: 35px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: none;
+  color: var(--text);
+  font: 15px/1.3 var(--font-sans);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.tavern-profile-card.profile-sheet .project-agent-shell-apply-note {
+  justify-self: start;
+  overflow: visible;
+  color: var(--text-3);
+  font: 12px/1.4 var(--font-sans);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+}
+
+/* Centre column: avatar, name, then GHOST takes what is left. */
+.profile-name-static {
+  flex: none;
+  max-width: 100%;
+  text-align: center;
+}
+.tavern-profile-card.profile-sheet .project-agent-name-editor {
+  flex: none;
+  width: 100%;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 0;
+  padding: 0;
+  background: none;
+}
+/* The title sits where the title line reads in the view state: between the
+   avatar and the name. */
+.tavern-profile-card.profile-sheet .tavern-profile-center .title-stamp {
+  flex: none;
+  margin-bottom: 0;
+}
+.tavern-profile-card.profile-sheet .project-agent-name-editor .surname-field {
+  grid-column: auto;
+  grid-row: auto;
+}
+.tavern-profile-card.profile-sheet .tavern-ghost-scroll {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  margin-top: 0;
+  padding: 11px;
+}
+.tavern-profile-card.profile-sheet .tavern-ghost-scroll .tavern-profile-panel-title img {
+  width: 30px;
+  height: 30px;
+}
+.tavern-profile-card.profile-sheet .tavern-ghost-preview,
+.tavern-profile-card.profile-sheet .tavern-ghost-scroll textarea {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+.tavern-profile-card.profile-sheet .tavern-ghost-preview {
+  padding: 9px 11px;
+  cursor: default;
+}
+.tavern-profile-card.profile-sheet .tavern-ghost-scroll textarea {
+  resize: none;
+}
+.profile-sheet-ghost-tools {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+}
+.profile-sheet-ghost-tools > span {
+  color: var(--text-3);
+  font: 11px/1.3 var(--font-sans);
+}
+.profile-sheet-ghost-tools .tavern-user-dreams:disabled {
+  cursor: default;
+  opacity: 0.42;
+  border-style: dashed;
+  background: rgba(154,123,196,0.06);
+}
+
+/* SKILLS */
+.profile-sheet-count {
+  flex: none;
+  margin-top: -6px;
+  color: var(--text-3);
+  font: 11px var(--font-sans);
+  font-weight: 600;
+  text-align: center;
+}
+.tavern-skill-row.static {
+  cursor: default;
+}
+.tavern-skill-tick {
+  width: 16px;
+  color: var(--copper-hi);
+  font: 13px var(--font-sans);
+  font-weight: 700;
+  text-align: center;
+}
+
+/* An overflowing pane always shows a thin scrollbar, so cut-off text reads as
+   "scroll", not "end". */
+.tavern-profile-card.profile-sheet .tavern-ghost-preview::-webkit-scrollbar,
+.tavern-profile-card.profile-sheet .tavern-ghost-scroll textarea::-webkit-scrollbar,
+.tavern-profile-card.profile-sheet .tavern-skill-list::-webkit-scrollbar,
+.tavern-profile-card.profile-sheet .tavern-profile-layout::-webkit-scrollbar {
+  width: 6px;
+}
+.tavern-profile-card.profile-sheet .tavern-ghost-preview::-webkit-scrollbar-thumb,
+.tavern-profile-card.profile-sheet .tavern-ghost-scroll textarea::-webkit-scrollbar-thumb,
+.tavern-profile-card.profile-sheet .tavern-skill-list::-webkit-scrollbar-thumb,
+.tavern-profile-card.profile-sheet .tavern-profile-layout::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: rgba(218,214,204,0.35);
+}
+
+/* Row 3: always on screen. The view state holds the page actions; the edit
+   state holds Cancel and Save. */
+.profile-sheet-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px 18px;
+  min-height: 56px;
+  padding: 8px var(--sheet-pad);
+  border-top: 1px solid var(--border);
+  background: rgba(21,20,18,0.67);
+}
+.profile-sheet-foot-left,
+.profile-sheet-foot-mid,
+.profile-sheet-foot-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.profile-sheet-foot-left { grid-column: 1; justify-self: start; }
+.profile-sheet-foot-mid { grid-column: 2; }
+.profile-sheet-foot-right { grid-column: 3; justify-self: end; max-width: 100%; }
+.profile-sheet-foot .tavern-remove-quiet {
+  flex: none;
+  margin: 0;
+  padding: 6px 4px;
+  white-space: nowrap;
+}
+.profile-sheet-foot .tavern-remove-quiet:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.profile-sheet-button {
+  flex: none;
+  min-height: 34px;
+  padding: 6px 15px;
+  border: 1px solid rgba(218,214,204,0.33);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.03);
+  color: var(--brass-bright);
+  font: 13px var(--font-sans);
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.profile-sheet-button:hover:enabled {
+  background: rgba(255,255,255,0.09);
+}
+.profile-sheet-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.profile-sheet-button.primary {
+  min-width: 84px;
+  border-color: rgba(132,160,145,0.7);
+  background: rgba(132,160,145,0.22);
+  color: #dfeadf;
+}
+.profile-sheet-button.primary:hover:enabled {
+  background: rgba(132,160,145,0.32);
+}
+.profile-sheet-invite {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+/* Wide enough for "Already in Tavern", so the label change does not move it. */
+.profile-sheet-invite .profile-sheet-button {
+  min-width: 156px;
+}
+/* Floats beside the button so the button never shifts; shows for a few
+   seconds, then fades. */
+.profile-sheet-toast {
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--copper-hi);
+  font: 12px var(--font-sans);
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 500ms ease;
+}
+.profile-sheet-toast[data-show="true"] {
+  opacity: 1;
+  transition-duration: 150ms;
+}
+.profile-sheet-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--copper-hi);
+  font: 12px var(--font-sans);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-sheet-status.dirty { color: rgb(214,167,107); }
+.profile-sheet-status.idle { color: var(--text-3); }
+.profile-sheet-status.blocked,
+.profile-sheet-status.error { color: var(--terra-hi); }
+.profile-sheet-status.error {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.profile-sheet-status button {
+  flex: none;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--brass-bright);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* Unsaved-changes prompt. It sits inside the profile overlay. */
+.profile-unsaved-layer .kota-confirm-actions {
+  flex-wrap: wrap;
+  margin-top: 24px;
+}
+.profile-unsaved-layer .kota-confirm-actions .profile-unsaved-discard {
+  margin-right: auto;
+  border-color: transparent;
+  background: transparent;
+  color: var(--terra-hi);
+}
+.profile-unsaved-layer .kota-confirm-actions .profile-unsaved-discard:hover {
+  border-color: rgba(186,138,115,0.4);
+}
+
+/* One column, or a short window: the body becomes the single scroller. The
+   header and footer stay put. */
+@media (max-width: 1040px), (max-height: 720px) {
+  .tavern-profile-card.profile-sheet .tavern-profile-layout {
+    grid-template-rows: none;
+    grid-auto-rows: max-content;
+    align-items: start;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .tavern-profile-card.profile-sheet .tavern-ghost-scroll,
+  .tavern-profile-card.profile-sheet .tavern-ghost-preview {
+    flex: none;
+    overflow: visible;
+  }
+  .tavern-profile-card.profile-sheet .tavern-ghost-scroll textarea {
+    flex: none;
+    min-height: 190px;
+    resize: vertical;
+  }
+  .tavern-profile-card.profile-sheet .tavern-skill-list {
+    flex: none;
+    overflow: visible;
+  }
+}
+@media (max-width: 1040px) {
+  .tavern-profile-card.profile-sheet .tavern-profile-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+  .tavern-profile-card.profile-sheet .tavern-profile-panel,
+  .tavern-profile-card.profile-sheet .tavern-profile-center {
+    width: min(560px, 100%);
+    justify-self: center;
+  }
+}
+@media (max-width: 670px) {
+  .tavern-profile-card.profile-sheet { --sheet-pad: 12px; border-radius: 12px; }
+  .tavern-profile-card.profile-sheet .project-agent-name-editor {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .profile-sheet-toast {
+    left: 50%;
+    top: auto;
+    bottom: calc(100% + 8px);
+    transform: translateX(-50%);
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: #151412;
+  }
+}
+@media (max-width: 520px) {
+  .profile-sheet-foot {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+  }
+  .profile-sheet-foot-right { margin-left: auto; }
+}

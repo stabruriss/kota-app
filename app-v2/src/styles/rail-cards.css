@@ -1,0 +1,108 @@
+/* Right column system cards: one height, piles, drag. Logic lives in lib/rail-deck.ts. */
+.system-agent-stack { --rail-card: 112px; --rail-step: 10px; --rail-gap: 8px; position: relative; isolation: isolate; }
+.system-agent-stack > .sr-footer-slot { order: 1000; flex: none; }
+
+/* ── Slots ────────────────────────────────────────────────────────────
+   A card's slot never leaves the list. The top card of a pile owns the
+   height; the cards under it sit in zero-height slots right behind it. */
+.rail-slot { position: relative; flex: none; min-width: 0; z-index: calc(6 - var(--shown)); }
+.rail-slot.is-top { padding-bottom: calc(var(--depth) * var(--rail-step)); }
+.rail-slot.is-under { height: 0; margin-top: calc(-1 * var(--rail-gap)); pointer-events: none; }
+.rail-slot.is-deep { visibility: hidden; }
+.rail-lift { position: relative; transform-origin: 50% 100%; }
+.rail-slot.is-under > .rail-lift { position: absolute; inset-inline: 0; bottom: calc((var(--depth) - var(--shown)) * var(--rail-step)); transform: scale(calc(1 - .0436 * var(--shown))); }
+.rail-raise { position: relative; border-radius: var(--r-md); background: #1c1d1f; transition: transform 170ms cubic-bezier(.2,.8,.2,1),box-shadow 220ms ease,filter 200ms ease,background-color 260ms ease; }
+.rail-slot.in-pile .rail-raise { box-shadow: 0 3px 7px -3px rgba(0,0,0,.8); }
+.rail-slot.is-under .rail-raise { background: #26262a; }
+/* One overlay does the shading of buried cards and the hover rim. */
+.rail-raise::after { content: ''; position: absolute; inset: 0; z-index: 3; border-radius: inherit; pointer-events: none; background-color: rgba(9,9,11,calc(.16 * var(--shown)));
+  box-shadow: inset 0 0 0 1px rgba(226,211,180,var(--rim,0)),inset 0 1px 7px rgba(226,211,180,calc(var(--rim,0) * .2)); transition: box-shadow 140ms ease-out,background-color 260ms ease; }
+
+/* ── Every card at one height ─────────────────────────────────────── */
+.rail-raise > :first-child { grid-template-rows: minmax(34px,auto); align-content: start; gap: 6px; height: var(--rail-card); padding: 12px 10px; }
+/* Content that needs more room gets it only while its card is on top. */
+.rail-slot[data-expanded].is-top .rail-raise > :first-child { height: auto; min-height: var(--rail-card); }
+.rail-slot.is-under .rail-raise > :first-child { overflow: hidden; }
+
+.rail-raise .violet-summary-bullets { height: 36px; max-height: none; padding: 1px 7px; line-height: 16px; scrollbar-width: thin; scrollbar-color: #655f6a transparent; }
+.rail-raise .violet-summary-bullets li + li { margin-top: 0; }
+.rail-raise .violet-card:has(.violet-summary-fault) .violet-summary-bullets { height: 20px; }
+.rail-raise .violet-summary-fault { margin-top: -4px; }
+
+.rail-raise .bartender-copy { gap: 1px; }
+/* The line may run on into the empty action row; next to an action it keeps three rows, the last one with a link, and scrolls. */
+.rail-raise .bartender-bubble { line-height: 12px; }
+.rail-raise .bartender-card:has(.bartender-actions > *) .bartender-bubble { max-height: 40px; }
+.rail-raise .bartender-actions { display: flex; flex-wrap: wrap; }
+.rail-raise .bartender-actions > * { flex: 1 1 0; min-width: 0; }
+.rail-raise .bartender-actions > .bartender-pull-conflict-picker { flex-basis: 100%; }
+.bartender-action-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+.rail-raise .ember-status { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+
+.rail-raise .dance-sentinel-row { margin-top: 0; }
+
+.rail-slot .rail-raise > .lm-card .lm-latest { gap: 0; padding: 0; border: 0; background: none; }
+.rail-raise .lm-latest-meta { line-height: 1.25; }
+.rail-raise .lm-latest-text { line-height: 15px; }
+.rail-raise .lm-muted-note { line-height: 14px; }
+
+/* ── Hover: a thin rim, a hair of lift, the pile breathes open ─────── */
+.rail-slot[data-hot] .rail-raise { --rim: .3; }
+.rail-slot[data-hot].is-top .rail-raise { transform: translateY(-1px); box-shadow: 0 9px 16px -11px rgba(0,0,0,.9); }
+.rail-slot[data-hot].is-under .rail-raise { transform: translateY(calc(var(--shown) * 1.5px)); }
+
+/* ── Corner knobs on a pile: flip top left, deal top right ─────────── */
+.rail-knob { position: absolute; top: -7px; z-index: 5; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 1px solid #8a7a61; border-radius: 50%; color: #e6d3ae; cursor: pointer;
+  background: radial-gradient(circle at 34% 28%,#615849,#37332c 62%,#262522); box-shadow: 0 0 0 1px rgba(20,20,19,.6),0 2px 5px rgba(0,0,0,.65),inset 0 1px rgba(255,240,210,.2);
+  opacity: 0; transform: scale(.45); pointer-events: none; transition: opacity 110ms ease-out,transform 220ms cubic-bezier(.34,1.56,.64,1),color 120ms,border-color 120ms,filter 120ms; }
+.rail-knob svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+/* The hit area grows sideways into the column's margin: not up, where the next card is 8 px away, and not into the card. */
+.rail-knob::before { content: ''; position: absolute; border-radius: 50%; }
+.rail-flip { left: -7px; }
+.rail-flip::before { inset: 0 -1px -1px -5px; }
+.rail-deal { right: -7px; transition-delay: 40ms; }
+.rail-deal::before { inset: 0 -5px -1px -1px; }
+.rail-slot[data-hot] .rail-knob,.rail-knob:focus-visible { opacity: 1; transform: none; pointer-events: auto; }
+.rail-slot[data-hot] .rail-knob:hover,.rail-knob:focus-visible { color: #fff3d6; border-color: #edc086; filter: brightness(1.12); transform: scale(1.12); transition-delay: 0ms; outline: none; }
+.rail-slot[data-hot] .rail-knob:active { transform: scale(.9); transition-duration: 70ms; }
+.rail-slot[data-through] { pointer-events: none; }
+.rail-tip { position: absolute; z-index: 6; top: -10px; left: 21px; width: max-content; max-width: calc(100% - 48px); padding: 2px 9px; border: 1px solid #716653; border-radius: 9px; background: #252522; color: #e5d9c4; font: 11px/1.5 var(--font-sans); white-space: pre-line; box-shadow: 0 6px 16px rgba(0,0,0,.6); pointer-events: none;
+  opacity: 0; transform: translateY(-3px); transition: opacity 120ms,transform 120ms; }
+.rail-flip:is(:hover,:focus-visible) + .rail-tip { opacity: 1; transform: none; transition-delay: 520ms; }
+
+/* ── A lamp on the exposed edge of a buried card that has something to say ── */
+.rail-lamp { position: absolute; z-index: 4; left: 26px; bottom: calc((var(--rail-step) - 4px) / 2); width: 4px; height: 4px; border-radius: 50%; background: #edc086; box-shadow: 0 0 5px rgba(237,192,134,.85); pointer-events: none; }
+.rail-lamp.fault { background: #f0a091; box-shadow: 0 0 6px rgba(240,120,100,.95); animation: rail-lamp 1.9s ease-in-out infinite; }
+@keyframes rail-lamp { 50% { opacity: .35; } }
+
+/* ── Drag ─────────────────────────────────────────────────────────── */
+.system-agent-stack[data-carrying],.system-agent-stack[data-carrying] * { cursor: grabbing !important; }
+.system-agent-stack[data-carrying] .rail-knob,.system-agent-stack[data-carrying] .rail-tip { display: none; }
+.rail-slot[data-dragging] { z-index: calc(60 - var(--shown)); }
+.rail-slot[data-dragging] .rail-raise { --rim: .5; transform: scale(1.02) rotate(var(--tilt,0deg)); transition-duration: 190ms,240ms,200ms,260ms; }
+.rail-slot[data-dragging].is-top .rail-raise { box-shadow: 0 20px 30px -14px rgba(0,0,0,.95),0 5px 12px rgba(0,0,0,.45); }
+.rail-slot[data-dragging][data-docking] .rail-raise { transform: scale(.985); }
+.rail-slot[data-aborting] .rail-raise { filter: saturate(.45) brightness(.82); }
+/* Where the pile lands if released now. */
+.rail-slot[data-dragging].is-top::before { content: ''; position: absolute; inset: 0 0 calc(var(--depth) * var(--rail-step)) 0; border: 1px dashed rgba(237,192,134,.45); border-radius: var(--r-md);
+  background: repeating-linear-gradient(-45deg,rgba(237,192,134,.05) 0 5px,transparent 5px 10px); animation: rail-socket 200ms ease-out both; transition: opacity 180ms ease; }
+.system-agent-stack[data-armed] .rail-slot[data-dragging]::before { opacity: .25; }
+@keyframes rail-socket { from { opacity: 0; transform: scale(.97); } }
+/* The pile that takes the carried one if released now. */
+.rail-lift::after { content: ''; position: absolute; inset: -3px; z-index: 4; border: 2px solid #9ecbbc; border-radius: 11px; box-shadow: 0 0 14px rgba(120,210,175,.38),inset 0 0 10px rgba(120,210,175,.16); opacity: 0; pointer-events: none; transition: opacity 130ms ease-in; }
+.rail-slot[data-target] > .rail-lift::after { opacity: 1; }
+.rail-slot[data-target] .rail-raise { transform: scale(.975); }
+.rail-slot[data-moving] .rail-raise { box-shadow: 0 12px 22px -12px rgba(0,0,0,.9); }
+.rail-drop-cue { position: absolute; z-index: 8; left: 50%; bottom: 28px; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 3px 11px 3px 9px; border: 1px solid #6c5e49; border-radius: 999px; background: rgba(30,28,24,.95); color: #edc086; white-space: nowrap; font: 600 11px/1.6 var(--font-sans); box-shadow: 0 6px 16px rgba(0,0,0,.55); pointer-events: none; animation: rail-cue 160ms ease-out both; }
+.rail-drop-cue[hidden] { display: none; }
+.rail-drop-cue::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+.rail-drop-cue[data-kind=stack] { color: #9ecbbc; border-color: #5f8676; }
+.rail-drop-cue[data-kind=home] { color: #bdb5a8; border-color: #55514a; }
+@keyframes rail-cue { from { opacity: 0; transform: translate(-50%,4px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-raise,.rail-raise::after,.rail-knob,.rail-lift::after,.rail-tip { transition: none; }
+  .rail-slot[data-dragging].is-top::before,.rail-drop-cue,.rail-lamp.fault { animation: none; }
+  .rail-slot[data-hot] .rail-raise,.rail-slot[data-dragging] .rail-raise,.rail-slot[data-target] .rail-raise { transform: none; }
+}

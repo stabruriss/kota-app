@@ -612,7 +612,11 @@ describe('Composer · bottom input bar', () => {
 // ═════════════════════════════ shell landmarks ═════════════════════════════
 describe('M1 · canvas shell landmarks', () => {
   it('renders the top bar with real project controls + Tavern button', () => {
+    const ghStatus = vi.spyOn(ptyClient, 'ghAuthStatus');
     render(<App />);
+    // The bar shows no GitHub state, so nothing asks gh for it.
+    expect(ghStatus).not.toHaveBeenCalled();
+    ghStatus.mockRestore();
     const bar = screen.getByRole('banner', { name: 'Project bar' });
     expect(bar).toBeInTheDocument();
     // Placeholder project tabs are not mounted; only real workspace tabs appear.
@@ -1652,8 +1656,8 @@ describe('M1 · canvas shell landmarks', () => {
       await userEvent.click(autoSync);
       expect(autoSync).toHaveAttribute('aria-checked', 'true');
       expect(localStorage.storage.get('kota-v2.bartender.auto-sync.proj')).toBe('true');
-      expect(await screen.findByText('Sync 3 changed files in room')).toBeInTheDocument();
-      expect(screen.getByText('Push 2 changes to GitHub')).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: 'Sync 3 changed files in room' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Push 2 changes to GitHub' })).toBeInTheDocument();
     } finally {
       localStorage.restore();
     }
@@ -1976,13 +1980,13 @@ describe('M1 · canvas shell landmarks', () => {
       />,
     );
 
-    await userEvent.click(await screen.findByText('Sync 3 changed files in room'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Sync 3 changed files in room' }));
     const blocker = await screen.findByRole('button', { name: 'Alice resolving' });
     expect(blocker).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Unlock' })).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByText('Sync 3 changed files in room')).not.toBeInTheDocument();
-      expect(screen.queryByText('Push 2 changes to GitHub')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Sync 3 changed files in room' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Push 2 changes to GitHub' })).not.toBeInTheDocument();
     });
 
     await userEvent.click(blocker);
@@ -2013,8 +2017,8 @@ describe('M1 · canvas shell landmarks', () => {
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: 'Alice resolving' })).not.toBeInTheDocument();
     });
-    expect(await screen.findByText('Sync 3 changed files in room')).toBeInTheDocument();
-    expect(screen.getByText('Push 2 changes to GitHub')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Sync 3 changed files in room' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Push 2 changes to GitHub' })).toBeInTheDocument();
   });
 });
 
@@ -4082,6 +4086,79 @@ describe('W3+W5 · composer target picker', () => {
     expect(details.open).toBe(true);
   });
 
+  it('folds Kota Local tool images while other artifacts stay open', async () => {
+    const projectRoot = '/tmp/kota-local-tool-images';
+    const imageDir = 'project-memory/attachments/violet/kota-local';
+    vi.stubGlobal('IntersectionObserver', undefined);
+    try {
+      vi.spyOn(ptyClient, 'violetResolveFileRef').mockImplementation(async ({ path }) => ({
+        path: `${projectRoot}/${path}`,
+        isDir: false,
+      }));
+      vi.spyOn(ptyClient, 'fileImageDataUrl').mockResolvedValue('data:image/png;base64,aW1hZ2U=');
+      vi.spyOn(ptyClient, 'readVioletRoomCache').mockResolvedValue({
+        messages: [
+          {
+            id: 'local-tool-images',
+            sessionId: 'local-session',
+            agentId: 'li',
+            shell: 'kota-local',
+            role: 'assistant',
+            kind: 'artifact',
+            timestamp: '2026-05-20T10:00:00.000Z',
+            text: `2 images\n\n${imageDir}/a.png\n\n${imageDir}/b.jpg`,
+            sourcePath: null,
+            nativeEventId: 'local-session/shots:images',
+          },
+          {
+            id: 'codex-generated-image',
+            sessionId: 'codex-session',
+            agentId: 'li',
+            shell: 'codex',
+            role: 'assistant',
+            kind: 'artifact',
+            timestamp: '2026-05-20T10:00:01.000Z',
+            text: 'Generated image\n\nproject-memory/attachments/violet/codex-generated/c.png',
+            sourcePath: null,
+            nativeEventId: 'codex-image-generation-v1:call-1',
+          },
+        ],
+        sources: [],
+        workEvents: [],
+        rawLogDir: `${projectRoot}/project-memory/raw_logs`,
+        chathistoryDir: `${projectRoot}/project-memory/chathistory`,
+        syncedAt: '2026-05-20T10:00:01.000Z',
+      });
+
+      render(
+        <VioletRoomPanel
+          projectRoot={projectRoot}
+          agentIds={['li']}
+          agentMeta={{
+            li: {
+              name: 'Li',
+              emoji: '◇',
+              role: 'Project agent',
+              hue: 'var(--brass-bright)',
+            },
+          }}
+        />,
+      );
+
+      const summary = await screen.findByText('2 images');
+      const details = summary.closest('details') as HTMLDetailsElement;
+      expect(details).toHaveClass('violet-tool-images-details');
+      expect(details.open).toBe(false);
+      expect(screen.getByText('Generated image').closest('details')).toBeNull();
+
+      fireEvent.click(details.querySelector('summary') as HTMLElement);
+      expect(details.open).toBe(true);
+      expect(await within(details).findAllByRole('button', { name: /^[ab]\.(png|jpg)$/ })).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('auto-loads older pages when a target filter is empty in the latest page', async () => {
     const projectRoot = '/tmp/kota-filter-backfill';
     const latestPageFirstTimestamp = '2026-05-20T10:00:00.000Z';
@@ -5374,7 +5451,7 @@ describe('M6.A · quick incarnate picker', () => {
     await userEvent.click(screen.getByText('New Hero'));
     const dialog = screen.getByRole('dialog', { name: /New Hero profile/ });
     expect(dialog).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Edit Shell' }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Edit' }));
     await userEvent.click(within(dialog).getByRole('button', { name: /Provider/ }));
     expect(within(dialog).getAllByText('BETA')).toHaveLength(4);
     await userEvent.click(within(dialog).getByRole('button', { name: 'Change avatar' }));
@@ -5382,6 +5459,9 @@ describe('M6.A · quick incarnate picker', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: 'Change avatar' }));
     expect(within(dialog).getByRole('radio', { name: 'Glass' })).toHaveAttribute('aria-checked', 'true');
     expect(screen.queryByText('Recruit Hero')).not.toBeInTheDocument();
+    // Remove Hero belongs to the view state; the staged avatar is saved first.
+    expect(screen.queryByText('Remove Hero')).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
     await userEvent.click(screen.getByText('Remove Hero'));
     expect(screen.getByText('Drifters')).toBeInTheDocument();
     expect(screen.getByText('Call Back')).toBeInTheDocument();
@@ -5394,7 +5474,7 @@ describe('M6.A · quick incarnate picker', () => {
       render(<App />);
       await userEvent.click(screen.getByTestId('tavern-btn'));
       await screen.findByTestId('tavern-page');
-      await userEvent.click(screen.getByRole('button', { name: /System Heros/i }));
+      expect(screen.getByRole('button', { name: /System Heroes/i })).toHaveAttribute('aria-expanded', 'true');
       await userEvent.click(screen.getByRole('button', { name: /Magi/i }));
       const dialog = screen.getByRole('dialog', { name: /Magi profile/i });
 
@@ -6775,8 +6855,8 @@ describe('Project agent hydration recovery', () => {
         await userEvent.click(within(screen.getByRole('menu')).getByText('Detail'));
         const dialog = await screen.findByRole('dialog', { name: 'Project agent detail' });
         const shell = within(dialog).getByRole('region', { name: 'SHELL' });
-        await waitFor(() => expect(within(shell).getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
-        await userEvent.click(within(shell).getByRole('button', { name: 'Edit SHELL' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
+        await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
         return {
           dialog, shell, save, startFresh, spawn, resolveLaunch,
           savedDetail: () => savedDetail,
@@ -6808,7 +6888,7 @@ describe('Project agent hydration recovery', () => {
         expect(task.save).not.toHaveBeenCalled();
         expect(freshDialog()).not.toBeInTheDocument();
 
-        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
         expect(task.save).toHaveBeenCalledOnce();
         expect(task.savedDetail().provider).toBe('codex');
         expect(freshDialog()).not.toBeInTheDocument();
@@ -6839,7 +6919,7 @@ describe('Project agent hydration recovery', () => {
       const task = await openProviderDetail();
       try {
         await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
-        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
         const dialog = await screen.findByRole('dialog', { name: 'Start fresh session for Alpha?' });
         await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
         expect(freshDialog()).not.toBeInTheDocument();
@@ -6847,14 +6927,14 @@ describe('Project agent hydration recovery', () => {
         expect(task.startFresh).not.toHaveBeenCalled();
         expect(task.spawn).not.toHaveBeenCalled();
 
-        await userEvent.click(within(task.shell).getByRole('button', { name: 'Edit SHELL' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
         expect(within(task.shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('claude');
         const model = within(task.shell).getByPlaceholderText('Exact model ID');
         await userEvent.clear(model);
         await userEvent.type(model, 'next-claude-model');
         await userEvent.keyboard('{Enter}');
-        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
-        await waitFor(() => expect(within(task.shell).getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
         expect(task.save).toHaveBeenCalledTimes(2);
         expect(task.savedDetail()).toMatchObject({ provider: 'claude', model: 'next-claude-model' });
         expect(freshDialog()).not.toBeInTheDocument();
@@ -6874,8 +6954,15 @@ describe('Project agent hydration recovery', () => {
           await userEvent.type(input, change === 'model' ? 'private-codex-model' : 'high');
           await userEvent.keyboard('{Enter}');
         }
-        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
-        await waitFor(() => expect(within(task.shell).getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+        if (change === 'unchanged') {
+          // Back on the saved provider there is nothing to save, and Cancel leaves without asking.
+          expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+          await userEvent.click(within(task.dialog).getByRole('button', { name: 'Cancel' }));
+          expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+        } else {
+          await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+        }
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
         expect(task.save).toHaveBeenCalledTimes(change === 'unchanged' ? 0 : 1);
         expect(task.savedDetail().provider).toBe('codex');
         expect(freshDialog()).not.toBeInTheDocument();
@@ -6884,16 +6971,19 @@ describe('Project agent hydration recovery', () => {
       } finally { task.cleanup(); }
     });
 
-    it('does not prompt for an avatar save while another provider is only staged', async () => {
+    it('does not prompt for an avatar-only save, and saves nothing while a provider is only staged', async () => {
       const task = await openProviderDetail();
       try {
         await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
         await userEvent.click(within(task.dialog).getByRole('button', { name: 'Change avatar' }));
         await userEvent.click(within(task.dialog).getAllByRole('radio').find((option) => option.getAttribute('aria-checked') !== 'true')!);
+        expect(task.save).not.toHaveBeenCalled();
+        await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'codex');
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
         await waitFor(() => expect(task.save).toHaveBeenCalledOnce());
         await within(task.dialog).findByText('Saved');
         expect(task.save.mock.calls[0][0].provider).toBe('codex');
-        expect(within(task.shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('claude');
+        expect(task.save.mock.calls[0][0].avatarId).toEqual(expect.any(String));
         expect(freshDialog()).not.toBeInTheDocument();
         expect(task.startFresh).not.toHaveBeenCalled();
         expect(task.spawn).not.toHaveBeenCalled();
@@ -6906,7 +6996,7 @@ describe('Project agent hydration recovery', () => {
       task.save.mockImplementationOnce(() => new Promise((_, reject) => { failSave = reject; }));
       try {
         await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
-        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
         expect(task.save).toHaveBeenCalledOnce();
         expect(freshDialog()).not.toBeInTheDocument();
         await act(async () => { failSave(new Error('fixture save failed')); });
@@ -6924,11 +7014,11 @@ describe('Project agent hydration recovery', () => {
       task.save.mockResolvedValueOnce(task.savedDetail());
       try {
         await userEvent.selectOptions(within(task.shell).getByRole('combobox', { name: 'Provider' }), 'claude');
-        await userEvent.click(within(task.shell).getByRole('button', { name: 'Save SHELL' }));
-        await waitFor(() => expect(within(task.shell).getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
         expect(task.save).toHaveBeenCalledOnce();
         expect(task.save.mock.calls[0][0].provider).toBe('claude');
-        await userEvent.click(within(task.shell).getByRole('button', { name: 'Edit SHELL' }));
+        await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
         expect(within(task.shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('codex');
         expect(freshDialog()).not.toBeInTheDocument();
         expect(task.startFresh).not.toHaveBeenCalled();

@@ -181,6 +181,143 @@ fn history_image_only_tool_row_remains_a_cursor_and_parent_after_projection() {
     assert_eq!(project.texts().iter().filter(|text| text.as_str() == "Reply after image").count(), 1);
 }
 
+const TOOL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z6KAAAAAASUVORK5CYII=";
+
+fn tool_result_entry(id: &str, parent: &str, timestamp: &str, content: JsonValue) -> JsonValue {
+    json!({
+        "type": "message",
+        "id": id,
+        "parentId": parent,
+        "timestamp": timestamp,
+        "message": {
+            "role": "toolResult",
+            "toolCallId": format!("call-{id}"),
+            "toolName": "codemode",
+            "content": content,
+            "isError": false,
+            "timestamp": 1790899260000i64,
+        },
+    })
+}
+
+fn tool_image_artifacts(project: &LocalProject) -> Vec<VioletChatMessage> {
+    project.messages().into_iter().filter(|message| message.kind == "artifact").collect()
+}
+
+#[test]
+fn tool_result_images_become_one_stored_artifact_per_tool_result_before_the_reply() {
+    let project = LocalProject::new("tool-images");
+    let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+    let input = custom_entry("input", None, "kota.user", json!("Find a hard shell"),
+        kota_input_details("tool-images", "2026-10-02T00:05:00Z", false));
+    let entries = vec![
+        input,
+        tool_result_entry("shots", "input", "2026-10-02T00:05:01Z", json!([
+            {"type": "text", "text": "[Image saved to /tmp/pi-codemode-a.png (image/png, 1KB)]"},
+            {"type": "image", "data": TOOL_PNG, "mimeType": "image/png"},
+            {"type": "image", "data": base64::Engine::encode(&BASE64_STANDARD, jpeg), "mimeType": "image/jpeg"},
+        ])),
+        tool_result_entry("listing", "shots", "2026-10-02T00:05:02Z",
+            json!([{"type": "text", "text": "Saved the catalog photo to /tmp/catalog.png"}])),
+        assistant_entry("reply", "listing", "2026-10-02T00:05:03Z", "See the last image above."),
+    ];
+    let scope = project.scope(1);
+    ingest_entries(&scope, &full_read(&entries, "reply")).unwrap();
+
+    let artifacts = tool_image_artifacts(&project);
+    assert_eq!(artifacts.len(), 1, "a path named in tool text is never followed");
+    let artifact = &artifacts[0];
+    assert_eq!((artifact.role.as_str(), artifact.shell.as_str()), ("assistant", KOTA_LOCAL_SHELL));
+    assert_eq!(artifact.native_event_id.as_deref(), Some(format!("{SESSION}/shots:images").as_str()));
+    let parts = artifact.text.split("\n\n").collect::<Vec<_>>();
+    assert_eq!(parts[0], "2 images");
+    assert_eq!(parts.len(), 3);
+    for (path, extension) in [(parts[1], ".png"), (parts[2], ".jpg")] {
+        assert!(path.starts_with("project-memory/attachments/violet/kota-local/"), "{path}");
+        assert!(path.ends_with(extension), "{path}");
+    }
+    let png = base64::Engine::decode(&BASE64_STANDARD, TOOL_PNG).unwrap();
+    assert_eq!(fs::read(project.root.join(parts[1])).unwrap(), png);
+    assert_eq!(fs::read(project.root.join(parts[2])).unwrap(), jpeg);
+
+    let texts = project.texts();
+    let artifact_index = texts.iter().position(|text| text == &artifact.text).unwrap();
+    let reply_index = texts.iter().position(|text| text == "See the last image above.").unwrap();
+    assert!(artifact_index < reply_index);
+    assert_eq!(turn_credits(&project), 1, "only the reply counts as a turn");
+
+    // Overlapping and fresh-state reads keep one artifact and one stored file per image.
+    ingest_entries(&scope, &since_read(&entries[1..], "reply", "input")).unwrap();
+    fs::remove_dir_all(local_state_dir(&project.root)).unwrap();
+    ingest_entries(&scope, &full_read(&entries, "reply")).unwrap();
+    assert_eq!(tool_image_artifacts(&project).len(), 1);
+    let stored = fs::read_dir(project.root.join(KOTA_LOCAL_TOOL_IMAGE_DIR)).unwrap().count();
+    assert_eq!(stored, 2);
+}
+
+#[test]
+fn tool_results_without_recognizable_image_bytes_add_nothing() {
+    let project = LocalProject::new("tool-images-none");
+    let input = custom_entry("input", None, "kota.user", json!("Check the page"),
+        kota_input_details("tool-images-none", "2026-10-02T00:05:00Z", false));
+    let entries = vec![
+        input,
+        tool_result_entry("text", "input", "2026-10-02T00:05:01Z",
+            json!([{"type": "text", "text": "![chart](/tmp/chart.png)"}])),
+        tool_result_entry("garbled", "text", "2026-10-02T00:05:02Z", json!([
+            {"type": "image", "data": base64::Engine::encode(&BASE64_STANDARD, b"not an image"), "mimeType": "image/png"},
+            {"type": "image", "data": "%%%", "mimeType": "image/png"},
+            {"type": "image", "data": TOOL_PNG, "mimeType": "image/png"},
+        ])),
+        assistant_entry("reply", "garbled", "2026-10-02T00:05:03Z", "Done."),
+    ];
+    ingest_entries(&project.scope(1), &full_read(&entries, "reply")).unwrap();
+    let artifacts = tool_image_artifacts(&project);
+    assert_eq!(artifacts.len(), 1);
+    assert!(artifacts[0].text.starts_with("1 image\n\nproject-memory/attachments/violet/kota-local/"));
+    assert!(artifacts[0].text.ends_with(".png"));
+}
+
+#[test]
+fn a_tool_image_identical_to_a_composer_upload_is_neither_stored_nor_shown() {
+    let project = LocalProject::new("tool-images-upload");
+    let composer = project.root.join(COMPOSER_ATTACHMENT_DIR);
+    let png = base64::Engine::decode(&BASE64_STANDARD, TOOL_PNG).unwrap();
+    let png_digest = format!("{:x}", Sha256::digest(&png));
+    let upload = composer.join(format!("att_{}_0a1b2c3d", &png_digest[..12]));
+    fs::create_dir_all(&upload).unwrap();
+    fs::write(upload.join("original.png"), &png).unwrap();
+    fs::write(upload.join("manifest.json"), json!({"sha256": png_digest}).to_string()).unwrap();
+    // A matching 12-digit prefix with another full digest is a different upload.
+    let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+    let jpeg_digest = format!("{:x}", Sha256::digest(jpeg));
+    let other = composer.join(format!("att_{}_ffffffff", &jpeg_digest[..12]));
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("manifest.json"), json!({"sha256": "0".repeat(64)}).to_string()).unwrap();
+
+    let input = custom_entry("input", None, "kota.user", json!("Look at my screenshot"),
+        kota_input_details("tool-images-upload", "2026-10-02T00:05:00Z", false));
+    let png_block = json!({"type": "image", "data": TOOL_PNG, "mimeType": "image/png"});
+    let jpeg_block = json!({"type": "image", "data": base64::Engine::encode(&BASE64_STANDARD, jpeg), "mimeType": "image/jpeg"});
+    let entries = vec![
+        input,
+        tool_result_entry("upload-only", "input", "2026-10-02T00:05:01Z", json!([png_block.clone()])),
+        tool_result_entry("mixed", "upload-only", "2026-10-02T00:05:02Z", json!([png_block, jpeg_block])),
+        assistant_entry("reply", "mixed", "2026-10-02T00:05:03Z", "Compared both."),
+    ];
+    ingest_entries(&project.scope(1), &full_read(&entries, "reply")).unwrap();
+
+    let artifacts = tool_image_artifacts(&project);
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].native_event_id.as_deref(), Some(format!("{SESSION}/mixed:images").as_str()));
+    assert_eq!(
+        artifacts[0].text,
+        format!("1 image\n\n{KOTA_LOCAL_TOOL_IMAGE_DIR}/{jpeg_digest}.jpg")
+    );
+    let stored = fs::read_dir(project.root.join(KOTA_LOCAL_TOOL_IMAGE_DIR)).unwrap().count();
+    assert_eq!(stored, 1);
+}
+
 #[test]
 fn long_local_endturn_saves_full_markdown_once_with_bounded_history() {
     let project = LocalProject::new("overflow");

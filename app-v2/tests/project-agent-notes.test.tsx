@@ -26,19 +26,20 @@ function setup(exists = true) {
 }
 afterEach(() => vi.restoreAllMocks());
 
-it('opens this offline incarnation from inside GHOST without saving or discarding its draft', async () => {
+it('opens this offline incarnation from inside GHOST without saving or leaving, and only outside the edit state', async () => {
   const { open, save, close, container } = setup();
   const button = await screen.findByRole('button', { name: 'View notes' });
   await waitFor(() => expect(button).toBeEnabled());
   expect(container.querySelector('.tavern-ghost-scroll')).toContainElement(button);
-  fireEvent.click(screen.getByRole('button', { name: 'Edit GHOST' }));
-  const draft = screen.getByRole('textbox');
-  fireEvent.change(draft, { target: { value: 'Unsaved GHOST draft' } });
   fireEvent.click(button);
   await waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith({ agentId: 'agent-piner', projectRoot }));
-  expect(draft).toHaveValue('Unsaved GHOST draft');
   expect(save).not.toHaveBeenCalled();
   expect(close).not.toHaveBeenCalled();
+  // The edit state holds a GHOST draft, so the entry steps aside until Save or Cancel.
+  fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'GHOST text' }), { target: { value: 'Unsaved GHOST draft' } });
+  expect(screen.queryByRole('button', { name: 'View notes' })).not.toBeInTheDocument();
+  expect(save).not.toHaveBeenCalled();
 });
 
 it('disables the missing-file entry and never invokes open', async () => {

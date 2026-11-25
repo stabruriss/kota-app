@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 use crate::integrations::ProjectConnection;
 
 pub const HOST: &str = "github.com";
-const GH_CANDIDATES: [&str; 3] = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
+pub(crate) const GH_CANDIDATES: [&str; 3] = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
+/// Left out of every gh Kota starts here (measured with gh 2.83.2). With a token variable gh
+/// refuses to sign in or switch accounts; with a debug variable set to `api` it prints the new
+/// account's token into the output the sign-in dialog shows.
+const GH_REMOVED_ENV: [&str; 4] = ["GH_TOKEN", "GITHUB_TOKEN", "GH_DEBUG", "DEBUG"];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,14 +49,18 @@ impl Store {
 pub trait Gh {
     /// The token gh stores for this login, without asking the network.
     fn token(&self, login: &str) -> Option<String>;
-    fn logins(&self) -> Result<GhLogins>;
+    /// The account gh itself uses now, without asking the network: an expired sign-in
+    /// still counts, where `gh auth status` would report a failure instead of a login.
+    fn active(&self) -> Result<Option<String>>;
     fn switch(&self, login: &str) -> Result<()>;
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct GhLogins {
-    pub logins: Vec<String>,
-    pub active: Option<String>,
+pub(crate) fn gh_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    for key in GH_REMOVED_ENV {
+        command.env_remove(key);
+    }
+    command
 }
 
 pub struct GhCli;
@@ -61,7 +69,7 @@ impl GhCli {
     fn run(args: &[&str]) -> Result<std::process::Output> {
         let mut missing = Vec::new();
         for candidate in GH_CANDIDATES {
-            match Command::new(candidate).args(args).env("GH_PROMPT_DISABLED", "1").output() {
+            match gh_command(candidate).args(args).env("GH_PROMPT_DISABLED", "1").output() {
                 Ok(output) => return Ok(output),
                 Err(error) => missing.push(format!("{candidate}: {error}")),
             }
@@ -73,17 +81,12 @@ impl GhCli {
 impl Gh for GhCli {
     fn token(&self, login: &str) -> Option<String> {
         let output = Self::run(&["auth", "token", "--hostname", HOST, "--user", login]).ok()?;
-        let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        (output.status.success() && !token.is_empty()).then_some(token)
+        printed(output.status.success(), &output.stdout)
     }
 
-    fn logins(&self) -> Result<GhLogins> {
-        let output = Self::run(&["auth", "status", "--hostname", HOST])?;
-        Ok(parse_gh_status(&format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )))
+    fn active(&self) -> Result<Option<String>> {
+        let output = Self::run(&["config", "get", "user", "--host", HOST])?;
+        Ok(printed(output.status.success(), &output.stdout))
     }
 
     fn switch(&self, login: &str) -> Result<()> {
@@ -95,37 +98,10 @@ impl Gh for GhCli {
     }
 }
 
-/// `gh auth status` lists each account as "Logged in to github.com account <login>"
-/// followed by its own "- Active account: true|false" line.
-pub fn parse_gh_status(text: &str) -> GhLogins {
-    let mut parsed = GhLogins::default();
-    for line in text.lines().map(str::trim) {
-        if let Some(rest) = line.split("Logged in to github.com account ").nth(1) {
-            if let Some(login) = rest.split_whitespace().next().map(strip_ansi) {
-                parsed.logins.push(login);
-            }
-        } else if line.contains("Active account: true") {
-            parsed.active = parsed.logins.last().cloned();
-        }
-    }
-    parsed
-}
-
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+/// gh exits 1 when it has nothing to print: no such login, or never signed in to this host.
+fn printed(success: bool, stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout).trim().to_owned();
+    (success && !text.is_empty()).then_some(text)
 }
 
 pub fn kota_home() -> PathBuf {
@@ -171,7 +147,7 @@ pub fn ensure_store(kota_home: &Path, gh: &dyn Gh) -> Result<Store> {
     if let Some(store) = read_store(kota_home)? {
         return Ok(store);
     }
-    let Some(active) = gh.logins()?.active else {
+    let Some(active) = gh.active()? else {
         return Ok(Store { schema: 1, ..Store::default() });
     };
     let store = Store {
@@ -218,39 +194,42 @@ pub fn view(store: &Store, gh: &dyn Gh) -> AccountsView {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AddResult {
-    pub added: Vec<String>,
-    /// gh's own active account after the login; Kota switches it back to `previous`.
+pub struct SignInResult {
+    /// The account that signed in, new to Kota or not.
+    pub login: String,
+    pub added: bool,
+    /// gh's own active account afterwards; Kota switches it back to the previous one.
     pub active: Option<String>,
     pub restore_failed: bool,
     pub view: AccountsView,
 }
 
-/// After `gh auth login` in the Smart Terminal: record the new logins and switch gh's
-/// active account back, so the user's own gh elsewhere is unchanged. A failed switch
-/// only affects gh outside Kota; every Kota path names its account.
-pub fn finish_add(kota_home: &Path, gh: &dyn Gh, previous_active: Option<&str>) -> Result<AddResult> {
-    let mut store = ensure_store(kota_home, gh)?;
-    let now = gh.logins()?;
-    let added: Vec<String> = now.logins.iter().filter(|login| !store.has(login)).cloned().collect();
-    for login in &added {
+/// After `gh auth login`: record the account that signed in and switch gh's active account
+/// back, so the user's own gh elsewhere is unchanged. A failed switch only affects gh outside
+/// Kota; every Kota path names its account. Not `ensure_store`: gh's active account is the new
+/// one here, not an earlier login to take over.
+pub fn finish_sign_in(kota_home: &Path, gh: &dyn Gh, previous_active: Option<&str>) -> Result<SignInResult> {
+    // `gh auth login` always makes the account it signed in the active one.
+    let login = gh.active()?.context("github_account_unknown")?;
+    let mut store = read_store(kota_home)?.unwrap_or(Store { schema: 1, ..Store::default() });
+    let added = !store.has(&login);
+    if added {
+        // Only the first account becomes the default, even when the default has expired (老无).
+        if store.accounts.is_empty() {
+            store.default_login = Some(login.clone());
+        }
         store.accounts.push(Account { login: login.clone(), added_at: chrono::Utc::now().to_rfc3339() });
-    }
-    if store.default_login.is_none() {
-        store.default_login = added.first().cloned();
-    }
-    if !added.is_empty() {
         write_store(kota_home, &store)?;
     }
-    let mut active = now.active;
+    let mut active = Some(login.clone());
     let mut restore_failed = false;
-    if let Some(previous) = previous_active.filter(|previous| active.as_deref() != Some(*previous) && now.logins.iter().any(|l| l == previous)) {
+    if let Some(previous) = previous_active.filter(|previous| *previous != login) {
         match gh.switch(previous) {
             Ok(()) => active = Some(previous.to_owned()),
             Err(_) => restore_failed = true,
         }
     }
-    Ok(AddResult { added, active, restore_failed, view: view(&store, gh) })
+    Ok(SignInResult { login, added, active, restore_failed, view: view(&store, gh) })
 }
 
 pub fn set_default(kota_home: &Path, login: &str) -> Result<Store> {

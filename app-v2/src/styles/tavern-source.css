@@ -18,8 +18,3 @@
 .tavern-source-reason {
   margin: 4px 0 12px;
 }
-
-.tavern-profile-center .profile-name-button:disabled {
-  opacity: 1;
-  cursor: default;
-}

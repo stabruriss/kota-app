@@ -34,6 +34,29 @@ afterEach(() => {
 });
 
 describe('Tavern system prompt refresh', () => {
+  it('shows system heroes expanded and reads prompts on the first visible open', async () => {
+    const contents = new Map<string, string>([[VIOLET_SUMMARY_PROMPT_PATH, VIOLET_A]]);
+    const promptReader = mockPromptFiles(contents);
+    const onClose = vi.fn();
+    const view = render(<TavernModal open={false} onClose={onClose} />);
+    expect(promptReader).not.toHaveBeenCalled();
+
+    view.rerender(<TavernModal open onClose={onClose} />);
+    const toggle = screen.getByRole('button', { name: /System Heroes/i });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: /^Violet\b/i })).toBeVisible();
+    await waitFor(() => expect(promptReader).toHaveBeenCalledWith(
+      { path: VIOLET_SUMMARY_PROMPT_PATH }, expect.any(String),
+    ));
+
+    await userEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', { name: /^Violet\b/i })).not.toBeInTheDocument();
+    await userEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: /^Violet\b/i })).toBeVisible();
+  });
+
   it('rereads Violet on reopen and both Ember prompt files on hero selection', async () => {
     const contents = new Map<string, string>([
       [VIOLET_SUMMARY_PROMPT_PATH, VIOLET_A],
@@ -116,7 +139,6 @@ describe('Tavern system prompt refresh', () => {
 });
 
 async function openSystemHero(name: string): Promise<void> {
-  await userEvent.click(screen.getByRole('button', { name: /System Heros/i }));
   await userEvent.click(screen.getByRole('button', { name: new RegExp(name, 'i') }));
 }
 

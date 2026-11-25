@@ -2,6 +2,7 @@
 //! the Local tool `kota_my_soul` runs through this same binary. The help and reply
 //! texts are the approved model-visible copy and are used verbatim.
 use super::{date_of, dream_usage, episodes, marks, now_ts, project_slug, pushes, search, SoulPaths};
+use crate::violet::NoteChange;
 use anyhow::{anyhow, Result};
 use std::{
     collections::HashMap,
@@ -195,12 +196,8 @@ pub(crate) fn run(args: &[String], env: &Env, stdin: &str, ts: &str) -> Result<S
             let text = text_after(args, 1).unwrap_or_else(|| stdin.to_string());
             Ok(match marks::add(&paths, &text, env.project.clone(), ts)? {
                 marks::Added::Added { id, marks } => {
-                    // add() has committed and released the Soul lock. A room notification
-                    // must never turn this successful write into an error/retry.
                     if let Some(mark) = marks.find(&id) {
-                        if let Err(error) = record_note(env, mark, marks.revision) {
-                            crate::kota_debug_log(&format!("[soul] note progress: {error}"));
-                        }
+                        report_note(env, NoteChange::Added, mark, marks.revision, ts);
                     }
                     with_list(
                         format!(
@@ -222,11 +219,12 @@ pub(crate) fn run(args: &[String], env: &Env, stdin: &str, ts: &str) -> Result<S
             let id = id_argument(args, 1)?;
             let text = text_after(args, 2).unwrap_or_else(|| stdin.to_string());
             Ok(match marks::edit(&paths, &id, &text, ts)? {
-                marks::Edited::Updated(marks) => with_list(
-                    format!("Updated {id} (revision {}).", marks.revision),
-                    &marks,
-                    env,
-                ),
+                marks::Edited::Updated(marks) => {
+                    if let Some(mark) = marks.find(&id) {
+                        report_note(env, NoteChange::Edited, mark, marks.revision, ts);
+                    }
+                    with_list(format!("Updated {id} (revision {}).", marks.revision), &marks, env)
+                },
                 marks::Edited::NotFound => not_found(&id),
                 marks::Edited::Empty => EMPTY_TEXT_REPLY.into(),
                 marks::Edited::TooLong(chars) => too_long(chars),
@@ -235,11 +233,14 @@ pub(crate) fn run(args: &[String], env: &Env, stdin: &str, ts: &str) -> Result<S
         "delete-mark" => {
             let id = id_argument(args, 1)?;
             Ok(match marks::delete(&paths, &id, ts)? {
-                marks::Deleted::Deleted(marks) => with_list(
-                    format!("Deleted {id} (revision {}). Its text is kept as an episode.", marks.revision),
-                    &marks,
-                    env,
-                ),
+                marks::Deleted::Deleted { mark, marks } => {
+                    report_note(env, NoteChange::Deleted, &mark, marks.revision, ts);
+                    with_list(
+                        format!("Deleted {id} (revision {}). Its text is kept as an episode.", marks.revision),
+                        &marks,
+                        env,
+                    )
+                },
                 marks::Deleted::NotFound => not_found(&id),
             })
         }
@@ -256,13 +257,22 @@ pub(crate) fn run(args: &[String], env: &Env, stdin: &str, ts: &str) -> Result<S
     }
 }
 
-fn record_note(env: &Env, mark: &marks::Mark, revision: u64) -> Result<(), String> {
+/// Shows a saved mark change in the agent's room progress.
+/// The write has committed and released the Soul lock by now: a room notification must
+/// never turn that successful write into an error/retry.
+fn report_note(env: &Env, change: NoteChange, mark: &marks::Mark, revision: u64, ts: &str) {
+    if let Err(error) = record_note(env, change, mark, revision, ts) {
+        crate::kota_debug_log(&format!("[soul] note progress: {error}"));
+    }
+}
+
+fn record_note(env: &Env, change: NoteChange, mark: &marks::Mark, revision: u64, ts: &str) -> Result<(), String> {
     let Some(project_root) = &env.project_root else { return Ok(()); };
     let text = fs::read_to_string(env.agent_cwd.join("SHELL.yaml")).map_err(|e| e.to_string())?;
     let shell = crate::parse_shell_yaml(&text)?;
     let identity = crate::read_yaml_mapping(&env.agent_cwd.join("agent.yaml"))?;
     let cli = crate::cli_from_project_agent_files(&env.agent_cwd, &shell, &identity)?;
-    crate::violet::record_note_added(project_root, &env.agent_id, crate::shell_name_for_cli(cli), mark, revision)?;
+    crate::violet::record_note_change(project_root, &env.agent_id, crate::shell_name_for_cli(cli), change, mark, revision, ts)?;
     Ok(())
 }
 

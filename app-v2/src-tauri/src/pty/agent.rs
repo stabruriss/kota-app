@@ -36,15 +36,15 @@ use super::path_env::{augmented_path, resolve_on_augmented_path};
 
 const DEFAULT_COLS: u16 = 100;
 const DEFAULT_ROWS: u16 = 28;
-const OSC_11_QUERY: &[u8] = b"\x1b]11;?\x1b\\";
+pub(super) const OSC_11_QUERY: &[u8] = b"\x1b]11;?\x1b\\";
 const OSC_11_RESPONSE: &[u8] = b"\x1b]11;rgb:1a/18/20\x1b\\";
-const TERMINAL_NAME_QUERY: &[u8] = b"\x1b[>q";
+pub(super) const TERMINAL_NAME_QUERY: &[u8] = b"\x1b[>q";
 const TERMINAL_NAME_RESPONSE: &[u8] = b"\x1bP>|Kota\x1b\\";
-const MODIFY_OTHER_KEYS_QUERY: &[u8] = b"\x1b[>4;?m";
+pub(super) const MODIFY_OTHER_KEYS_QUERY: &[u8] = b"\x1b[>4;?m";
 const MODIFY_OTHER_KEYS_RESPONSE: &[u8] = b"\x1b[>4;0m";
-const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
+pub(super) const DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
 const DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?1;2c";
-const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+pub(super) const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 const AGENT_PROMPT_INTERRUPT_CLEAR_INPUT: &str = "\x15\x0b";
 const AGENT_PROMPT_FIRST_OUTPUT_WAIT: Duration = Duration::from_millis(800);
 const AGENT_PROMPT_QUIET_WAIT: Duration = Duration::from_millis(120);
@@ -55,6 +55,9 @@ const AGENT_SESSION_LEASE_ERROR_PREFIX: &str = "KOTA_AGENT_SESSION_LEASE_CONFLIC
 
 #[path = "../local_rpc/registry.rs"]
 mod local;
+#[path = "first_submit.rs"]
+mod first_submit;
+pub(crate) use first_submit::NotTaken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1188,6 +1191,8 @@ struct AgentState {
     /// With the generation, names one launch in Soul cooldown keys: a relaunch resets it.
     soul_instance: String,
     clear_next_submit: AtomicBool,
+    /// The generation that has had its first message.
+    first_submit: AtomicU64,
     submit_lock: Mutex<()>,
     ownership: Mutex<crate::violet::ownership::RunningSession>,
     inputs: InputBuffer,
@@ -1449,6 +1454,37 @@ impl NativeSessionMarker {
     }
 }
 
+/// One message, composed and ready to paste.
+struct PreparedSubmit {
+    input: String,
+    metadata_cwd: PathBuf,
+    handoff: Option<crate::shell_switch::Handoff>,
+    soul: Option<SoulDelivery>,
+    native_before: Option<NativeSessionMarker>,
+    clear_after_interrupt: bool,
+}
+
+type SoulDelivery = (Arc<crate::soul_push::service::Service>, crate::soul_push::service::Delivery);
+
+impl PreparedSubmit {
+    fn submitted(&self) {
+        if let Some(handoff) = &self.handoff {
+            if let Err(error) = crate::shell_switch::submitted(&self.metadata_cwd, handoff) {
+                // The input has already been submitted. Returning Err here
+                // would make bus recovery deliver the original input again.
+                crate::kota_debug_log(&format!("[shell-switch] submitted handoff cleanup failed: {error}"));
+            }
+        }
+    }
+}
+
+fn confirm_soul(app: &AppHandle, soul: Option<SoulDelivery>) {
+    if let Some((service, delivery)) = soul {
+        let app = app.clone();
+        service.confirm(delivery, move |root, paths| crate::violet::emit_room_changed(&app, root, "soul-context", paths));
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SubmitConfirmation {
     NativeLog,
@@ -1538,6 +1574,7 @@ impl AgentTerminalPty {
                 generation: AtomicU64::new(0),
                 soul_instance: uuid::Uuid::new_v4().to_string(),
                 clear_next_submit: AtomicBool::new(false),
+                first_submit: AtomicU64::new(u64::MAX),
                 submit_lock: Mutex::new(()),
                 ownership: Mutex::new(ownership),
                 inputs: InputBuffer::default(),
@@ -1706,6 +1743,11 @@ impl AgentTerminalPty {
     }
 
     fn write_to_process(&self, input: &str) -> Result<()> {
+        self.write_if(input, |_| Ok(()))
+    }
+
+    /// `check` runs under the same lock as the write.
+    fn write_if(&self, input: &str, check: impl FnOnce(Option<&AgentProcess>) -> Result<()>) -> Result<()> {
         let bytes = input.as_bytes();
         let preview: String = bytes
             .iter()
@@ -1726,6 +1768,7 @@ impl AgentTerminalPty {
         ));
 
         let mut process_guard = self.inner.process.lock().expect("agent process poisoned");
+        check(process_guard.as_ref())?;
         let process = process_guard
             .as_mut()
             .ok_or_else(|| anyhow!("agent process missing for {}", self.inner.agent_id))?;
@@ -1754,6 +1797,32 @@ impl AgentTerminalPty {
             .submit_lock
             .lock()
             .expect("agent submit lock poisoned");
+        let mut prepared = self.prepare_submit(app, input, source, soul)?;
+        let baseline_epoch = self.output_epoch();
+        if let Err(err) = self.write_confirmed(app, prepared.input.clone()) {
+            if prepared.clear_after_interrupt {
+                self.inner.clear_next_submit.store(true, Ordering::Release);
+            }
+            return Err(err);
+        }
+        let started = Instant::now();
+        let first_output_epoch =
+            self.wait_for_output_after(baseline_epoch, AGENT_PROMPT_FIRST_OUTPUT_WAIT);
+        let soul = prepared.soul.take();
+        self.finish_submit(
+            started,
+            first_output_epoch,
+            &prepared,
+            &|text| self.write_confirmed(app, text.to_string()),
+            || confirm_soul(app, soul),
+            None,
+        )?;
+        prepared.submitted();
+        Ok(())
+    }
+
+    fn prepare_submit(&self, app: &AppHandle, input: String, source: crate::shell_switch::PromptSource,
+        soul: Option<crate::soul_push::input::Input>) -> Result<PreparedSubmit> {
         // If the provider child has died but a stale process entry lingers,
         // write() would silently succeed on the dead master fd, so the
         // agent-bus recovery (spawn-on-error in deliver_to_terminal) would
@@ -1784,22 +1853,26 @@ impl AgentTerminalPty {
         let (input, handoff) = crate::shell_switch::compose(&metadata_cwd, self.inner.cli, input, source)
             .map_err(|e| anyhow!(e))?;
         let native_before = self.native_session_marker();
-        let baseline_epoch = self.output_epoch();
         let clear_after_interrupt = self.inner.clear_next_submit.swap(false, Ordering::AcqRel);
         let input = if clear_after_interrupt {
             format!("{AGENT_PROMPT_INTERRUPT_CLEAR_INPUT}{input}")
         } else {
             input
         };
-        if let Err(err) = self.write_confirmed(app, input) {
-            if clear_after_interrupt {
-                self.inner.clear_next_submit.store(true, Ordering::Release);
-            }
-            return Err(err);
-        }
-        let started = Instant::now();
-        let first_output_epoch =
-            self.wait_for_output_after(baseline_epoch, AGENT_PROMPT_FIRST_OUTPUT_WAIT);
+        Ok(PreparedSubmit { input, metadata_cwd, handoff, soul, native_before, clear_after_interrupt })
+    }
+
+    /// From the pasted body on: let the terminal settle, press Enter, confirm.
+    fn finish_submit(
+        &self,
+        started: Instant,
+        first_output_epoch: Option<u64>,
+        prepared: &PreparedSubmit,
+        write: &dyn Fn(&str) -> Result<()>,
+        delivered: impl FnOnce(),
+        first_message: Option<&str>,
+    ) -> Result<()> {
+        let native_before = prepared.native_before.as_ref();
         let first_output_ms = first_output_epoch.map(|_| started.elapsed().as_millis());
         let settle_deadline = started + AGENT_PROMPT_MAX_SETTLE_WAIT;
         let quieted = first_output_epoch.is_some_and(|epoch| {
@@ -1816,17 +1889,14 @@ impl AgentTerminalPty {
 
         let mut enter_attempts = 1_u8;
         let first_enter_baseline = self.output_epoch();
-        self.write_confirmed(app, prompt_submit_sequence(self.inner.cli).to_string())?;
+        write(prompt_submit_sequence(self.inner.cli))?;
         // Body and first Enter are both written: the host delivered the context.
-        if let Some((service, delivery)) = soul {
-            let app = app.clone();
-            service.confirm(delivery, move |root, paths| crate::violet::emit_room_changed(&app, root, "soul-context", paths));
-        }
+        delivered();
         let mut submit_confirm = if self.inner.cli == AgentCli::Pi {
             SubmitConfirmation::PtyWrite
         } else {
             self.wait_for_submit_confirmation(
-                native_before.as_ref(),
+                native_before,
                 first_enter_baseline,
                 AGENT_PROMPT_SUBMIT_CONFIRM_WAIT,
             )
@@ -1841,9 +1911,9 @@ impl AgentTerminalPty {
                 "[agent:{}] submit prompt retrying enter after unconfirmed submit",
                 self.inner.agent_id
             ));
-            self.write_confirmed(app, prompt_submit_sequence(self.inner.cli).to_string())?;
+            write(prompt_submit_sequence(self.inner.cli))?;
             submit_confirm = self.wait_for_submit_confirmation(
-                native_before.as_ref(),
+                native_before,
                 retry_baseline,
                 AGENT_PROMPT_SUBMIT_CONFIRM_WAIT,
             );
@@ -1854,11 +1924,11 @@ impl AgentTerminalPty {
 
         let elapsed = started.elapsed().as_millis();
         crate::kota_debug_log(&format!(
-            "[agent:{}] submit prompt enter sent after {}ms ({}, clear_after_interrupt={}, first_ack_ms={}, quiet_ms={}, enter_attempts={}, submit_confirm={}, submit_confirm_ms={})",
+            "[agent:{}] submit prompt enter sent after {}ms ({}, clear_after_interrupt={}, first_ack_ms={}, quiet_ms={}, enter_attempts={}, submit_confirm={}, submit_confirm_ms={}{})",
             self.inner.agent_id,
             elapsed,
             submit_state,
-            clear_after_interrupt,
+            prepared.clear_after_interrupt,
             first_output_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".into()),
@@ -1870,14 +1940,8 @@ impl AgentTerminalPty {
             submit_confirm_ms
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".into()),
+            first_message.map(|how| format!(", first_message={how}")).unwrap_or_default(),
         ));
-        if let Some(handoff) = &handoff {
-            if let Err(error) = crate::shell_switch::submitted(&metadata_cwd, handoff) {
-                // The input has already been submitted. Returning Err here
-                // would make bus recovery deliver the original input again.
-                crate::kota_debug_log(&format!("[shell-switch] submitted handoff cleanup failed: {error}"));
-            }
-        }
         Ok(())
     }
 
@@ -2924,14 +2988,17 @@ fn elapsed_ms(t0: std::time::Instant) -> u64 {
 }
 
 #[derive(Default)]
-struct TerminalQueryState {
+pub(super) struct TerminalQueryState {
     bg: bool,
     name: bool,
     modify_other_keys: bool,
     device_attributes: bool,
 }
 
-fn decoder_cursor_report(decoder: &Arc<Mutex<AnsiLineDecoder>>, agent_id: &str) -> (u16, u16) {
+pub(super) fn decoder_cursor_report(
+    decoder: &Arc<Mutex<AnsiLineDecoder>>,
+    agent_id: &str,
+) -> (u16, u16) {
     let dec = match decoder.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
@@ -2959,7 +3026,7 @@ fn decoder_cursor_report(decoder: &Arc<Mutex<AnsiLineDecoder>>, agent_id: &str) 
     }
 }
 
-fn terminal_query_responses(
+pub(super) fn terminal_query_responses(
     bytes: &[u8],
     state: &mut TerminalQueryState,
     cursor: (u16, u16),
@@ -3087,6 +3154,9 @@ pub struct AgentRegistry {
 
 #[derive(Default)]
 struct Replacement {
+    /// One delivery to the agent at a time. Taken before `serial`, which a first message
+    /// gives up while it waits.
+    delivery: Mutex<()>,
     serial: Mutex<()>,
     epoch: AtomicU64,
 }
@@ -3287,18 +3357,47 @@ impl AgentRegistry {
     pub(crate) fn submit_prompt(&self, app: &AppHandle, agent_id: &str, input: String, source: crate::shell_switch::PromptSource,
         soul: Option<crate::soul_push::input::Input>) -> Result<()> {
         if self.is_local(agent_id) { return Err(anyhow!("Local input requires a delivery identity")); }
+        let composer = source == crate::shell_switch::PromptSource::Composer;
+        self.submit_with(
+            agent_id,
+            composer,
+            |replacement| {
+                if composer { return self.ready_for_input(app, agent_id, replacement); }
+                let pty = self.lookup(agent_id)?;
+                if !pty.is_running() || pty.submit_child_is_dead() {
+                    // Bus owns its existing single fallback launch. Do not attempt
+                    // one here and then launch again when it receives that error.
+                    return Err(anyhow!("agent process needs to be launched again"));
+                }
+                Ok(pty)
+            },
+            |pty| pty.submit_prompt(app, input.clone(), source, soul.clone()),
+            |pty, launch| pty.submit_first(app, launch, input.clone(), source, soul.clone()),
+        )
+    }
+
+    fn submit_with(
+        &self,
+        agent_id: &str,
+        relaunch: bool,
+        ready: impl Fn(&Replacement) -> Result<AgentTerminalPty>,
+        submit: impl Fn(&AgentTerminalPty) -> Result<()>,
+        submit_first: impl Fn(&AgentTerminalPty, u64) -> Result<()>,
+    ) -> Result<()> {
         let replacement = self.replacement(agent_id);
-        let _guard = replacement.serial.lock().expect("agent replacement poisoned");
-        if source != crate::shell_switch::PromptSource::Composer {
-            let pty = self.lookup(agent_id)?;
-            if !pty.is_running() || pty.submit_child_is_dead() {
-                // Bus owns its existing single fallback launch. Do not attempt
-                // one here and then launch again when it receives that error.
-                return Err(anyhow!("agent process needs to be launched again"));
-            }
-            return pty.submit_prompt(app, input, source, soul);
+        let _delivery = replacement.delivery.lock().expect("agent delivery poisoned");
+        let attempt = || {
+            let guard = replacement.serial.lock().expect("agent replacement poisoned");
+            let pty = ready(&replacement)?;
+            let Some(launch) = pty.awaits_first_submit() else { return submit(&pty); };
+            drop(guard);
+            submit_first(&pty, launch)
+        };
+        match attempt() {
+            // `ready` launches it again for the second and last try.
+            Err(error) if relaunch && NotTaken::exited(&error) => attempt(),
+            result => result,
         }
-        self.ready_for_input(app, agent_id, &replacement)?.submit_prompt(app, input, source, soul)
     }
 
     pub(crate) fn check_session(&self, agent_id: &str) -> Option<Result<()>> {

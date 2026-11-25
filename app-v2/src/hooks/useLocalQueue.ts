@@ -22,13 +22,28 @@ const EMPTY_PRIVATE_AGENTS: ReadonlySet<AgentId> = new Set();
 
 /** App-lifetime queue drafts only. No streams, Pi polling or persistent state. */
 export function useLocalQueue(projectRoot: string | null, onGuardsChange: (keys: ReadonlySet<string>) => void, onSend: LocalQueueSend,
-  privateAgents: ReadonlySet<AgentId> = EMPTY_PRIVATE_AGENTS) {
+  privateAgents: ReadonlySet<AgentId> = EMPTY_PRIVATE_AGENTS, onHasDraftChange?: (hasDraft: boolean) => void) {
   const [drafts, setDrafts] = useState<ReadonlyMap<string, LocalQueueDraft>>(new Map());
   const [addDrafts, setAddDrafts] = useState<ReadonlyMap<string, LocalQueueAddDraft>>(new Map());
   const [pending, setPending] = useState<ReadonlyMap<string, 'edit' | 'remove'>>(new Map());
   const [errors, setErrors] = useState<ReadonlyMap<string, string>>(new Map());
   const live = useRef({ projectRoot, drafts, addDrafts, pending, onSend, onGuardsChange, privateAgents });
   live.current = { ...live.current, projectRoot, onSend, onGuardsChange, privateAgents };
+  const onHasDraftChangeRef = useRef(onHasDraftChange);
+  onHasDraftChangeRef.current = onHasDraftChange;
+  const reportedHasDraftRef = useRef(false);
+  const hasQueueDraft = drafts.size > 0 || Array.from(addDrafts.values()).some(draft => draft.text.trim().length > 0);
+  useEffect(() => {
+    if (reportedHasDraftRef.current === hasQueueDraft) return;
+    reportedHasDraftRef.current = hasQueueDraft;
+    onHasDraftChangeRef.current?.(hasQueueDraft);
+  }, [hasQueueDraft]);
+  useEffect(() => () => {
+    if (reportedHasDraftRef.current) {
+      reportedHasDraftRef.current = false;
+      onHasDraftChangeRef.current?.(false);
+    }
+  }, []);
   const withdrawn = useRef(new Set<string>());
   const takingOut = useRef(new Set<string>());
   const mounted = useRef(false);

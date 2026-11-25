@@ -124,6 +124,8 @@ type VioletRoomMessage = VioletChatMessage & {
   deliveryTrackingComplete?: boolean;
   progressItems?: readonly string[];
   progressEntries?: readonly VioletProgressEntry[];
+  /** Kota Local tool image paths folded into this reply (mergeLocalToolImages). */
+  toolImagePaths?: readonly string[];
   ghostSasayaki?: boolean;
   ghostSasayakiSortTime?: number;
   quoteRefId?: string;
@@ -922,7 +924,7 @@ export function VioletRoomPanel({
   );
   const nextVisibleMessages = useMemo(
     () => {
-      const displayMessages = filterAgentBusMessages(scopedMessages, showAgentToAgentMessages);
+      const displayMessages = mergeLocalToolImages(filterAgentBusMessages(scopedMessages, showAgentToAgentMessages));
       return chatFilterActive
         ? groupConsecutiveSameAgentProgressMessages(displayMessages)
         : groupAdjacentProgressRunMessages(displayMessages);
@@ -1393,6 +1395,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
   const isUser = message.role === 'user' && !isProcess;
   const isPuppeteer = isUser && message.messageOrigin === 'puppeteer';
   const isBartenderConflict = isBartenderConflictMessage(message);
+  const localToolImages = localToolImagesParts(message);
   const isEmberDream = isEmberDreamMessage(message);
   const dreamEntryBody = emberDreamEntryBody(message);
   const showAvatar = isPuppeteer || (!isUser && (!isProcess || isCommentary));
@@ -1401,6 +1404,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
   const progressEntries = isCommentary ? progressEntriesForMessage(message) : [];
   const progressItems = progressEntries.map((entry) => entry.text);
   const latestProgressEntry = progressEntries[progressEntries.length - 1];
+  const latestNoteLabel = noteProgressLabel(latestProgressEntry);
   const latestProgressText = latestProgressEntry?.text ?? message.text;
   const progressAgentIds = isCommentary ? distinctProgressAgentIds(progressEntries) : [];
   const progressSummaryCopy = progressSummary(
@@ -1654,6 +1658,14 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
           </div>
         )}
         <div className="violet-msg-body">
+          {message.toolImagePaths && message.toolImagePaths.length > 0 && (
+            <details className="violet-tool-images-details">
+              <summary>
+                <span>{message.toolImagePaths.length === 1 ? '1 image' : `${message.toolImagePaths.length} images`}</span>
+              </summary>
+              <MarkdownText text={message.toolImagePaths.join('\n\n')} projectRoot={projectRoot} enableLocalFileRefs />
+            </details>
+          )}
           {isCommentary ? (
             <details className="violet-commentary-details">
               <summary>
@@ -1663,7 +1675,7 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
                   {isSubagentProgressEntry(latestProgressEntry) && (
                     <SubagentUpdateMark placement="summary" />
                   )}
-                  {isNoteProgressEntry(latestProgressEntry) && <NoteUpdateMark placement="summary" />}
+                  {latestNoteLabel && <NoteUpdateMark placement="summary" label={latestNoteLabel} />}
                   {progressSummaryCopy.preview}
                 </em>
               </summary>
@@ -1709,6 +1721,13 @@ export const VioletMessageBubble = memo(function VioletMessageBubble({
                 <span>{bartenderConflictSummary(message, agentMeta)}</span>
               </summary>
               <MarkdownText text={message.text} projectRoot={projectRoot} enableLocalFileRefs />
+            </details>
+          ) : localToolImages ? (
+            <details className="violet-tool-images-details">
+              <summary>
+                <span>{localToolImages.summary}</span>
+              </summary>
+              <MarkdownText text={localToolImages.body} projectRoot={projectRoot} enableLocalFileRefs />
             </details>
           ) : (
             <>
@@ -1959,10 +1978,10 @@ function QueuedMessageIcon() {
   );
 }
 
-function NoteUpdateMark({ placement }: { placement: 'summary' | 'entry' }) {
-  return <span className={`violet-note-origin violet-note-origin-${placement}`} role="img" aria-label="Note added">
+function NoteUpdateMark({ placement, label }: { placement: 'summary' | 'entry'; label: string }) {
+  return <span className={`violet-note-origin violet-note-origin-${placement}`} role="img" aria-label={label}>
     <img src={noteUpdateIconUrl} alt="" aria-hidden draggable={false} />
-    <span className="violet-note-origin-label">Note</span>
+    <span className="violet-note-origin-label">{label}</span>
   </span>;
 }
 
@@ -2130,9 +2149,10 @@ const ProgressEntryContent = memo(function ProgressEntryContent({
   projectRoot?: string | null;
 }) {
   const subagent = isSubagentProgressEntry(entry);
-  if (isNoteProgressEntry(entry)) {
+  const noteLabel = noteProgressLabel(entry);
+  if (noteLabel) {
     return <div className="violet-commentary-entry-content note">
-      <NoteUpdateMark placement="entry" />
+      <NoteUpdateMark placement="entry" label={noteLabel} />
       <MarkdownText text={entry.text} projectRoot={projectRoot} enableLocalFileRefs />
     </div>;
   }
@@ -2169,8 +2189,12 @@ function isSubagentProgressEntry(entry?: VioletProgressEntry): boolean {
   return entry?.messageOrigin === 'subagent';
 }
 
-function isNoteProgressEntry(entry?: VioletProgressEntry): boolean {
-  return entry?.messageOrigin === 'note';
+// A saved mark change, by the origin `kota-my-soul` gives its room row. `note` is an added
+// mark: the only kind written before edits and deletes were reported.
+const NOTE_PROGRESS_LABELS = new Map([['note', 'Add Note'], ['note_edit', 'Edit Note'], ['note_delete', 'Delete Note']]);
+
+function noteProgressLabel(entry?: VioletProgressEntry): string | null {
+  return (entry?.messageOrigin && NOTE_PROGRESS_LABELS.get(entry.messageOrigin)) || null;
 }
 
 function progressEntriesForMessage(message: VioletRoomMessage): readonly VioletProgressEntry[] {
@@ -2225,6 +2249,50 @@ function progressAgentLabel(
     ?? entry?.agentDisplayName
     ?? systemActorName(agentId)
     ?? agentId;
+}
+
+// Kota Local tool images arrive as one artifact per tool result: a summary line,
+// then the stored image paths. They stay folded until opened.
+function localToolImagesParts(message: VioletRoomMessage): { summary: string; body: string } | null {
+  if (message.role !== 'assistant' || message.kind !== 'artifact' || message.shell !== 'kota-local') {
+    return null;
+  }
+  const split = message.text.indexOf('\n\n');
+  if (split < 0) return null;
+  return { summary: message.text.slice(0, split), body: message.text.slice(split + 2) };
+}
+
+// Each Kota Local tool image row joins the next reply of the same agent and shell, so a
+// shell `system` Agent Bus row is never the host. This runs after both room filters; they
+// keep or drop an image row together with its host, so every filter combination shows the
+// same bubble. Rows with no later host stay where they are.
+export function mergeLocalToolImages<T extends VioletRoomMessage>(messages: readonly T[]): readonly T[] {
+  const waiting = new Map<string, number[]>();
+  const rowPaths = new Map<number, string[]>();
+  const hostPaths = new Map<number, string[]>();
+  const merged = new Set<number>();
+  messages.forEach((message, index) => {
+    const key = `${message.agentId}\u001f${message.shell}`;
+    const parts = localToolImagesParts(message);
+    if (parts) {
+      rowPaths.set(index, parts.body.split('\n').map((line) => line.trim()).filter(Boolean));
+      const rows = waiting.get(key);
+      if (rows) rows.push(index);
+      else waiting.set(key, [index]);
+      return;
+    }
+    const rows = message.role === 'assistant' && message.kind === 'message' ? waiting.get(key) : undefined;
+    if (!rows) return;
+    hostPaths.set(index, rows.flatMap((row) => rowPaths.get(row) ?? []));
+    rows.forEach((row) => merged.add(row));
+    waiting.delete(key);
+  });
+  if (hostPaths.size === 0) return messages;
+  return messages.flatMap((message, index) => {
+    if (merged.has(index)) return [];
+    const toolImagePaths = hostPaths.get(index);
+    return toolImagePaths ? [{ ...message, toolImagePaths }] : [message];
+  });
 }
 
 function isBartenderConflictMessage(message: VioletRoomMessage): boolean {
@@ -3671,7 +3739,7 @@ export function mergeRoomMessages(
   ));
 }
 
-function violetMessageMatchesAgentFilter(message: VioletRoomMessage, agentIds: ReadonlySet<AgentId>): boolean {
+export function violetMessageMatchesAgentFilter(message: VioletRoomMessage, agentIds: ReadonlySet<AgentId>): boolean {
   if (agentIds.size === 0) return false;
   if (message.role === 'user') {
     if (message.targetAgentIds) return message.targetAgentIds.some((agentId) => agentIds.has(agentId));
@@ -4371,14 +4439,17 @@ function dedupeRoomMessages(messages: VioletRoomMessage[]): VioletRoomMessage[] 
   const out: VioletRoomMessage[] = [];
   for (const message of sorted) {
     const bucket = Math.floor(Date.parse(message.timestamp) / 120000) || 0;
-    const key = message.temporalGap && message.agentId === 'user' ? `composer:${message.id}` : [
-      message.agentId,
-      message.role,
-      message.kind,
-      targetAgentIdsKey(message.targetAgentIds),
-      bucket,
-      normalizedRoomMessageText(message),
-    ].join('\u001f');
+    const key = message.temporalGap && message.agentId === 'user' ? `composer:${message.id}`
+      // Each saved mark change is its own row: an edit and a delete of one mark carry the same text.
+      : NOTE_PROGRESS_LABELS.has(message.messageOrigin ?? '') ? `note:${message.id}`
+      : [
+        message.agentId,
+        message.role,
+        message.kind,
+        targetAgentIdsKey(message.targetAgentIds),
+        bucket,
+        normalizedRoomMessageText(message),
+      ].join('\u001f');
     if (!seen.has(key)) {
       seen.add(key);
       out.push(message);
@@ -4695,7 +4766,8 @@ function sameRoomMessage(left: VioletChatMessage, right: VioletChatMessage): boo
     nullishString(leftRoom.quoteRefId) === nullishString(rightRoom.quoteRefId) &&
     normalizeVioletProjectRoot(leftRoom.projectRoot) === normalizeVioletProjectRoot(rightRoom.projectRoot) &&
     progressItemsKey(leftRoom.progressItems) === progressItemsKey(rightRoom.progressItems) &&
-    progressEntriesKey(leftRoom.progressEntries) === progressEntriesKey(rightRoom.progressEntries)
+    progressEntriesKey(leftRoom.progressEntries) === progressEntriesKey(rightRoom.progressEntries) &&
+    progressItemsKey(leftRoom.toolImagePaths) === progressItemsKey(rightRoom.toolImagePaths)
   );
 }
 
@@ -4892,10 +4964,10 @@ function systemActorDescription(id: string): string | null {
   if (id === 'bartender') {
     return "I am Bartender for this project. I keep everyone's worktree synced.";
   }
-  if (id === 'bbs') return 'I am BBS. I handle cross-project Bulletin Board handoff entrypoints.';
-  if (id === 'ember') return 'I am Ember. I watch reminders and follow-up tasks.';
-  if (id === 'laughing-man') return 'I am Laughing Man. I route room updates to external channels.';
-  if (id === 'puppeteer') return 'I am Puppeteer. I coordinate scripted project actions.';
+  if (id === 'bbs') return 'I am BBS. I carry threads between projects and Macs.';
+  if (id === 'ember') return 'I am Ember. I send scheduled prompts and run Dream.';
+  if (id === 'laughing-man') return 'I am Laughing Man. I bridge this room to Telegram.';
+  if (id === 'puppeteer') return 'I am Puppeteer. I pick the model and the agent for each message.';
   if (id === 'violet') return 'I am Violet. I keep the room history organized.';
   return null;
 }

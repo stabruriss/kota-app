@@ -30,12 +30,11 @@ import { ProjectAgentTitlePicker } from './ProjectAgentTitlePicker';
 import { HeroAvatarPicker } from './HeroAvatarPicker';
 import { SkillActivationList } from './SkillActivationList';
 import { syncTavernHeroStorageFromDisk } from './TavernModal';
+import { ProfileUnsavedDialog, profileNameFieldsEqual, sameAutoRoute, useFadingText } from './ProfileSheet';
 import type { AgentId } from '../types/scene';
-import iconCommends from '../assets/tavern/icons/commends.svg';
 import iconGhost from '../assets/tavern/icons/ghost.svg';
 import iconShell from '../assets/tavern/icons/shell.svg';
 import iconSkills from '../assets/tavern/icons/skills.svg';
-import iconTurns from '../assets/tavern/icons/turns.svg';
 import { skillLoomEntries } from '../lib/account-skills';
 import { ShellComboBox, uniqueShellComboOptions, type ShellComboOption } from './ShellComboBox';
 import { LocalModelCredit, localModelProvider, localModelOptionCredit } from './LocalModelCredit';
@@ -89,22 +88,25 @@ export function ProjectAgentProfileOverlay({
   const [shellStatuses, setShellStatuses] = useState<SupportedShellStatus[]>([]);
   const [modelCache, setModelCache] = useState<ProjectAgentModelCache>(() => loadProjectAgentModelCache());
   const [modelRefreshBusy, setModelRefreshBusy] = useState<string | null>(null);
-  const [shellEditing, setShellEditing] = useState(false);
+  // One edit state for the whole card. Name, avatar, SHELL, GHOST and skills
+  // are staged below and reach the backend together on Save.
+  const [editing, setEditing] = useState(false);
+  const [unsavedPrompt, setUnsavedPrompt] = useState<'leave' | 'discard' | null>(null);
   const [avatarId, setAvatarId] = useState<string | null>(null);
   const [skills, setSkills] = useState<string[]>([]);
   const [accountSkills, setAccountSkills] = useState<AccountSkillDraft[]>([]);
   const [ghost, setGhost] = useState('');
-  const [ghostExpanded, setGhostExpanded] = useState(false);
-  const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState<ProjectAgentNameFields>({ titleId: null, given: '', middle: '', surname: '' });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; sticky?: boolean } | null>(null);
+  const [inviteToast, showInviteToast] = useFadingText(3000);
   const [openingNotes, setOpeningNotes] = useState(false);
   const inviteInFlight = useRef(false);
   const saveInFlight = useRef(false);
   const [reload, setReload] = useState(0);
-  const shellEditingNow = useRef(shellEditing); shellEditingNow.current = shellEditing;
+  // A SHELL change made elsewhere is taken unless it would overwrite staged SHELL edits.
+  const shellDirtyNow = useRef(false);
   const shellReadSerial = useRef(0);
   const acceptSavedShell = useCallback((next: ProjectAgentDetail) => {
     setDetail(current => current ? { ...current, provider: next.provider, model: next.model,
@@ -117,12 +119,12 @@ export function ProjectAgentProfileOverlay({
     let disposed = false;
     let off: (() => void) | undefined;
     void onLocalConfiguration(projectRoot, agentId, () => {
-      if (disposed || shellEditingNow.current || saveInFlight.current) return;
+      if (disposed || shellDirtyNow.current || saveInFlight.current) return;
       const serial = ++shellReadSerial.current;
       void loadProjectAgentDetail({ projectRoot, agentId }, { readOnly: true }).then(next => {
-        if (!disposed && serial === shellReadSerial.current && !shellEditingNow.current && !saveInFlight.current) acceptSavedShell(next);
+        if (!disposed && serial === shellReadSerial.current && !shellDirtyNow.current && !saveInFlight.current) acceptSavedShell(next);
       }).catch(() => {
-        if (!disposed && serial === shellReadSerial.current && !shellEditingNow.current && !saveInFlight.current) setError('Could not refresh saved settings. Reopen this profile.');
+        if (!disposed && serial === shellReadSerial.current && !shellDirtyNow.current && !saveInFlight.current) setError('Could not refresh saved settings. Reopen this profile.');
       });
     }).then(unsubscribe => { if (disposed) unsubscribe(); else off = unsubscribe; }).catch(() => {});
     return () => { disposed = true; ++shellReadSerial.current; off?.(); };
@@ -152,7 +154,8 @@ export function ProjectAgentProfileOverlay({
         setAvatarId(next.avatarId ?? null);
         setSkills(next.skills);
         setGhost(next.ghost);
-        setShellEditing(false);
+        setEditing(false);
+        setUnsavedPrompt(null);
       })
       .catch((err) => {
         if (!cancelled) setError(String(err));
@@ -165,8 +168,17 @@ export function ProjectAgentProfileOverlay({
     };
   }, [agentId, projectRoot, reload]);
 
-  const editedDisplayName = nameEditing ? composeProjectAgentName(nameDraft) : displayName;
-  const skillEntries = skillLoomEntries(accountSkills, skills);
+  const savedNameFields = detail ? projectAgentNameFieldsFromDetail(detail, displayName) : null;
+  const nameDirty = editing && !!savedNameFields && !profileNameFieldsEqual(nameDraft, savedNameFields);
+  const editedDisplayName = nameDirty ? composeProjectAgentName(nameDraft) : displayName;
+  // Skills active when the card was opened lead the list, so rows do not jump while toggling.
+  const savedSkills = detail?.skills ?? [];
+  const allSkillEntries = skillLoomEntries(accountSkills, skills);
+  const skillEntries = [
+    ...allSkillEntries.filter((skill) => savedSkills.includes(skill.id)),
+    ...allSkillEntries.filter((skill) => !savedSkills.includes(skill.id)),
+  ];
+  const activeSkillCount = skillEntries.filter((skill) => skill.selected).length;
   const duplicateName = useMemo(() => {
     const normalized = normalizedNameVariants(editedDisplayName, detail?.projectName);
     if (normalized.size === 0) return null;
@@ -175,14 +187,13 @@ export function ProjectAgentProfileOverlay({
     ) ?? null;
   }, [agentId, detail?.projectName, editedDisplayName, existingNames]);
 
-  const canSaveName = !!detail && nameDraft.given.trim().length > 0 && !duplicateName && busy == null;
   const providerStatus = useMemo(() => {
     if (!detail) return null;
     return shellStatuses.find((status) => status.id === provider) ?? null;
   }, [detail, provider, shellStatuses]);
   const editingLocal = provider === 'kota-local';
-  const local = useTavernLocal(editingLocal && (shellEditing || model === AUTO_ROUTE_MODEL));
-  const jev = useJevSettings(editingLocal && shellEditing);
+  const local = useTavernLocal(editingLocal && (editing || model === AUTO_ROUTE_MODEL));
+  const jev = useJevSettings(editingLocal && editing);
   const automatic = editingLocal && model === AUTO_ROUTE_MODEL;
   const modelCacheEntry = detail ? modelCache[provider] : undefined;
   const localModels = linkedCatalogProviders(local.catalog.loading || local.catalog.failed ? null : local.catalog.data)
@@ -211,10 +222,10 @@ export function ProjectAgentProfileOverlay({
       && localModels.some(option => option.id === model.trim()) && !!localModel?.thinkingLevels.includes(effort);
   const localMissingModel = editingLocal && (!model.trim() || model.trim().toLowerCase() === 'default');
   useEffect(() => {
-    if (shellEditing && editingLocal && localModel && !localModel.thinkingLevels.includes(effort)) {
+    if (editing && editingLocal && localModel && !localModel.thinkingLevels.includes(effort)) {
       setEffort(localThinkingForModel(localModel.thinkingLevels, effort));
     }
-  }, [shellEditing, editingLocal, localModel, effort]);
+  }, [editing, editingLocal, localModel, effort]);
   const selectModel = (value: string) => {
     setModel(value); setStringValid(true);
     if (editingLocal) {
@@ -230,7 +241,8 @@ export function ProjectAgentProfileOverlay({
     const nextSkills = active
       ? [...skills, skillId]
       : skills.filter((id) => id !== skillId);
-    setSkills(nextSkills);
+    // Turning a skill off and on again is not a change: keep the saved order.
+    setSkills(nextSkills.length === savedSkills.length && nextSkills.every((id) => savedSkills.includes(id)) ? savedSkills : nextSkills);
   };
 
   const openSkillFolder = async (skill: AccountSkillDraft) => {
@@ -280,79 +292,76 @@ export function ProjectAgentProfileOverlay({
     }
   };
 
-  const toggleShellEdit = async () => {
-    if (!shellEditing) {
-      if (detail) {
-        setProvider(detail.provider);
-        const selected = detail.provider === 'kota-local' && detail.model.trim().toLowerCase() === 'default' ? '' : detail.model;
-        setModel(selected);
-        setAutoRoute(detail.autoRoute ?? null); setStringValid(true);
-        const slash = selected.indexOf('/');
-        const localModel = catalogModel(local.catalog.data, selected.slice(0, slash), selected.slice(slash + 1));
-        setEffort(detail.provider === 'kota-local' ? selected === AUTO_ROUTE_MODEL ? 'off' : localModel ? localThinkingForModel(localModel.thinkingLevels, detail.effort) : detail.effort ?? '' : detail.effort ?? '');
-      }
-      setShellEditing(true);
-      setNotice(null);
-      setError(null);
-      return;
-    }
-    if (!detail || (!automatic && modelRefreshing) || (editingLocal && !localSelectionReady)) return;
-    const nextModel = model.trim() || 'default';
-    const nextEffort = effort.trim();
-    const saved = await save({ provider, model: nextModel, effort: automatic ? 'off' : nextEffort || null,
-      ...(automatic ? { autoRoute } : {}) });
-    if (saved) {
-      setShellEditing(false);
-    }
+  // Loads a saved detail into the staged fields. `forEdit` applies the Local
+  // model and thinking values the SHELL controls start from.
+  const stageFrom = (source: ProjectAgentDetail, forEdit: boolean) => {
+    const selected = forEdit && source.provider === 'kota-local' && source.model.trim().toLowerCase() === 'default' ? '' : source.model;
+    const slash = selected.indexOf('/');
+    const selectedModel = catalogModel(local.catalog.data, selected.slice(0, slash), selected.slice(slash + 1));
+    setProvider(source.provider);
+    setModel(selected);
+    setEffort(forEdit && source.provider === 'kota-local'
+      ? selected === AUTO_ROUTE_MODEL ? 'off' : selectedModel ? localThinkingForModel(selectedModel.thinkingLevels, source.effort) : source.effort ?? ''
+      : source.effort ?? '');
+    setAutoRoute(source.autoRoute ?? null); setStringValid(true);
+    setAvatarId(source.avatarId ?? null);
+    setSkills(source.skills);
+    setGhost(source.ghost);
+    setNameDraft(projectAgentNameFieldsFromDetail(source, fullProjectAgentName(source.displayName, source.projectName)));
   };
 
-  const save = async (patch: {
-    provider?: string;
-    displayName?: string;
-    nameFields?: ProjectAgentNameFields | null;
-    ghost?: string;
-    closeGhost?: boolean;
-    avatarId?: string | null;
-    skills?: string[];
-    model?: string;
-    effort?: string | null;
-    autoRoute?: AutoRouteGroup | null;
-  } = {}): Promise<boolean> => {
-    if (!detail || saveInFlight.current) return false;
-    const nextProvider = patch.provider ?? detail.provider;
-    const nextDisplayName = (patch.displayName ?? displayName).trim();
-    const nextGhost = patch.ghost ?? ghost;
-    const nextAvatarId = patch.avatarId !== undefined ? patch.avatarId : avatarId;
-    const nextSkills = patch.skills ?? detail.skills;
-    const nextModel = (patch.model ?? detail.model).trim() || 'default';
-    const nextEffort = patch.effort !== undefined
-      ? (patch.effort ?? '').trim()
-      : (detail.effort ?? '').trim();
-    const nameChanged = patch.displayName !== undefined && displayName.trim() !== nextDisplayName;
-    const currentNameFields = projectAgentNameFieldsFromDetail(detail, displayName);
-    const nextNameFields = patch.nameFields ?? (nameChanged ? nameDraft : currentNameFields);
-    const nameFieldsChanged =
-      patch.nameFields !== undefined &&
-      !projectAgentNameFieldsEqual(nextNameFields, currentNameFields);
-    const modelChanged = detail.model !== nextModel;
-    const effortChanged = (detail.effort ?? '') !== nextEffort;
-    const nextAutoRoute = patch.autoRoute !== undefined ? patch.autoRoute : detail.autoRoute;
-    const routeChanged = nextProvider === 'kota-local' && nextModel === AUTO_ROUTE_MODEL
-      && JSON.stringify(nextAutoRoute) !== JSON.stringify(detail.autoRoute);
-    const changedNext =
-      nextProvider !== detail.provider ||
-      nameChanged ||
-      nameFieldsChanged ||
-      modelChanged ||
-      effortChanged ||
-      routeChanged ||
-      detail.ghost !== nextGhost ||
-      (detail.avatarId ?? null) !== (nextAvatarId ?? null) ||
-      detail.skills.join('\n') !== nextSkills.join('\n');
-    if (!changedNext || duplicateName || !nextDisplayName.trim()) {
-      if (patch.closeGhost) setGhostExpanded(false);
-      return !duplicateName && !!nextDisplayName.trim();
+  const startEdit = () => {
+    if (!detail || busy != null) return;
+    stageFrom(detail, true);
+    setEditing(true);
+    setNotice(null);
+    setError(null);
+  };
+  const leaveEdit = () => {
+    if (detail) stageFrom(detail, false);
+    setEditing(false);
+    setUnsavedPrompt(null);
+  };
+
+  const nextModel = model.trim() || 'default';
+  const nextEffort = automatic ? 'off' : effort.trim();
+  const shellDirty = editing && !!detail && (
+    provider !== detail.provider
+    || nextModel !== (detail.model.trim() || 'default')
+    || nextEffort !== (detail.effort ?? '').trim()
+    || (automatic && !sameAutoRoute(autoRoute, detail.autoRoute))
+    // An unfinished Auto String edit stays in its editor; it still counts as a pending SHELL change.
+    || (automatic && !stringValid));
+  shellDirtyNow.current = shellDirty;
+  const dirtySections = !editing || !detail ? [] : [
+    nameDirty ? 'name' : '',
+    (detail.avatarId ?? null) !== (avatarId ?? null) ? 'avatar' : '',
+    shellDirty ? 'SHELL' : '',
+    ghost !== detail.ghost ? 'GHOST' : '',
+    skills.join('\n') !== detail.skills.join('\n') ? 'skills' : '',
+  ].filter(Boolean);
+  // SHELL readiness only holds back a save that changes SHELL.
+  const shellBlocked = shellDirty && ((!automatic && modelRefreshing) || (editingLocal && !localSelectionReady));
+  const blockedReason = !editing ? null
+    : nameDirty && !nameDraft.given.trim() ? 'Enter a given name to save'
+    : duplicateName ? 'Name already exists in this project.'
+    : shellBlocked ? 'Finish SHELL settings to save'
+    : null;
+  const canSave = editing && busy == null && dirtySections.length > 0 && !blockedReason;
+
+  // One request carries every staged section. A section that was not edited
+  // goes out with its saved value.
+  const saveDraft = async (): Promise<boolean> => {
+    if (!detail || !savedNameFields || saveInFlight.current || blockedReason) return false;
+    if (dirtySections.length === 0) {
+      leaveEdit();
+      return true;
     }
+    const sendProvider = shellDirty ? provider : detail.provider;
+    const sendModel = shellDirty ? nextModel : detail.model.trim() || 'default';
+    const sendEffort = shellDirty ? nextEffort : (detail.effort ?? '').trim();
+    const sendsRoute = sendProvider === 'kota-local' && sendModel === AUTO_ROUTE_MODEL;
+    const skillsChanged = skills.join('\n') !== detail.skills.join('\n');
     saveInFlight.current = true;
     setBusy('save');
     setError(null);
@@ -361,34 +370,26 @@ export function ProjectAgentProfileOverlay({
       const next = await saveProjectAgentDetail({
         agentId,
         projectRoot,
-        displayName: nextDisplayName,
-        nameFields: nextNameFields,
-        provider: nextProvider,
+        displayName: (nameDirty ? composeProjectAgentName(nameDraft) : displayName).trim(),
+        nameFields: nameDirty ? nameDraft : savedNameFields,
+        provider: sendProvider,
         shellRevision: detail.shellRevision,
-        model: nextModel,
-        effort: nextEffort || null,
-        ...(nextProvider === 'kota-local' && nextModel === AUTO_ROUTE_MODEL ? { autoRoute: nextAutoRoute } : {}),
-        avatarId: nextAvatarId,
-        skills: nextSkills,
-        ghost: nextGhost,
+        model: sendModel,
+        effort: sendEffort || null,
+        ...(sendsRoute ? { autoRoute: shellDirty ? autoRoute : detail.autoRoute } : {}),
+        avatarId,
+        skills,
+        ghost,
       });
       setDetail(next);
-      const savedDisplayName = fullProjectAgentName(next.displayName, next.projectName);
-      setDisplayName(savedDisplayName);
-      setNameDraft(projectAgentNameFieldsFromDetail(next, savedDisplayName));
-      setNameEditing(false);
-      if (patch.provider !== undefined) setProvider(next.provider);
-      if (patch.model !== undefined) setModel(next.model);
-      if (patch.effort !== undefined) setEffort(next.effort ?? '');
-      if (patch.model !== undefined || patch.autoRoute !== undefined) { setAutoRoute(next.autoRoute ?? null); setStringValid(true); }
-      setAvatarId(next.avatarId ?? null);
-      setSkills((current) => (patch.skills !== undefined ? next.skills : current));
-      setGhost(next.ghost);
+      setDisplayName(fullProjectAgentName(next.displayName, next.projectName));
+      stageFrom(next, false);
+      setEditing(false);
+      setUnsavedPrompt(null);
       onSaved(next, detail.provider);
-      setNotice(next.appliedToSession === true ? 'Saved and applied to the running session.'
-        : next.appliedToSession === false ? 'Saved. Applies on next launch.' : 'Saved');
-      if (patch.closeGhost) setGhostExpanded(false);
-      if (patch.skills !== undefined) {
+      setNotice({ text: next.appliedToSession === true ? 'Saved and applied to the running session.'
+        : next.appliedToSession === false ? 'Saved. Applies on next launch.' : 'Saved' });
+      if (skillsChanged) {
         window.dispatchEvent(new Event('kota:file-tree-refresh'));
       }
       return true;
@@ -401,7 +402,7 @@ export function ProjectAgentProfileOverlay({
       }
       setError(failure ? `${failure.message}${refreshFailed ? ' Could not reload saved settings. Reopen this profile.' : ''}`
         : String(err) === 'local_config_changed' ? 'Settings changed outside this editor. Reload before saving.'
-        : nextProvider === 'kota-local' && nextModel === AUTO_ROUTE_MODEL ? stringErrorText(err) : String(err));
+        : sendsRoute ? stringErrorText(err) : String(err));
       return false;
     } finally {
       saveInFlight.current = false;
@@ -409,27 +410,42 @@ export function ProjectAgentProfileOverlay({
     }
   };
 
-  const flushSkillsAndClose = useCallback(async () => {
+  // Back leaves the card; Cancel returns to the view state. Both ask first
+  // when there are staged changes.
+  const requestLeave = () => {
     if (busy != null) return;
-    if (!detail || detail.skills.join('\n') === skills.join('\n')) {
-      onClose();
-      return;
-    }
-    const saved = await save({ skills });
-    if (saved) onClose();
-  }, [busy, detail, onClose, save, skills]);
+    if (dirtySections.length > 0) setUnsavedPrompt('leave');
+    else onClose();
+  };
+  const requestCancel = () => {
+    if (busy != null) return;
+    if (dirtySections.length > 0) setUnsavedPrompt('discard');
+    else leaveEdit();
+  };
+  const saveAndLeave = async () => {
+    setUnsavedPrompt(null);
+    if (await saveDraft()) onClose();
+  };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || event.isComposing) return;
       if (event.target instanceof Element && event.target.closest('.project-agent-combo[data-open="true"]')) return;
       event.preventDefault();
       event.stopPropagation();
-      void flushSkillsAndClose();
+      if (unsavedPrompt) setUnsavedPrompt(null);
+      else if (editing) requestCancel();
+      else requestLeave();
     };
     document.addEventListener('keydown', onKeyDown, true);
     return () => document.removeEventListener('keydown', onKeyDown, true);
-  }, [flushSkillsAndClose]);
+  });
+
+  useEffect(() => {
+    if (!notice || notice.sticky) return undefined;
+    const timer = window.setTimeout(() => setNotice(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   const invite = async () => {
     if (inviteInFlight.current || busy != null || !detail?.inviteEligibility.eligible) return;
@@ -452,12 +468,14 @@ export function ProjectAgentProfileOverlay({
           proposedDisplayName: result.displayName,
         },
       } : current);
-      setNotice(`Invited as ${result.displayName}`);
+      showInviteToast(`Invited as ${result.displayName}`);
       try {
         await syncTavernHeroStorageFromDisk();
       } catch {
         // The invitation is already saved; a cache refresh failure must not invite again.
-        setNotice(`Invited as ${result.displayName}. Recruit list could not refresh; open Tavern to refresh it.`);
+        // This one asks the user to act, so it stays instead of fading.
+        showInviteToast('');
+        setNotice({ text: `Invited as ${result.displayName}. Recruit list could not refresh; open Tavern to refresh it.`, sticky: true });
       }
     } catch (err) {
       setError(String(err));
@@ -482,46 +500,23 @@ export function ProjectAgentProfileOverlay({
   };
 
   const inviteLabel = inviteButtonLabel(detail, busy);
-  const inviteReason = detail?.inviteEligibility.reason
-    ?? (detail?.inviteEligibility.eligible ? 'Ready to invite this GHOST into Tavern.' : null);
   const profileDisplayName = displayName || detail?.displayName || agentId;
   const shellProvider = projectAgentShellProviderMeta(detail ? { ...detail, provider } : null);
-  const startNameEdit = () => {
-    setNameDraft(detail ? projectAgentNameFieldsFromDetail(detail, displayName) : projectAgentNameFields(displayName));
-    setNameEditing(true);
-  };
-  const cancelNameEdit = () => {
-    setNameDraft(detail ? projectAgentNameFieldsFromDetail(detail, displayName) : projectAgentNameFields(displayName));
-    setNameEditing(false);
-  };
-  const confirmNameEdit = () => {
-    const nextName = composeProjectAgentName(nameDraft);
-    if (!canSaveName || !nextName.trim()) return;
-    const currentNameFields = detail ? projectAgentNameFieldsFromDetail(detail, displayName) : projectAgentNameFields(displayName);
-    if (
-      nextName.trim() === displayName.trim() &&
-      projectAgentNameFieldsEqual(nameDraft, currentNameFields)
-    ) {
-      setNameEditing(false);
-      return;
-    }
-    void save({ displayName: nextName, nameFields: nameDraft });
-  };
+  const status = error ? { kind: 'error', text: error }
+    : busy ? { kind: 'idle', text: `Working: ${busy}` }
+    : editing ? blockedReason ? { kind: 'blocked', text: blockedReason }
+      : dirtySections.length > 0 ? { kind: 'dirty', text: 'Unsaved changes' } : { kind: 'idle', text: 'No changes yet' }
+    : notice ? { kind: 'saved', text: notice.text } : null;
 
   return (
-    <section className="tavern-profile-overlay" role="dialog" aria-label="Project agent detail">
-      <div className="tavern-profile-card project-agent-profile">
-        <button type="button" className="tavern-profile-back" onClick={() => void flushSkillsAndClose()}>
-          Back
-        </button>
-        <div className="tavern-merit-bar project-agent-merits">
-          <MeritBadge image={iconTurns} label="Turns" value={String(detail?.record.turns ?? 0)} />
-          <MeritBadge
-            image={iconCommends}
-            label="Commends"
-            value={formatCompact(detail?.record.commends ?? 0)}
-          />
-        </div>
+    <section className="tavern-profile-overlay profile-sheet-overlay" role="dialog" aria-label="Project agent detail">
+      <div className={`tavern-profile-card project-agent-profile profile-sheet ${editing ? 'editing' : ''}`}>
+        <header className="profile-sheet-head">
+          <button type="button" className="tavern-profile-back" onClick={requestLeave}>
+            Back
+          </button>
+          {editing && <span className="profile-sheet-mode">Editing</span>}
+        </header>
 
         <div className="tavern-profile-layout">
           <section className="tavern-profile-panel shell-panel project-agent-shell-panel" aria-label="SHELL">
@@ -534,7 +529,7 @@ export function ProjectAgentProfileOverlay({
                 <span className="project-agent-shell-provider-icon" aria-hidden="true" />
                 <span className="project-agent-shell-provider-copy">
                   <span className="project-agent-shell-provider-label">Provider</span>
-                  {shellEditing ? (
+                  {editing ? (
                     <select className="project-agent-shell-provider-select" aria-label="Provider" value={provider} disabled={busy != null}
                       onChange={(event) => {
                         const next = event.target.value;
@@ -548,7 +543,7 @@ export function ProjectAgentProfileOverlay({
                   ) : <span className="project-agent-shell-provider-name">{shellProvider.label}</span>}
                 </span>
               </div>
-              {shellEditing ? (
+              {editing ? (
                 <div className="project-agent-shell-edit-fields">
                   <div className="tavern-profile-field">
                     <span>Model</span>
@@ -596,47 +591,47 @@ export function ProjectAgentProfileOverlay({
                 </div>
               ) : (
                 <div className="project-agent-shell-summary" aria-label="Current SHELL settings">
-                  <code title={model || 'default'}>{automatic ? 'Auto String' : editingLocal && model.startsWith('magpie/') ? localModelLabel('magpie', model.slice(7), localModel?.name) : model || 'default'}{editingLocal && !automatic && <LocalModelCredit providerId={localModelProvider(model)} />}</code>
-                  <code title={effort || 'default'}>{automatic ? 'By Auto String' : effort || 'default'}</code>
+                  <div className="tavern-profile-field">
+                    <span>Model</span>
+                    <code title={model || 'default'}>{automatic ? 'Auto String' : editingLocal && model.startsWith('magpie/') ? localModelLabel('magpie', model.slice(7), localModel?.name) : model || 'default'}{editingLocal && !automatic && <LocalModelCredit providerId={localModelProvider(model)} />}</code>
+                  </div>
+                  <div className="tavern-profile-field">
+                    <span>{editingLocal ? 'Thinking' : 'Effort'}</span>
+                    <code title={effort || 'default'}>{automatic ? 'By Auto String' : effort || 'default'}</code>
+                  </div>
                 </div>
               )}
-            </div>
-            {shellEditing && (
-              <div className="project-agent-shell-apply-note">{editingLocal && !stringValid ? 'Finish the Auto String configuration before saving.' : localMissingModel ? 'Choose a model before saving.' : editingLocal ? 'Save applies to a running Local session, or to its next launch.' : 'Apply on Next Launch'}</div>
-            )}
-            <div className="tavern-profile-actions">
-              <button type="button" onClick={() => void toggleShellEdit()} disabled={!detail || busy != null || (shellEditing && editingLocal && !localSelectionReady)}>
-                {shellEditing ? 'Save SHELL' : 'Edit SHELL'}
-              </button>
+              {editing && (
+                <div className="project-agent-shell-apply-note">{editingLocal && !stringValid ? 'Finish the Auto String configuration before saving.' : localMissingModel ? 'Choose a model before saving.' : editingLocal ? 'SHELL changes apply to a running Local session, or to its next launch.' : 'SHELL changes apply on next launch.'}</div>
+              )}
             </div>
           </section>
 
           <section className="tavern-profile-center" aria-label="Project agent identity">
-            {nameEditing && (
+            {detail && (
+              <HeroAvatarPicker
+                provider={detail.provider || detail.cli}
+                value={avatarId}
+                className="profile"
+                disabled={!editing || busy != null}
+                onChange={setAvatarId}
+              />
+            )}
+            {editing && (
               <ProjectAgentTitlePicker
                 titleId={nameDraft.titleId}
                 disabled={busy != null}
                 onChange={(nextId) => setNameDraft((prev) => ({ ...prev, titleId: nextId }))}
               />
             )}
-            {detail && (
-              <HeroAvatarPicker
-                provider={detail.provider || detail.cli}
-                value={avatarId}
-                className="profile"
-                disabled={busy != null}
-                onChange={(nextAvatarId) => {
-                  setAvatarId(nextAvatarId);
-                  void save({ avatarId: nextAvatarId });
-                }}
-              />
-            )}
-            {nameEditing ? (
+            {editing ? (
               <div className="project-agent-name-editor" aria-label="Edit agent name">
                 <label>
                   <span>Given name</span>
                   <input
                     value={nameDraft.given}
+                    disabled={busy != null}
+                    aria-invalid={blockedReason != null && !shellBlocked}
                     onChange={(event) => {
                       const value = event.currentTarget.value;
                       setNameDraft((prev) => ({ ...prev, given: value }));
@@ -648,6 +643,7 @@ export function ProjectAgentProfileOverlay({
                   <span>Middle name</span>
                   <input
                     value={nameDraft.middle}
+                    disabled={busy != null}
                     onChange={(event) => {
                       const value = event.currentTarget.value;
                       setNameDraft((prev) => ({ ...prev, middle: value }));
@@ -658,141 +654,128 @@ export function ProjectAgentProfileOverlay({
                   <span>Surname</span>
                   <input
                     value={nameDraft.surname}
+                    disabled={busy != null}
                     onChange={(event) => {
                       const value = event.currentTarget.value;
                       setNameDraft((prev) => ({ ...prev, surname: value }));
                     }}
                   />
                 </label>
-                <div className="project-agent-name-editor-actions">
-                  <button
-                    type="button"
-                    className="accept"
-                    disabled={!canSaveName}
-                    onClick={confirmNameEdit}
-                    aria-label="Save agent name"
-                  >
-                    ✓
-                  </button>
-                  <button type="button" onClick={cancelNameEdit} aria-label="Cancel agent name edit">
-                    x
-                  </button>
-                </div>
               </div>
             ) : (
-              <button
-                type="button"
-                className="profile-name-button"
-                onClick={startNameEdit}
-                disabled={!detail}
-                title={profileDisplayName}
-                data-full-name={profileDisplayName}
-              >
+              <div className="profile-name-static" title={profileDisplayName}>
                 <ProjectAgentName
                   name={profileDisplayName}
                   projectName={detail?.projectName}
                   titleLine
                   className="profile-name-display"
                 />
-              </button>
+              </div>
             )}
-            {duplicateName && (
-              <div className="project-agent-error">Name already exists in this project.</div>
-            )}
-            <section className={`tavern-ghost-scroll ${ghostExpanded ? 'expanded' : ''}`}>
+            <section className="tavern-ghost-scroll">
               <PanelTitle icon={iconGhost}>GHOST</PanelTitle>
-              {ghostExpanded ? (
+              {editing ? (
                 <textarea
+                  aria-label="GHOST text"
                   value={ghost}
+                  disabled={busy != null}
                   onChange={(event) => setGhost(event.currentTarget.value)}
                   spellCheck={false}
-                  autoFocus
                 />
               ) : (
-                <button type="button" className="tavern-ghost-preview" onClick={() => setGhostExpanded(true)}>
+                <div className="tavern-ghost-preview" tabIndex={0} aria-label="GHOST text">
                   {ghost.trim() || 'No GHOST configured.'}
-                </button>
-              )}
-              <div className="project-agent-ghost-footer">
-                <div className="tavern-profile-actions">
-                  <button type="button"
-                    onClick={() => {
-                      if (ghostExpanded) void save({ closeGhost: true });
-                      else setGhostExpanded(true);
-                    }}
-                    disabled={ghostExpanded && busy != null}>
-                    {ghostExpanded ? 'Save GHOST' : 'Edit GHOST'}
-                  </button>
                 </div>
-                <div className="project-agent-notes-entry">
+              )}
+              {!editing && (
+                <div className="profile-sheet-ghost-tools">
+                  {detail?.notes && !detail.notes.exists && <span>No notes yet</span>}
                   <button type="button" className="tavern-user-dreams"
                     disabled={!detail?.notes?.exists || openingNotes || busy === 'load'}
                     title="Open notes in your default app" onClick={() => void openNotes()}>
                     View notes
                   </button>
-                  {detail?.notes && !detail.notes.exists && <span>No notes yet</span>}
                 </div>
-              </div>
+              )}
             </section>
           </section>
 
           <section className="tavern-profile-panel skills-panel" aria-label="SKILLS">
             <PanelTitle icon={iconSkills}>SKILLS</PanelTitle>
+            {skillEntries.length > 0 && (
+              <div className="profile-sheet-count">{activeSkillCount} active · {skillEntries.length} available</div>
+            )}
             {skillEntries.length === 0 ? (
               <div className="tavern-rule-empty">No skills in $KOTA_HOME/skills.</div>
+            ) : !editing && activeSkillCount === 0 ? (
+              <div className="tavern-rule-empty">No active skills.</div>
             ) : (
               <SkillActivationList
                 entries={skillEntries}
-                disabled={!detail}
+                readOnly={!editing}
+                disabled={!detail || busy != null}
                 onChange={setSkillActive}
                 onOpenSkillFolder={openSkillFolder}
               />
             )}
           </section>
         </div>
-        <div className="project-agent-invite-row">
-          <div className="project-agent-invite-copy">
-            <span>Invite to Tavern</span>
-            <small>{inviteReason ?? 'GHOST is not ready for Tavern.'}</small>
-          </div>
-          <button
-            type="button"
-            className="project-agent-invite"
-            disabled={!detail?.inviteEligibility.eligible || busy != null}
-            title={detail?.inviteEligibility.reason ?? undefined}
-            onClick={() => void invite()}
-          >
-            {inviteLabel}
-          </button>
-        </div>
-        <button
-          type="button"
-          className="tavern-remove-quiet project-agent-remove"
-          disabled={!detail || busy != null}
-          onClick={() => void removeFromProject()}
-        >
-          {busy === 'remove' ? 'Removing' : 'Remove from project'}
-        </button>
-        {(busy || error || notice) && (
-          <div className={`tavern-status ${error ? 'error' : ''}`}>
-            {error ?? notice ?? (busy ? `Working: ${busy}` : null)}
-            {error === 'Settings changed outside this editor. Reload before saving.' && <button type="button" disabled={busy != null} onClick={() => setReload(value => value + 1)}>Reload</button>}
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
 
-function MeritBadge({ image, label, value }: { image: string; label: string; value: string }) {
-  return (
-    <div className="tavern-merit-badge">
-      <img src={image} alt="" aria-hidden />
-      <span>
-        <b>{value}</b>
-        <small>{label}</small>
-      </span>
-    </div>
+        <footer className="profile-sheet-foot">
+          <div className="profile-sheet-foot-left">
+            {!editing && (
+              <button
+                type="button"
+                className="tavern-remove-quiet"
+                disabled={!detail || busy != null}
+                onClick={() => void removeFromProject()}
+              >
+                {busy === 'remove' ? 'Removing' : 'Remove from project'}
+              </button>
+            )}
+          </div>
+          <div className="profile-sheet-foot-mid">
+            {!editing && (
+              <span className="profile-sheet-invite">
+                <button
+                  type="button"
+                  className="profile-sheet-button"
+                  disabled={!detail?.inviteEligibility.eligible || busy != null}
+                  title={detail?.inviteEligibility.reason ?? undefined}
+                  onClick={() => void invite()}
+                >
+                  {inviteLabel}
+                </button>
+                <small className="profile-sheet-toast" role="status" data-show={inviteToast.show}>{inviteToast.text}</small>
+              </span>
+            )}
+          </div>
+          <div className="profile-sheet-foot-right">
+            {status && (
+              <span className={`profile-sheet-status ${status.kind}`} role="status">
+                {status.text}
+                {error === 'Settings changed outside this editor. Reload before saving.' && <button type="button" disabled={busy != null} onClick={() => setReload(value => value + 1)}>Reload</button>}
+              </span>
+            )}
+            {editing ? <>
+              <button type="button" className="profile-sheet-button" disabled={busy != null} onClick={requestCancel}>Cancel</button>
+              <button type="button" className="profile-sheet-button primary" disabled={!canSave} onClick={() => void saveDraft()}>Save</button>
+            </> : (
+              <button type="button" className="profile-sheet-button primary" disabled={!detail || busy != null} onClick={startEdit}>Edit</button>
+            )}
+          </div>
+        </footer>
+      </div>
+      {unsavedPrompt && (
+        <ProfileUnsavedDialog
+          kind={unsavedPrompt}
+          sections={dirtySections}
+          onKeep={() => setUnsavedPrompt(null)}
+          onDiscard={unsavedPrompt === 'leave' ? onClose : leaveEdit}
+          onSave={() => void saveAndLeave()}
+        />
+      )}
+    </section>
   );
 }
 
@@ -803,13 +786,6 @@ function PanelTitle({ icon, children }: { icon: string; children: string }) {
       <span>{children}</span>
     </h3>
   );
-}
-
-function formatCompact(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '0';
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return String(value);
 }
 
 function inviteButtonLabel(detail: ProjectAgentDetail | null, busy: string | null): string {
@@ -881,18 +857,6 @@ function projectAgentNameFieldsFromDetail(
     middle: detail.nameFields?.middle ?? parsed.middle,
     surname: detail.nameFields?.surname ?? parsed.surname,
   };
-}
-
-function projectAgentNameFieldsEqual(
-  left: ProjectAgentNameFields | null | undefined,
-  right: ProjectAgentNameFields | null | undefined,
-): boolean {
-  return (
-    (left?.titleId ?? null) === (right?.titleId ?? null) &&
-    (left?.given ?? '').trim() === (right?.given ?? '').trim() &&
-    (left?.middle ?? '').trim() === (right?.middle ?? '').trim() &&
-    (left?.surname ?? '').trim() === (right?.surname ?? '').trim()
-  );
 }
 
 function loadProjectAgentModelCache(): ProjectAgentModelCache {

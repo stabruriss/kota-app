@@ -19,9 +19,5 @@
 .project-git-status { display:grid; gap:8px; justify-items:start; }
 .project-create-card .project-create-action { align-self:flex-start; }
 .project-setup-grid>.project-setup-empty { align-self:start; min-width:0; }
-.gh-pill.project-connection-pill { flex-shrink:0; max-width:220px; min-width:0; cursor:pointer; white-space:nowrap; }
-.project-connection-pill .gh-pill-dot { flex-shrink:0; }
-.project-connection-label { min-width:0; overflow:hidden; text-overflow:ellipsis; }
-@media(max-width:600px) { .gh-pill.project-connection-pill { max-width:140px; } }
 @media(max-width:600px) { .project-setup-grid .project-create-card { order:-1; } }
 @media(prefers-reduced-motion:reduce) { .project-github-thumb,.project-github-switch::before { transition:none; } }

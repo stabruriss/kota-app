@@ -88,7 +88,7 @@ export function StringRoutingEditor({ draft, catalog, owner, surface, enabled = 
     onClose={onClose} onEscape={() => expanded ? closeList(expanded) : onClose()} footer={<><div className="string-editor-status"><p className={error || !complete ? 'local-model-warning' : ''} role="status">
       {error || issue || (busy ? 'Saving…' : surface === 'workbench' ? 'Saved automatically.'
         : surface === 'tavern' && ruleFileDirty === false ? 'No changes.' : 'Unsaved changes')}
-    </p><small>{surface === 'workbench' ? 'Changes apply to the next message.' : surface === 'tavern' ? 'Click OK to save.' : `Click OK, then ${surface === 'hero' ? 'Save Shell' : 'Save'}.`}</small></div>
+    </p><small>{surface === 'workbench' ? 'Changes apply to the next message.' : surface === 'tavern' ? 'Click OK to save.' : 'Click OK, then Save.'}</small></div>
     {extraAction}<div className="template-editor-actions">
       {templateNotice && <span className="template-toast" role="status">{templateNotice}</span>}
       <button type="button" className="local-model-text" disabled={locked} onClick={event => { event.currentTarget.focus(); setTemplateNotice(null); setTemplates('import'); }}>Import</button>

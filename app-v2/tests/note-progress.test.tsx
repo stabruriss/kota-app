@@ -23,7 +23,8 @@ it('preserves note and subagent marks through folded mixed progress and uses Mar
   await waitFor(() => expect(view.container.querySelectorAll('.violet-commentary-entry')).toHaveLength(4));
   const article = view.container.querySelector('article')!;
   const summary = article.querySelector('summary')!;
-  expect(summary.querySelector('.violet-note-origin-summary')).toHaveAttribute('aria-label', 'Note added');
+  expect(summary.querySelector('.violet-note-origin-summary')).toHaveAttribute('aria-label', 'Add Note');
+  expect(summary.querySelector('.violet-note-origin-summary')).toHaveTextContent('Add Note');
   expect(summary.querySelector('.violet-subagent-origin')).toBeNull();
   const entries = article.querySelectorAll('.violet-commentary-entry');
   expect(entries[0].querySelector('.violet-note-origin-entry')).not.toBeNull();
@@ -33,6 +34,16 @@ it('preserves note and subagent marks through folded mixed progress and uses Mar
   expect(entries[2].querySelector('.violet-note-origin')).toBeNull();
   expect(entries[3].querySelector('.violet-note-origin-entry')).not.toBeNull();
   expect(entries[3].querySelector('strong')).toHaveTextContent('lesson');
+});
+
+it('names what a saved mark change did: added, edited or deleted', async () => {
+  const view = mount([row(1, 'First wording.', 'note'), row(2, 'Second wording.', 'note_edit'), row(3, 'Second wording.', 'note_delete')]);
+  await waitFor(() => expect(view.container.querySelectorAll('.violet-commentary-entry')).toHaveLength(3));
+  const marks = [...view.container.querySelectorAll('.violet-note-origin-entry')];
+  expect(marks.map(mark => mark.textContent)).toEqual(['Add Note', 'Edit Note', 'Delete Note']);
+  expect(marks.map(mark => mark.getAttribute('aria-label'))).toEqual(['Add Note', 'Edit Note', 'Delete Note']);
+  // The folded summary speaks for the latest entry.
+  expect(view.container.querySelector('summary .violet-note-origin-summary')).toHaveTextContent('Delete Note');
 });
 
 it('uses only the latest entry origin in the collapsed summary while retaining an earlier note', async () => {

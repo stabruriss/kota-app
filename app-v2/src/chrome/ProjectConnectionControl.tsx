@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { projectConnectionSetLocal, type WorkspaceProject } from '../pty-client';
-import { openGithubAccounts, refreshGithubAccounts, useGithubAccounts } from '../lib/github-account-flow';
+import { refreshGithubAccounts, useGithubAccounts } from '../lib/github-account-flow';
 import { useProjectConnectionStatus } from '../lib/project-connection-status';
 import { connectionChanged, dismissConnectionNotice, useConnectionNotice } from '../lib/project-connection-ui';
 import { useProjectLinkTransition } from '../lib/project-link-transition';
@@ -25,7 +25,8 @@ export function ProjectConnectionControl({ workspace, connectRequested, onReques
   const accountState = view.status?.kind === 'github' ? view.status.accountState : null;
   const missing = accountState === 'missing' || accountState === 'unbound';
   const hasAccount = flow.view?.accounts.some(account => account.state === 'ok');
-  const blocked = choosing || motion.phase !== 'idle' || busy;
+  // The sign-in dialog is over this panel: a click in it is not a click outside.
+  const blocked = choosing || motion.phase !== 'idle' || busy || !!flow.signIn;
   const name = workspace.displayName || workspace.repoFullName.split('/').pop() || workspace.projectId;
   useEffect(() => { alive.current = true; void refreshGithubAccounts(); return () => { alive.current = false; }; }, []);
   useEffect(() => { onBlockingChange(blocked); return () => onBlockingChange(false); }, [blocked, onBlockingChange]);
@@ -49,12 +50,12 @@ export function ProjectConnectionControl({ workspace, connectRequested, onReques
       {!linked ? 'Local only' : login ? `Connected to GH ID ${login}` : 'Connected'}
     </ProjectGithubLink>
     {!linked ? <><p className="project-settings-hint">Local work continues. Bartender will not pull from or push to GitHub.</p>
-      {!hasAccount && <button type="button" className="project-settings-button secondary" onClick={openGithubAccounts}>Add GitHub account in Link</button>}</>
+      {!hasAccount && <GithubSignIn label="Add GitHub account" className="project-settings-button secondary" />}</>
       : <>
         {workspace.repoFullName && <p className="project-settings-hint">{workspace.repoFullName}</p>}
         {(missing || accountState === 'needs_login') && <div className="project-account-issue">
           <strong>{missing ? 'No account assigned' : 'Sign in required'}</strong><p>Pull and Push are paused for this project.</p>
-          {missing ? <button type="button" className="project-settings-button secondary" onClick={() => setChoosing(true)}>Choose account</button> : <GithubSignIn />}
+          {missing ? <button type="button" className="project-settings-button secondary" onClick={() => setChoosing(true)}>Choose account</button> : <GithubSignIn expect={login} />}
         </div>}
         {!missing && <button type="button" className="project-settings-button secondary project-connection-action" disabled={blocked}
           onClick={() => setChoosing(true)}>Use another GH account for this project</button>}

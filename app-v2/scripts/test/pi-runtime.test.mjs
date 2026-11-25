@@ -142,6 +142,7 @@ test('Tauri hooks preserve CLI order and explicit runtime resource mappings', ()
   assert.deepEqual(extensionResources, {
     '../kota-ext/index.ts': 'kota-ext/index.ts',
     '../kota-ext/history.ts': 'kota-ext/history.ts',
+    '../kota-ext/system-prompt.ts': 'kota-ext/system-prompt.ts',
     '../kota-ext/bridge.ts': 'kota-ext/bridge.ts',
     '../kota-ext/inject.ts': 'kota-ext/inject.ts',
     '../kota-ext/tools.ts': 'kota-ext/tools.ts',

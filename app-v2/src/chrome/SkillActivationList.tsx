@@ -5,6 +5,8 @@ import { SkillDescription } from './SkillDescription';
 
 interface SkillActivationListProps {
   entries: SkillLoomEntry[];
+  /** Lists only the active skills, as plain rows without checkboxes. */
+  readOnly?: boolean;
   disabled?: boolean;
   onChange: (skillId: string, active: boolean) => void;
   onOpenSkillFolder?: (skill: SkillLoomEntry) => void | Promise<void>;
@@ -12,6 +14,7 @@ interface SkillActivationListProps {
 
 export function SkillActivationList({
   entries,
+  readOnly = false,
   disabled = false,
   onChange,
   onOpenSkillFolder,
@@ -45,40 +48,41 @@ export function SkillActivationList({
 
   return (
     <div className="tavern-skill-list">
-      {entries.map((skill) => {
+      {(readOnly ? entries.filter((skill) => skill.selected) : entries).map((skill) => {
         const description = skill.description || skill.error || '';
         const path = skill.path || 'SHELL.yaml only';
-        const state = skill.missing ? 'missing' : skill.selected ? 'active' : 'deactive';
+        const Row = readOnly ? 'div' : 'label';
         return (
-          <label
+          <Row
             key={skill.id}
             className={[
               'tavern-skill-row',
               skill.selected ? 'active' : '',
               skill.missing ? 'missing' : '',
+              readOnly ? 'static' : '',
             ].filter(Boolean).join(' ')}
-            onContextMenu={(event) => openContextMenu(event, skill)}
+            onContextMenu={(event: MouseEvent) => openContextMenu(event, skill)}
           >
-            <input
-              type="checkbox"
-              checked={skill.selected}
-              disabled={disabled}
-              onChange={(event) => onChange(skill.id, event.currentTarget.checked)}
-              aria-label={`${skill.name} skill`}
-            />
+            {readOnly ? <span className="tavern-skill-tick" aria-hidden="true">✓</span> : (
+              <input
+                type="checkbox"
+                checked={skill.selected}
+                disabled={disabled}
+                onChange={(event) => onChange(skill.id, event.currentTarget.checked)}
+                aria-label={`${skill.name} skill`}
+              />
+            )}
             <span className="tavern-skill-row-copy">
               <span className="tavern-skill-row-title">
                 <b>{skill.name}{skill.missing ? ' (missing)' : ''}</b>
-                <span className={`tavern-skill-state-pill ${state}`}>{state}</span>
               </span>
               <SkillDescription
                 className="tavern-skill-description"
                 text={description}
                 fallback={path}
               />
-              <code title={path}>{path}</code>
             </span>
-          </label>
+          </Row>
         );
       })}
       {contextMenu && (

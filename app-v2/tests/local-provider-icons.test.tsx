@@ -57,7 +57,7 @@ it('uses the existing Tavern flame in Local status and SHELL choices while keepi
 
   await userEvent.click(screen.getByRole('button', { name: 'New Hero create template' }));
   const profile = within(screen.getByRole('dialog', { name: 'New Hero profile' }));
-  await userEvent.click(profile.getByRole('button', { name: 'Edit Shell' }));
+  await userEvent.click(profile.getByRole('button', { name: 'Edit' }));
   await userEvent.click(profile.getByRole('button', { name: /^Provider / }));
   const localOption = profile.getByRole('option', { name: /^Kota Local\b/ });
   const pi = profile.getByRole('option', { name: /^Pi\b/ });

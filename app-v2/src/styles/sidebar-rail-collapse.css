@@ -1,0 +1,301 @@
+/* Outer-edge wall-mounted sidebar collapse nameplates & rail slots. */
+
+.sidebar-rail-slot {
+  position: relative;
+  flex-shrink: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.sidebar-rail-slot--left {
+  width: 240px;
+}
+
+.sidebar-rail-slot--right {
+  width: 300px;
+  justify-content: flex-end;
+}
+
+.sidebar-rail-slot--left > aside {
+  flex: 0 0 240px;
+  width: 240px;
+  min-width: 240px;
+}
+
+.sidebar-rail-slot--right > aside {
+  flex: 0 0 300px;
+  width: 300px;
+  min-width: 300px;
+}
+
+.sidebar-rail-slot[data-collapsed="true"] {
+  width: 0;
+}
+
+.sidebar-rail-slot[data-collapsed="true"]:not([data-animating="true"]) {
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.sidebar-rail-slot[data-collapsed="true"]:not([data-animating="true"]) > aside {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Temporary layer lift during the 210ms slide only; removed immediately on settle. */
+.sidebar-rail-slot[data-animating="true"] {
+  z-index: 46;
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* Host inside .stage-composer-stack:
+   .input-bar-wrap keeps its existing padding (10px 16px 14px) and .input-bar uses
+   max-width: max(min(920px, calc(100% - 16px)), calc(100% - 72px)):
+   - stage <= 1024px: unchanged (minimum 24px per side, 6px clearance to each 18x172 nameplate)
+   - stage > 1024px: grows with the stage leaving 52px per side (34px clearance to each nameplate)
+   Each 18x172 nameplate sits flush on the outer wall (0px) and centers vertically via
+   margin-block:auto when .input-bar grows taller than 172px. */
+.sidebar-rail-host {
+  position: relative;
+}
+
+.sidebar-rail-plate {
+  --sidebar-rail-glow-rgb: 224, 192, 122;
+  --sidebar-rail-glow-alpha: 0;
+  --sidebar-rail-idle-arrow-rgb: 147, 168, 181;
+  position: absolute;
+  top: 10px;
+  bottom: 14px;
+  margin-block: auto;
+  z-index: 3;
+  width: 18px;
+  height: 172px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  isolation: isolate;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sidebar-rail-plate--left {
+  left: 0;
+}
+
+.sidebar-rail-plate--right {
+  right: 0;
+}
+
+/* 6px inward hit-slop: 18 + 6 = exact 24px margin width without touching .input-bar or sidebars */
+.sidebar-rail-plate--left::after {
+  content: '';
+  position: absolute;
+  inset: 0 -6px 0 0;
+}
+
+.sidebar-rail-plate--right::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 0 -6px;
+}
+
+.sidebar-rail-plate:focus-visible {
+  outline: none;
+}
+
+.sidebar-rail-plate:focus-visible .sidebar-rail-plate-outer-stroke {
+  stroke: var(--sky-hi);
+  stroke-width: 1.4;
+}
+
+.sidebar-rail-plate:active .sidebar-rail-svg {
+  transform: translateY(1px);
+}
+
+/* Always-on status lamp colors (reduced brightness & tight inward spread) */
+.sidebar-rail-plate[data-glow="gold"] {
+  --sidebar-rail-glow-rgb: 224, 192, 122;
+  --sidebar-rail-glow-alpha: 1;
+}
+
+.sidebar-rail-plate[data-glow="yellow"] {
+  --sidebar-rail-glow-rgb: 239, 195, 111;
+  --sidebar-rail-glow-alpha: 1;
+}
+
+.sidebar-rail-plate[data-glow="red"] {
+  --sidebar-rail-glow-rgb: 246, 77, 54;
+  --sidebar-rail-glow-alpha: 1;
+}
+
+.sidebar-rail-underglow {
+  position: absolute;
+  z-index: 0;
+  top: 16px;
+  bottom: 16px;
+  border-radius: 8px;
+  pointer-events: none;
+  opacity: var(--sidebar-rail-glow-alpha);
+  background: radial-gradient(
+    ellipse 82% 54% at 50% 50%,
+    rgba(var(--sidebar-rail-glow-rgb), 0.24) 0%,
+    rgba(var(--sidebar-rail-glow-rgb), 0.09) 55%,
+    rgba(var(--sidebar-rail-glow-rgb), 0) 82%
+  );
+  filter: blur(2.4px);
+  transition: opacity 180ms ease;
+}
+
+.sidebar-rail-plate--left .sidebar-rail-underglow {
+  left: 0;
+  right: -3.5px;
+}
+
+.sidebar-rail-plate--right .sidebar-rail-underglow {
+  left: -3.5px;
+  right: 0;
+}
+
+.sidebar-rail-underglow-poly {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+  overflow: visible;
+  opacity: var(--sidebar-rail-glow-alpha);
+  transition: opacity 180ms ease;
+  filter:
+    drop-shadow(0 0 1.8px rgba(var(--sidebar-rail-glow-rgb), 0.40))
+    drop-shadow(0 0 4.2px rgba(var(--sidebar-rail-glow-rgb), 0.18));
+}
+
+.sidebar-rail-underglow-poly polygon {
+  fill: rgba(var(--sidebar-rail-glow-rgb), 0.14);
+}
+
+.sidebar-rail-svg {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+  transition: transform 90ms linear;
+}
+
+.sidebar-rail-plate-base {
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+}
+
+.sidebar-rail-plate-outer-stroke {
+  fill: none;
+  stroke: rgba(218, 214, 204, 0.17);
+  stroke-width: 0.9;
+  transition: stroke 150ms ease;
+}
+
+.sidebar-rail-plate-bevel {
+  fill: none;
+  stroke-width: 0.7;
+}
+
+.sidebar-rail-chamfer-glint {
+  stroke: rgba(232, 226, 210, 0.20);
+  stroke-width: 0.85;
+  stroke-linecap: round;
+  transition: stroke 150ms ease;
+}
+
+.sidebar-rail-rivets circle {
+  fill: #050608;
+  stroke: rgba(214, 208, 192, 0.16);
+  stroke-width: 0.5;
+}
+
+.sidebar-rail-plate:not([data-glow="none"]) .sidebar-rail-plate-outer-stroke {
+  stroke: rgba(var(--sidebar-rail-glow-rgb), 0.36);
+}
+
+.sidebar-rail-plate:not([data-glow="none"]) .sidebar-rail-chamfer-glint {
+  stroke: rgba(var(--sidebar-rail-glow-rgb), 0.46);
+}
+
+/* Shrunken centered '<' / '>' intaglio lamp channel:
+   - Idle (data-glow="none"): dim Morandi slate-blue (#93A8B5) on the arrow glyph only,
+     synchronized on both sides while the plate frame and underglow stay dark
+   - Alert (gold/yellow/red): illuminates arrow, frame, and underglow in matching alert color */
+.sidebar-rail-hollow-mark {
+  fill: rgba(var(--sidebar-rail-idle-arrow-rgb), 0.20);
+  stroke: rgba(var(--sidebar-rail-idle-arrow-rgb), 0.50);
+  stroke-width: 0.72;
+  stroke-linejoin: miter;
+  stroke-miterlimit: 3;
+  filter: drop-shadow(0 0 1.8px rgba(var(--sidebar-rail-idle-arrow-rgb), 0.28));
+  transition: stroke 150ms ease, fill 150ms ease, filter 150ms ease;
+}
+
+.sidebar-rail-plate:not([data-glow="none"]) .sidebar-rail-hollow-mark {
+  fill: rgba(var(--sidebar-rail-glow-rgb), calc(0.15 * var(--sidebar-rail-glow-alpha)));
+  stroke: rgba(var(--sidebar-rail-glow-rgb), calc(0.68 * var(--sidebar-rail-glow-alpha)));
+  filter: drop-shadow(0 0 1.6px rgba(var(--sidebar-rail-glow-rgb), calc(0.40 * var(--sidebar-rail-glow-alpha))));
+}
+
+.sidebar-rail-glyph {
+  transition: transform 130ms cubic-bezier(0.2, 0.9, 0.25, 1);
+}
+
+/* Expanded: > <   |   Collapsed: < > */
+.sidebar-rail-plate--left[data-collapsed="false"] .sidebar-rail-glyph--left {
+  transform: scaleX(1);
+}
+
+.sidebar-rail-plate--left[data-collapsed="true"] .sidebar-rail-glyph--left {
+  transform: scaleX(-1);
+}
+
+.sidebar-rail-plate--right[data-collapsed="false"] .sidebar-rail-glyph--right {
+  transform: scaleX(-1);
+}
+
+.sidebar-rail-plate--right[data-collapsed="true"] .sidebar-rail-glyph--right {
+  transform: scaleX(1);
+}
+
+.sidebar-rail-plate[data-glow="none"]:hover .sidebar-rail-plate-outer-stroke {
+  stroke: rgba(218, 214, 204, 0.34);
+}
+
+.sidebar-rail-plate[data-glow="none"]:hover .sidebar-rail-chamfer-glint {
+  stroke: rgba(232, 226, 210, 0.38);
+}
+
+.sidebar-rail-plate[data-glow="none"]:hover .sidebar-rail-hollow-mark {
+  fill: rgba(var(--sidebar-rail-idle-arrow-rgb), 0.30);
+  stroke: rgba(var(--sidebar-rail-idle-arrow-rgb), 0.74);
+  filter: drop-shadow(0 0 2.4px rgba(var(--sidebar-rail-idle-arrow-rgb), 0.44));
+}
+
+.sidebar-rail-plate:not([data-glow="none"]):hover .sidebar-rail-plate-outer-stroke {
+  stroke: rgba(var(--sidebar-rail-glow-rgb), 0.54);
+}
+
+.sidebar-rail-plate:not([data-glow="none"]):hover .sidebar-rail-hollow-mark {
+  stroke: rgba(var(--sidebar-rail-glow-rgb), 0.85);
+  fill: rgba(var(--sidebar-rail-glow-rgb), 0.22);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-rail-svg,
+  .sidebar-rail-underglow,
+  .sidebar-rail-underglow-poly,
+  .sidebar-rail-plate-outer-stroke,
+  .sidebar-rail-chamfer-glint,
+  .sidebar-rail-hollow-mark,
+  .sidebar-rail-glyph {
+    transition: none !important;
+  }
+}

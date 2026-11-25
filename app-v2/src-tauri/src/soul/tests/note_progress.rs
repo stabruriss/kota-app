@@ -1,4 +1,5 @@
 use super::*;
+use crate::violet::NoteChange;
 use serde_json::Value;
 
 fn setup(f: &Fixture, shell: &str) -> Env {
@@ -52,17 +53,49 @@ fn note_progress_is_deduplicated_but_a_reused_mark_id_with_new_revision_is_not()
     run(&env, &["add-mark", "Keep the saved text."], "").unwrap();
     let saved = marks::read(&f.paths()).unwrap();
     let root = env.project_root.as_ref().unwrap();
-    crate::violet::record_note_added(root, "agent-fixture", "codex", &saved.marks[0], 1).unwrap();
+    crate::violet::record_note_change(root, "agent-fixture", "codex", NoteChange::Added, &saved.marks[0], 1, T1).unwrap();
     assert_eq!(events(&env).len(), 1);
     let mut replacement = saved.marks[0].clone();
     replacement.text = "A later note with a recycled id.".into();
-    crate::violet::record_note_added(root, "agent-fixture", "codex", &replacement, 3).unwrap();
+    crate::violet::record_note_change(root, "agent-fixture", "codex", NoteChange::Added, &replacement, 3, T1).unwrap();
     assert_eq!(events(&env).len(), 2);
     assert_ne!(events(&env)[0]["id"], events(&env)[1]["id"]);
 }
 
 #[test]
-fn refusals_edits_deletes_and_missing_project_do_not_report_a_new_note() {
+fn edits_and_deletes_report_the_mark_text_at_the_time_of_the_change() {
+    for shell in ["codex", "kota-local"] {
+        let f = Fixture::new();
+        let env = setup(&f, shell);
+        run(&env, &["add-mark", "First wording."], "").unwrap();
+        let id = marks::read(&f.paths()).unwrap().marks[0].id.clone();
+        let at = |ts: &str, args: &[&str]| cli::run(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &env, "", ts).unwrap();
+        // The Local tool supplies the same CLI command and a -- separator.
+        at(T2, &["edit-mark", &id, "--", "  Second\n  wording.  "]);
+        assert_eq!(marks::read(&f.paths()).unwrap().marks[0].text, "Second wording.");
+        at(T3, &["delete-mark", &id]);
+        assert!(marks::read(&f.paths()).unwrap().marks.is_empty());
+        let rows = events(&env);
+        assert_eq!(rows.len(), 3);
+        // One row per saved change: what it did, the text as saved (for a delete, as it was), dated when it changed.
+        for (row, (origin, text, ts, revision)) in rows.iter().zip([("note", "First wording.", T1, 1),
+            ("note_edit", "Second wording.", T2, 2), ("note_delete", "Second wording.", T3, 3)]) {
+            assert_eq!(row["message_origin"], origin);
+            assert_eq!(row["text"], text);
+            assert_eq!(row["ts"], ts);
+            assert_eq!(row["source"]["native_event_id"], format!("note:{id}:{revision}"));
+            assert_eq!(row["kind"], "commentary");
+            assert_eq!(row["role"], "assistant");
+            assert_eq!(row["shell"], shell);
+            assert_eq!(row["agent_id"], "agent-fixture");
+            assert_eq!(row["agent_visible"], false);
+        }
+        assert!(crate::violet::latest_reply(env.project_root.as_ref().unwrap(), "agent-fixture").is_none());
+    }
+}
+
+#[test]
+fn refusals_and_a_missing_project_do_not_report_a_note() {
     let f = Fixture::new();
     let env = setup(&f, "codex");
     run(&env, &["add-mark"], "  ").unwrap();
@@ -71,12 +104,18 @@ fn refusals_edits_deletes_and_missing_project_do_not_report_a_new_note() {
     for index in 0..20 { marks::add(&f.paths(), &format!("Note {index}"), None, T1).unwrap(); }
     run(&env, &["add-mark", "Full."], "").unwrap();
     let id = marks::read(&f.paths()).unwrap().marks[0].id.clone();
-    run(&env, &["edit-mark", &id, "Changed."], "").unwrap();
-    run(&env, &["delete-mark", &id], "").unwrap();
+    run(&env, &["edit-mark", &id], "  ").unwrap();
+    run(&env, &["edit-mark", &id, &"中".repeat(201)], "").unwrap();
+    run(&env, &["edit-mark", "m-missing", "Changed."], "").unwrap();
+    run(&env, &["delete-mark", "m-missing"], "").unwrap();
+    assert_eq!(marks::read(&f.paths()).unwrap().revision, 20);
     assert!(events(&env).is_empty());
     let mut outside = env;
     outside.project_root = None;
+    run(&outside, &["edit-mark", &id, "Changed outside the project."], "").unwrap();
+    run(&outside, &["delete-mark", &id], "").unwrap();
     run(&outside, &["add-mark", "Outside the project."], "").unwrap();
+    assert_eq!(marks::read(&f.paths()).unwrap().revision, 23);
     assert!(!f.root.join("project/project-memory").exists());
 }
 

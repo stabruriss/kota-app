@@ -17,6 +17,7 @@ export function GithubDialog({ title, confirm = false, busy = false, onCancel, c
   }, []);
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (document.querySelector('.github-sign-in-dialog')) return; // it is on top
       const layers = document.querySelectorAll('.github-dialog-layer');
       if (layers[layers.length - 1] !== layer.current) return;
       if (event.key === 'Escape') {

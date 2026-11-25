@@ -156,7 +156,7 @@ describe('String model card editing', () => {
   });
   it.each(['hero', 'profile'] as const)('keeps %s editing instructions tied to the existing Save action', surface => {
     render(<Harness surface={surface} />);
-    expect(screen.getByText(`Click OK, then ${surface === 'hero' ? 'Save Shell' : 'Save'}.`)).toBeVisible();
+    expect(screen.getByText('Click OK, then Save.')).toBeVisible();
     expect(screen.queryByText('Saved automatically.')).not.toBeInTheDocument();
   });
 });

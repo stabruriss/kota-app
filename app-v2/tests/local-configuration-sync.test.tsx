@@ -89,18 +89,19 @@ it('adopts saved configuration over an offline draft, scopes events, and cannot 
   expect(result.current.saved?.thinking).toBe('high');
 });
 
-it('refreshes an open clean Detail without replacing name, Ghost or skills drafts', async () => {
+it('refreshes untouched SHELL controls in an editing Detail without replacing name, Ghost or skills drafts', async () => {
   const view = mountProfile();
   const shell = within(await screen.findByRole('region', { name: 'SHELL' }));
   await waitFor(() => expect(shell.getByLabelText('Current SHELL settings')).toHaveTextContent(/reason/i));
-  await userEvent.click(view.container.querySelector<HTMLButtonElement>('.profile-name-button')!);
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   fireEvent.change(screen.getByLabelText('Given name'), { target: { value: 'Unsubmitted name' } });
-  await userEvent.click(screen.getByRole('button', { name: 'Edit GHOST' }));
   fireEvent.change(view.container.querySelector<HTMLTextAreaElement>('textarea')!, { target: { value: 'Unsubmitted ghost' } });
   await userEvent.click(screen.getByRole('checkbox', { name: 'Fixture skill skill' }));
   detail = { ...detail, model: 'fable/plain', effort: 'off', shellRevision: 'new-revision', displayName: 'External name', ghost: 'External ghost' };
   await emit();
-  await waitFor(() => expect(shell.getByLabelText('Current SHELL settings')).toHaveTextContent(/plain.*off/i));
+  // SHELL was not edited, so the saved change reaches its controls; the other drafts stay.
+  await waitFor(() => expect(shell.getByRole('button', { name: 'Local model' })).toHaveTextContent('Plain'));
+  expect(shell.getByLabelText('Thinking')).toHaveValue('off');
   expect(screen.getByLabelText('Given name')).toHaveValue('Unsubmitted name');
   expect(view.container.querySelector('textarea')).toHaveValue('Unsubmitted ghost');
   expect(screen.getByRole('checkbox', { name: 'Fixture skill skill' })).toBeChecked();
@@ -110,7 +111,7 @@ it('refreshes an open clean Detail without replacing name, Ghost or skills draft
 
 it('does not overwrite an editing Detail and retains its opening revision for the existing Reload protection', async () => {
   mountProfile(); const shell = within(await screen.findByRole('region', { name: 'SHELL' }));
-  await userEvent.click(shell.getByRole('button', { name: 'Edit SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   await waitFor(() => expect(shell.getByLabelText('Thinking')).toBeEnabled());
   await userEvent.selectOptions(shell.getByLabelText('Thinking'), 'high');
   const reads = vi.mocked(pty.loadProjectAgentDetail).mock.calls.length;
@@ -118,7 +119,7 @@ it('does not overwrite an editing Detail and retains its opening revision for th
   await emit(); expect(pty.loadProjectAgentDetail).toHaveBeenCalledTimes(reads);
   expect(shell.getByLabelText('Thinking')).toHaveValue('high');
   vi.mocked(pty.saveProjectAgentDetail).mockRejectedValue('local_config_changed');
-  await userEvent.click(shell.getByRole('button', { name: 'Save SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await screen.findByText('Settings changed outside this editor. Reload before saving.');
   expect(pty.saveProjectAgentDetail).toHaveBeenCalledWith(expect.objectContaining({ shellRevision: 'opening-revision' }));
   await userEvent.click(screen.getByRole('button', { name: 'Reload' }));
@@ -127,31 +128,31 @@ it('does not overwrite an editing Detail and retains its opening revision for th
 
 it.each([true, false])('shows actual saved thinking and honest appliedToSession=%s feedback', async appliedToSession => {
   const view = mountProfile(); const shell = within(await screen.findByRole('region', { name: 'SHELL' }));
-  await userEvent.click(shell.getByRole('button', { name: 'Edit SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   await waitFor(() => expect(shell.getByLabelText('Thinking')).toBeEnabled());
   await userEvent.selectOptions(shell.getByLabelText('Thinking'), 'high');
   const pending = deferred<pty.ProjectAgentDetail>();
   vi.mocked(pty.saveProjectAgentDetail).mockReturnValue(pending.promise);
-  await userEvent.click(shell.getByRole('button', { name: 'Save SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   const reads = vi.mocked(pty.loadProjectAgentDetail).mock.calls.length;
   await emit(); expect(pty.loadProjectAgentDetail).toHaveBeenCalledTimes(reads);
   const next = { ...detail, effort: appliedToSession ? 'low' : 'high', shellRevision: 'saved-revision', appliedToSession };
   await act(async () => pending.resolve(next));
   await screen.findByText(appliedToSession ? 'Saved and applied to the running session.' : 'Saved. Applies on next launch.');
   expect(view.onSaved).toHaveBeenCalledWith(next, 'kota-local');
-  await userEvent.click(shell.getByRole('button', { name: 'Edit SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   expect(shell.getByLabelText('Thinking')).toHaveValue(next.effort);
 });
 
 it.each(['local_model_apply_unconfirmed', 'local_model_session_replaced', 'local_model_session_closed',
   'local_model_applied_save_failed', 'local_model_applied_metadata_failed'])('reports %s without claiming a clean no-op, and rereads saved SHELL only', async code => {
   const view = mountProfile(); const shell = within(await screen.findByRole('region', { name: 'SHELL' }));
-  await userEvent.click(shell.getByRole('button', { name: 'Edit SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   await waitFor(() => expect(shell.getByLabelText('Thinking')).toBeEnabled());
   await userEvent.selectOptions(shell.getByLabelText('Thinking'), 'high');
   vi.mocked(pty.saveProjectAgentDetail).mockRejectedValue(code);
   detail = { ...detail, model: 'fable/plain', effort: 'off', shellRevision: 'disk-revision' };
-  await userEvent.click(shell.getByRole('button', { name: 'Save SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   const copy = localConfigurationSaveFailure(code)!.message;
   await screen.findByText(copy);
   expect(pty.loadProjectAgentDetail).toHaveBeenLastCalledWith({ projectRoot: root, agentId }, { readOnly: true });
@@ -183,11 +184,11 @@ it('keeps an old offline draft discarded after a failed read, and ignores a stal
 
 it('discards a late clean-Detail refresh if editing began, and unsubscribes on close', async () => {
   const view = mountProfile(); const shell = within(await screen.findByRole('region', { name: 'SHELL' }));
-  await waitFor(() => expect(shell.getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
   const late = deferred<pty.ProjectAgentDetail>();
   vi.mocked(pty.loadProjectAgentDetail).mockReturnValueOnce(late.promise);
   await emit();
-  await userEvent.click(shell.getByRole('button', { name: 'Edit SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   await waitFor(() => expect(shell.getByLabelText('Thinking')).toBeEnabled());
   await userEvent.selectOptions(shell.getByLabelText('Thinking'), 'high');
   await act(async () => late.resolve({ ...detail, model: 'fable/plain', effort: 'off', shellRevision: 'late-revision' }));
@@ -198,13 +199,13 @@ it('discards a late clean-Detail refresh if editing began, and unsubscribes on c
 
 it('never claims a failed saved-settings reload succeeded after an applied-but-unsaved error', async () => {
   mountProfile(); const shell = within(await screen.findByRole('region', { name: 'SHELL' }));
-  await waitFor(() => expect(shell.getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
-  await userEvent.click(shell.getByRole('button', { name: 'Edit SHELL' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   await waitFor(() => expect(shell.getByLabelText('Thinking')).toBeEnabled());
   await userEvent.selectOptions(shell.getByLabelText('Thinking'), 'high');
   vi.mocked(pty.saveProjectAgentDetail).mockRejectedValue('local_model_applied_save_failed');
   vi.mocked(pty.loadProjectAgentDetail).mockRejectedValueOnce('fixture read unavailable');
-  await userEvent.click(shell.getByRole('button', { name: 'Save SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await screen.findByText(`${localConfigurationSaveFailure('local_model_applied_save_failed')!.message} Could not reload saved settings. Reopen this profile.`);
   expect(screen.queryByText(/have been reloaded/)).not.toBeInTheDocument();
 });

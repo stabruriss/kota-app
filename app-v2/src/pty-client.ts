@@ -44,6 +44,7 @@ import type {
   WorkspaceTreeRootKind,
 } from './types/tree';
 import type { VioletSummaryConfig } from './violet-summary-config';
+import type { SystemLoadSample } from './lib/system-load';
 
 type SmartShellCli = 'bash' | 'zsh';
 type OutputListener = (payload: SmartOutputEvent) => void;
@@ -64,6 +65,7 @@ const INCARNATION_PROGRESS_EVENT = 'kota://incarnation-progress';
 const BARTENDER_SYNC_EVENT = 'bartender-sync-local';
 const BARTENDER_SYNC_PROGRESS_EVENT = 'bartender-sync-progress';
 const BARTENDER_STATUS_CHANGED_EVENT = 'bartender-status-changed';
+const SYSTEM_LOAD_SAMPLE_EVENT = 'system-load://sample';
 const MOCK_TERMINAL_ENHANCEMENT_KEY = 'kota-v2.ghostty-terminal-enhancement';
 
 interface SpawnSmartPtyOptions {
@@ -989,7 +991,6 @@ export interface GhAuthInfo {
 }
 
 export const GITHUB_CLI_INSTALL_URL = 'https://cli.github.com/';
-export const GITHUB_CLI_LOGIN_COMMAND = 'gh auth login --hostname github.com --git-protocol https --web --scopes repo,read:user,user:email';
 
 /** Probe `gh auth status`. Falls back to a "not authenticated" stub
  *  when running outside Tauri (vitest / vite dev). */
@@ -1082,18 +1083,29 @@ export interface GithubCreateRepoRequest {
 /** Tavern Link accounts. gh holds the tokens; Kota names an account on every call. */
 export interface GithubAccount { login: string; default: boolean; state: 'ok' | 'needs_login'; source: 'gh-cli' }
 export interface GithubAccounts { defaultLogin: string | null; accounts: GithubAccount[] }
-export interface GithubAccountAddResult {
-  added: string[];
+export interface GithubSignInResult {
+  /** The account that signed in, new to Kota or not. */
+  login: string;
+  added: boolean;
   /** gh's own active login afterwards; Kota switches it back to the previous one. */
   active: string | null;
   restoreFailed: boolean;
   view: GithubAccounts;
 }
+/** Every sign-in ends with exactly one event that is not `output`. */
+export type GithubSignInEvent = { id: string } & (
+  | { kind: 'output'; output: string; deadlineMs: number }
+  | { kind: 'signed_in'; result: GithubSignInResult }
+  | { kind: 'failed'; output: string }
+  | { kind: 'timed_out' }
+  | { kind: 'cancelled' }
+);
 export const githubAccountsRead = () => invoke<GithubAccounts>('github_accounts_read');
-/** Call before running `gh auth login`; pass the result to githubAccountAddFinish. */
-export const githubAccountAddBegin = () => invoke<string | null>('github_account_add_begin');
-export const githubAccountAddFinish = (previousActive: string | null) =>
-  invoke<GithubAccountAddResult>('github_account_add_finish', { previousActive });
+/** Runs `gh auth login` without a terminal. Rejects with `github_cli_missing` when there is no gh. */
+export const githubSignInStart = (id: string) => invoke<void>('github_sign_in_start', { id });
+export const githubSignInCancel = (id: string) => invoke<void>('github_sign_in_cancel', { id });
+export const onGithubSignIn = (callback: (event: GithubSignInEvent) => void) =>
+  listen<GithubSignInEvent>('github-sign-in', event => callback(event.payload));
 export const githubAccountSetDefault = (login: string) => invoke<GithubAccounts>('github_account_set_default', { login });
 export const githubAccountRemove = (login: string) => invoke<GithubAccounts>('github_account_remove', { login });
 
@@ -4371,4 +4383,21 @@ export async function saveWhiteboardCanvasSnapshot(
     pagePath: request.pagePath,
     pngBytes: request.pngBytes,
   });
+}
+
+export async function systemLoadSnapshot(): Promise<SystemLoadSample | null> {
+  if (!useTauriRuntime()) return null;
+  return invoke<SystemLoadSample | null>('system_load_snapshot');
+}
+
+export async function onSystemLoadSample(
+  callback: (payload: SystemLoadSample) => void,
+): Promise<UnlistenFn> {
+  if (!useTauriRuntime()) return () => {};
+  return listen<SystemLoadSample>(
+    SYSTEM_LOAD_SAMPLE_EVENT,
+    (event: Event<SystemLoadSample>) => {
+      callback(event.payload);
+    },
+  );
 }

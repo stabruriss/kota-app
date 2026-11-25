@@ -20,14 +20,27 @@ pub(crate) fn prepare(
     if cli_from_shell(&shell, profile).ok() != Some(crate::pty::agent::AgentCli::KotaLocal) {
         return Ok(None);
     }
-    let model = models::selected_model(shell.model.as_deref()).map_err(|e| e.to_string())?;
+    let model_arg = shell.model.as_deref().unwrap_or_default().trim();
+    let describe_error = |error: LocalError| {
+        if error.code == "model_not_found"
+            && model_arg != crate::local_rpc::auto_route::MODEL_ARG
+            && model_arg
+                .split_once('/')
+                .is_some_and(|(provider, id)| models::valid_model_identifiers(provider, id))
+        {
+            format!("Model \"{model_arg}\" was not found.")
+        } else {
+            error.to_string()
+        }
+    };
+    let model = models::selected_model(Some(model_arg)).map_err(describe_error)?;
     let resolved = resolve(RecruitSelection {
         schema: 1,
         provider_id: model.provider_id,
         model_id: model.model_id,
         thinking_level: Some(models::saved_thinking(shell.effort.as_deref()).into()),
         auto_route: shell.auto_route.as_ref().filter(|pair| !pair.is_empty()).map(|pair| pair.group()),
-    }).map_err(|error| error.to_string())?;
+    }).map_err(describe_error)?;
     shell.model = Some(resolved.model_arg);
     shell.effort = Some(resolved.thinking_level);
     // The new agent gets its own copy of the template's pair; later template edits never reach it.
@@ -111,6 +124,7 @@ mod tests {
         assert_eq!(shell.auto_route.unwrap().group(), pair);
         let blocked = profile("provider: kota-local\nmodel: kota/auto\n");
         assert_eq!(prepare(&blocked, |_| Err(LocalError::new("auto_route_models_required"))).unwrap_err(), "auto_route_models_required");
+        assert_eq!(prepare(&blocked, |_| Err(LocalError::new("model_not_found"))).unwrap_err(), "model_not_found");
     }
 
     #[test]
@@ -126,6 +140,32 @@ mod tests {
     }
 
     #[test]
+    fn missing_catalog_model_names_the_full_selection_from_the_shell() {
+        use crate::local_rpc::auth_fixture::Fixture;
+        use serde_json::json;
+
+        let fixture = Fixture::new(json!({"providers": [{
+            "providerId": "magpie", "providerLabel": "Magpie", "canApiKey": true, "canOAuth": false,
+            "models": [{"modelId": "agy-cli/gemini-4-argon", "name": "Argon", "thinkingLevels": ["off"]}]
+        }]}));
+        fixture.store(json!({"magpie": {"type": "api_key", "key": "fixture-key"}}));
+        let hero = profile("provider: kota-local\nmodel: magpie/antigravity/gemini-4-argon\n");
+        let error = prepare(&hero, |selection| {
+            models::resolve_local_recruit_config(&fixture.backend, selection)
+        }).unwrap_err();
+
+        assert_eq!(error, "Model \"magpie/antigravity/gemini-4-argon\" was not found.");
+        assert_eq!(fixture.requests("resolve"), 1);
+    }
+
+    #[test]
+    fn retired_provider_names_the_model_rejected_before_resolution() {
+        let hero = profile("provider: kota-local\nmodel: azure-openai-responses/old-model\n");
+        let error = prepare(&hero, |_| panic!("retired provider must not resolve")).unwrap_err();
+        assert_eq!(error, "Model \"azure-openai-responses/old-model\" was not found.");
+    }
+
+    #[test]
     fn rejected_recruit_has_no_derived_shell_and_keeps_the_original_request() {
         for code in [
             "provider_not_signed_in",
@@ -134,7 +174,6 @@ mod tests {
             "credential_invalid",
             "azure_resource_missing",
             "auth_handler_unavailable",
-            "model_not_found",
             "thinking_invalid",
         ] {
             let hero = profile("provider: kota-local\nmodel: fable/family/model\n");

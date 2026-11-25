@@ -90,14 +90,11 @@ export function ComposerModelControl({ projectRoot, agentId, name, memory }: {
 function ComposerRouteChoice({ models, selected, disabled, onChoose }: {
   models: AutoRouteModel[]; selected?: string; disabled: boolean; onChoose: (model?: AutoRouteModel) => void;
 }) {
-  const trigger = useRef<HTMLButtonElement>(null), closeTimer = useRef<ReturnType<typeof setTimeout>>();
-  const [anchor, setAnchor] = useState<DOMRect | null>(null), [keyboard, setKeyboard] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const model = models.find(item => item.id === selected);
-  const enter = () => clearTimeout(closeTimer.current);
-  const close = useCallback((restore = false) => { clearTimeout(closeTimer.current); setAnchor(null); if (restore) trigger.current?.focus(); }, []);
-  const leave = () => { enter(); closeTimer.current = setTimeout(() => close(), 240); };
-  const open = (focus = false) => { if (disabled || !trigger.current) return; enter(); setAnchor(trigger.current.getBoundingClientRect()); setKeyboard(focus); };
-  useEffect(() => () => clearTimeout(closeTimer.current), []);
+  const close = useCallback((restore = false) => { setAnchor(null); if (restore) trigger.current?.focus(); }, []);
+  const open = () => { if (disabled || !trigger.current) return; setAnchor(trigger.current.getBoundingClientRect()); };
   useEffect(() => { if (disabled) close(); }, [disabled, close]);
   useEffect(() => {
     if (!anchor) return;
@@ -107,32 +104,31 @@ function ComposerRouteChoice({ models, selected, disabled, onChoose }: {
     };
     window.addEventListener('keydown', escape, true);
     window.addEventListener('resize', dismiss);
-    window.addEventListener('scroll', dismiss, true);
-    return () => { window.removeEventListener('keydown', escape, true); window.removeEventListener('resize', dismiss); window.removeEventListener('scroll', dismiss, true); };
+    return () => { window.removeEventListener('keydown', escape, true); window.removeEventListener('resize', dismiss); };
   }, [anchor, close]);
   return <>
     <button ref={trigger} type="button" className="composer-model-small" disabled={disabled}
       aria-haspopup="menu" aria-expanded={!!anchor} aria-label={model ? `Manual model: ${caption(model)}` : 'Auto String routing: Auto'} title={model ? caption(model) : 'Auto'}
-      onPointerEnter={() => open()} onPointerLeave={leave} onClick={() => anchor && keyboard ? close() : open(true)}
-      onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); open(true); } }}>
+      onClick={() => anchor ? close(true) : open()}
+      onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); open(); } }}>
       {model ? <span>{compact(model.modelId.split('/').at(-1)!)} • {model.thinkingLevel}</span> : <span className="composer-auto-on">on</span>}
     </button>
-    {anchor && <ComposerRouteFan anchor={anchor} models={models} selected={selected} focusFirst={keyboard} trigger={trigger}
-      onEnter={enter} onLeave={leave} onChoose={next => { onChoose(next); close(true); }} onClose={() => close(true)} />}
+    {anchor && <ComposerRouteFan anchor={anchor} models={models} selected={selected} trigger={trigger}
+      onChoose={next => { onChoose(next); close(true); }} onClose={() => close(true)} />}
   </>;
 }
 
-function ComposerRouteFan({ anchor, models, selected, focusFirst, trigger, onChoose, onEnter, onLeave, onClose }: {
-  anchor: DOMRect; models: AutoRouteModel[]; selected?: string; focusFirst: boolean; trigger: RefObject<HTMLButtonElement>;
-  onChoose: (model?: AutoRouteModel) => void; onEnter: () => void; onLeave: () => void; onClose: () => void;
+function ComposerRouteFan({ anchor, models, selected, trigger, onChoose, onClose }: {
+  anchor: DOMRect; models: AutoRouteModel[]; selected?: string; trigger: RefObject<HTMLButtonElement>;
+  onChoose: (model?: AutoRouteModel) => void; onClose: () => void;
 }) {
-  const menu = useRef<HTMLDivElement>(null), [hover, setHover] = useState<string | null>(null);
+  const menu = useRef<HTMLDivElement>(null), [hover, setHover] = useState<string | null>(null), [focused, setFocused] = useState<string | null>(null);
   const right = anchor.left < Math.min(360, innerWidth / 2);
   const left = right ? Math.max(12, anchor.left - 8) : Math.max(12, anchor.right - Math.min(440, anchor.right - 12) + 42);
   const width = Math.min(440, innerWidth - left - 12), bottom = Math.max(10, innerHeight - anchor.top - 4);
   const step = Math.min(56, Math.max(28, (anchor.top - 24) / (models.length + 1)));
   const items = [...models, undefined];
-  useEffect(() => { if (focusFirst) menu.current?.querySelector<HTMLButtonElement>('button')?.focus(); }, [focusFirst]);
+  useEffect(() => { menu.current?.querySelector<HTMLButtonElement>('button')?.focus(); }, []);
   useEffect(() => {
     const outside = (event: PointerEvent) => { if (!menu.current?.contains(event.target as Node) && !trigger.current?.contains(event.target as Node)) onClose(); };
     document.addEventListener('pointerdown', outside);
@@ -140,26 +136,26 @@ function ComposerRouteFan({ anchor, models, selected, focusFirst, trigger, onCho
   }, [onClose, trigger]);
   return createPortal(<div ref={menu} className={`composer-route-fan${right ? ' opens-right' : ''}`} role="menu" aria-label="Auto String models"
     style={{ left, bottom, width, height: items.length * step + 20, '--fan-text-width': `${width - 70}px` } as CSSProperties}
-    onPointerEnter={onEnter} onPointerLeave={onLeave} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onLeave(); }}
     onKeyDown={event => {
+      if (event.key === 'Tab') { onClose(); return; }
       if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
       const buttons = [...menu.current!.querySelectorAll<HTMLButtonElement>('button')], at = buttons.indexOf(document.activeElement as HTMLButtonElement);
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (at + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
       buttons[next]?.focus();
     }}>
-    <div className="composer-fan-bridge" aria-hidden="true" />
     {items.map((model, index) => {
       const id = model?.id ?? 'auto', t = (items.length - 1 - index) / (items.length - 1);
-      return <div key={id} className={`composer-fan-position${hover === id ? ' hovered' : ''}`}
+      const showFull = (hover ?? focused) === id && !!model;
+      return <div key={id} className={`composer-fan-position${showFull ? ' hovered' : ''}`}
         style={{ bottom: 12 + (items.length - 1 - index) * step, [right ? 'left' : 'right']: 8 + Math.round((1 - t) * 16), '--fan-angle': `${(right ? -1 : 1) * t * 8}deg` } as CSSProperties}>
         <button type="button" role="menuitemradio" aria-checked={selected === model?.id} className="composer-fan-item"
           aria-label={model ? `${model.providerId} / ${model.modelId} • ${model.thinkingLevel}` : 'Auto'}
-          onPointerEnter={() => setHover(id)} onPointerLeave={() => setHover(null)} onFocus={() => { onEnter(); setHover(id); }} onBlur={() => setHover(null)} onClick={() => onChoose(model)}>
+          onPointerEnter={() => setHover(id)} onPointerLeave={() => setHover(active => active === id ? null : active)} onFocus={() => setFocused(id)} onBlur={() => setFocused(active => active === id ? null : active)} onClick={() => onChoose(model)}>
           <span className="composer-fan-short">{model ? `${compact(model.modelId)} • ${model.thinkingLevel}` : 'Auto'}</span>
           <span className="composer-fan-provider">{model ? <LocalProviderIcon providerId={model.providerId} /> : <span className="composer-auto-on">on</span>}</span>
+          {showFull && model && <span className="composer-fan-full" aria-hidden="true" style={{ maxWidth: Math.max(120, width - 70) }}>{model.modelId} • {model.thinkingLevel} <LocalModelCredit providerId={model.providerId} /></span>}
         </button>
-        {hover === id && model && <span className="composer-fan-full" aria-hidden="true" style={{ maxWidth: Math.max(120, width - 70) }}>{model.modelId} • {model.thinkingLevel} <LocalModelCredit providerId={model.providerId} /></span>}
       </div>;
     })}
   </div>, document.body);

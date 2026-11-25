@@ -192,10 +192,11 @@ impl Backend for Service {
                         } else {
                             (value["peerInstance"].clone(), value["instance"].clone())
                         };
+                        let created_at = now();
                         s.wake = Some(
                             json!({"id":wake,"group":fixture().contexts[0].peer.group_id,"client":s.members[0].device_id,"server":s.members[1].device_id,
                             "clientMembership":s.members[0].membership_id,"serverMembership":s.members[1].membership_id,"clientInstance":ci,"serverInstance":si,
-                            "createdAt":now(),"expiresAt":now()+120000}),
+                            "createdAt":created_at,"expiresAt":created_at + 120_000}),
                         );
                         s.clear_ready();
                         self.data.lock().unwrap().sessions.clear();

@@ -4,11 +4,13 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import * as ipc from '../src/pty-client';
 import { ProjectConnectDialog } from '../src/chrome/ProjectConnectDialog';
 import { ProjectSettings } from '../src/chrome/ProjectSettings';
-import { finishGithubSignIn, refreshGithubAccounts } from '../src/lib/github-account-flow';
+import { GithubSignInDialog } from '../src/chrome/GithubSignInDialog';
+import { closeGithubSignIn, refreshGithubAccounts } from '../src/lib/github-account-flow';
+import { fakeGithubSignIn } from './github-sign-in-fake';
 import { PROJECT_CONNECTION_CHANGED, RESTART_NOTICE, dismissConnectionNotice, mergeWorkspaceConnection } from '../src/lib/project-connection-ui';
 
 vi.mock('../src/pty-client', async original => ({ ...await original<typeof ipc>(),
-  githubAccountsRead:vi.fn(), githubAccountAddFinish:vi.fn(), projectConnectionCandidates:vi.fn(), projectConnectionCheck:vi.fn(),
+  githubAccountsRead:vi.fn(), githubSignInStart:vi.fn(), githubSignInCancel:vi.fn(), onGithubSignIn:vi.fn(), ghAuthStatus:vi.fn(), projectConnectionCandidates:vi.fn(), projectConnectionCheck:vi.fn(),
   projectConnectionApply:vi.fn(), projectConnectionSetLocal:vi.fn(), projectConnectionStatus:vi.fn(), readProjectSettings:vi.fn(),
 }));
 const workspace:ipc.WorkspaceProject = {projectId:'fixture',displayName:'Fixture',connection:{kind:'local'},repoFullName:'',remoteUrl:'',githubHtmlUrl:'',sourceDir:'/fixture/project',localRoot:'/fixture/state',sourceDirBytes:0,localRootBytes:0,sharedDir:'/fixture/shared',rulesDir:'/fixture/rules',agents:[],defaultBranch:'main',baseRef:'main'};
@@ -20,17 +22,19 @@ const mount = (base=workspace, switchOrigin=true) => {const onSaved=vi.fn(),onCa
 const continueButton=()=>within(screen.getByRole('dialog',{name:'Connect to GitHub'})).getByRole('button',{name:/^(Connect|Create & connect)$/});
 async function ready() {await waitFor(()=>expect(continueButton()).toBeEnabled());}
 async function confirm() {await ready();fireEvent.click(continueButton());return screen.findByRole('alertdialog');}
+let gh:ReturnType<typeof fakeGithubSignIn>;
 beforeEach(async()=>{
  vi.resetAllMocks();
  vi.mocked(ipc.githubAccountsRead).mockResolvedValue(accounts);
- vi.mocked(ipc.githubAccountAddFinish).mockResolvedValue({added:[],active:'alpha',restoreFailed:false,view:accounts});
+ vi.mocked(ipc.ghAuthStatus).mockResolvedValue({authenticated:true,username:'alpha',scopes:[],error:null,cliMissing:false});
+ gh=fakeGithubSignIn(ipc);
  vi.mocked(ipc.projectConnectionCandidates).mockImplementation(async(_id,login)=>candidate(login));
  vi.mocked(ipc.projectConnectionCheck).mockImplementation(async(_id,accountLogin,repoFullName)=>({accountLogin,repoFullName,state:'in_sync'}));
  vi.mocked(ipc.projectConnectionApply).mockResolvedValue({workspace:connected,pushed:false});
  vi.mocked(ipc.projectConnectionSetLocal).mockResolvedValue(workspace);
  vi.mocked(ipc.projectConnectionStatus).mockResolvedValue({kind:'github',accountLogin:'alpha',accountState:'ok'});
  vi.mocked(ipc.readProjectSettings).mockResolvedValue({commitEmail:null});
- await finishGithubSignIn();await refreshGithubAccounts();dismissConnectionNotice('fixture');vi.clearAllMocks();
+ closeGithubSignIn();await refreshGithubAccounts();dismissConnectionNotice('fixture');vi.clearAllMocks();
 });
 it('ignores late repository checks and account candidate lists, never enabling Connect with their results',async()=>{
  const oldCheck=deferred<ipc.ConnectionCheck>(),oldList=deferred<ipc.ConnectionCandidates>();
@@ -125,4 +129,44 @@ it('shows missing credentials without falling back to a usable default account',
  await screen.findByText('No account assigned');expect(screen.getByRole('button',{name:'Choose account'})).toBeEnabled();
  expect(screen.getByText('Connected to GH ID removed')).toBeInTheDocument();
  expect(ipc.projectConnectionApply).not.toHaveBeenCalled();
+});
+const signInDialog=()=>screen.getByRole('dialog',{name:'Sign in to GitHub'});
+const pressIn=(name:string)=>act(async()=>{fireEvent.click(within(signInDialog()).getByRole('button',{name}));});
+it('signs in from project settings, which stays open under the dialog',async()=>{
+ vi.mocked(ipc.projectConnectionStatus).mockResolvedValue({kind:'github',accountLogin:'alpha',accountState:'needs_login'});
+ render(<><SettingsHarness/><GithubSignInDialog/></>);fireEvent.click(screen.getByRole('button',{name:'Project settings'}));
+ {const button=await screen.findByRole('button',{name:'Sign in'});await act(async()=>{fireEvent.click(button);});}
+ expect(signInDialog()).toHaveTextContent('sign in to GitHub as alpha');
+ await pressIn('Signed in, next');
+ fireEvent.pointerDown(signInDialog());
+ expect(screen.getByRole('dialog',{name:'Project Settings'})).toBeInTheDocument();
+ vi.mocked(ipc.projectConnectionStatus).mockResolvedValue({kind:'github',accountLogin:'alpha',accountState:'ok'});
+ await gh.signIn({login:'alpha',added:false,view:{...accounts,accounts:accounts.accounts.map(account=>({...account}))}});
+ expect(signInDialog()).toHaveTextContent('alpha is signed in');
+ await pressIn('Done');
+ expect(screen.getByRole('dialog',{name:'Project Settings'})).toBeInTheDocument();
+});
+it('adds the first account from a local project’s settings without going to Link',async()=>{
+ vi.mocked(ipc.githubAccountsRead).mockResolvedValue({defaultLogin:null,accounts:[]});await act(refreshGithubAccounts);
+ const toLink=vi.fn();window.addEventListener('kota:github-link',toLink);
+ try{
+  render(<><SettingsHarness initial={workspace}/><GithubSignInDialog/></>);fireEvent.click(screen.getByRole('button',{name:'Project settings'}));
+  {const button=await screen.findByRole('button',{name:'Add GitHub account'});await act(async()=>{fireEvent.click(button);});}
+  expect(signInDialog()).toHaveTextContent('the GitHub account you want to add');
+  expect(toLink).not.toHaveBeenCalled();
+ }finally{window.removeEventListener('kota:github-link',toLink);}
+});
+it('adds an account from Connect in place, chooses it, and Escape closes only the sign-in',async()=>{
+ const{onCancel}=mount();render(<GithubSignInDialog/>);await ready();
+ const add=()=>within(screen.getByRole('dialog',{name:'Connect to GitHub'})).getByRole('button',{name:'+ New'});
+ await act(async()=>{fireEvent.click(add());});
+ await act(async()=>{fireEvent.keyDown(window,{key:'Escape'});});
+ expect(screen.queryByRole('dialog',{name:'Sign in to GitHub'})).not.toBeInTheDocument();
+ expect(onCancel).not.toHaveBeenCalled();
+ await act(async()=>{fireEvent.click(add());});
+ await pressIn('Signed in, next');
+ await gh.signIn({login:'gamma',view:{...accounts,accounts:[...accounts.accounts,{login:'gamma',default:false,state:'ok',source:'gh-cli'}]}});
+ await waitFor(()=>expect(ipc.projectConnectionCandidates).toHaveBeenLastCalledWith('fixture','gamma'));
+ expect(screen.getByRole('combobox',{name:'Connect to GH ID'})).toHaveValue('gamma');
+ expect(onCancel).not.toHaveBeenCalled();
 });

@@ -727,6 +727,12 @@ async fn startup_recovers_durable_pending_with_same_identity_and_request_without
             .private_key,
         identity.private_key
     );
+    // After joining, the worker publishes the group and then runs one
+    // heartbeat cycle. Against this stub both of its bounded attempts fail
+    // with worker_unreachable, and only then is the control error recorded.
+    // Snapshot after that: the next request is the 60 s heartbeat, so any
+    // request during the reads below would be a status() side effect.
+    wait_until(|| m.diagnostics().last_error.is_some()).await;
     let calls = stub.calls.load(Ordering::Relaxed);
     for _ in 0..100 {
         let _ = m.status();

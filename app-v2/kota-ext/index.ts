@@ -7,6 +7,7 @@ import { registerJevVerify } from './jev.ts';
 import { registerLocalCapabilities } from './capabilities.ts';
 import { registerShadowClones } from './shadow-clone.ts';
 import { registerHistory } from './history.ts';
+import { registerSystemPrompt } from './system-prompt.ts';
 
 /** Explicitly loaded by Kota Local; never installed into a user's normal Pi configuration. */
 export default async function kotaExtension(pi: ExtensionAPI) {
@@ -17,5 +18,6 @@ export default async function kotaExtension(pi: ExtensionAPI) {
   registerJevVerify(pi);
   registerShadowClones(pi);
   registerHistory(pi);
+  registerSystemPrompt(pi);
   await registerLocalCapabilities(pi);
 }

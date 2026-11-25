@@ -1313,13 +1313,42 @@ pub(crate) fn record_soul_context(project_root: &Path, agent_id: &str, message_i
     write_chathistory_messages(project_root, &[message])
 }
 
-/// A successful add-mark is room progress, not a reply or a dispatchable message.
-pub(crate) fn record_note_added(
+/// What a saved mark change did. The room row carries it as its `message_origin`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoteChange {
+    Added,
+    Edited,
+    Deleted,
+}
+
+impl NoteChange {
+    /// `note` stays the value for an added mark: it is what rows written before edits
+    /// and deletes were reported already say.
+    fn origin(self) -> &'static str {
+        match self {
+            Self::Added => "note",
+            Self::Edited => "note_edit",
+            Self::Deleted => "note_delete",
+        }
+    }
+
+    /// Whether a room row's `message_origin` marks it as a saved mark change.
+    fn is_origin(origin: Option<&str>) -> bool {
+        matches!(origin, Some("note" | "note_edit" | "note_delete"))
+    }
+}
+
+/// A saved mark change (added, edited or deleted) is room progress, not a reply or a
+/// dispatchable message. `mark` is the mark as saved, or as it was when deleted;
+/// `timestamp` is when the change was made.
+pub(crate) fn record_note_change(
     project_root: &Path,
     agent_id: &str,
     shell: &str,
+    change: NoteChange,
     mark: &crate::soul::marks::Mark,
     revision: u64,
+    timestamp: &str,
 ) -> Result<Vec<PathBuf>, String> {
     let mut hasher = Sha256::new();
     hasher.update(agent_id);
@@ -1334,9 +1363,9 @@ pub(crate) fn record_note_added(
         shell: shell.into(),
         role: "assistant".into(),
         kind: "commentary".into(),
-        timestamp: mark.created_at.clone(),
+        timestamp: timestamp.into(),
         text: mark.text.clone(),
-        message_origin: Some("note".into()),
+        message_origin: Some(change.origin().into()),
         native_event_id: Some(format!("note:{}:{revision}", mark.id)),
         source_path: None,
         overflow_path: None,
@@ -6911,6 +6940,10 @@ fn room_message_dedupe_key(message: &VioletChatMessage) -> String {
     }
     if message.temporal_gap.is_some() && message.agent_id == "user" {
         return format!("composer:{}", message.id);
+    }
+    // Each saved mark change is its own row: an edit and a delete of one mark carry the same text.
+    if NoteChange::is_origin(message.message_origin.as_deref()) {
+        return message.id.clone();
     }
     let normalized = message
         .legacy_dedupe_hash
@@ -14005,6 +14038,32 @@ done"#;
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn note_progress_rows_with_the_same_text_in_one_time_bucket_are_all_kept() {
+        // An edit and a delete of one mark carry the same text; ordinary progress still folds by text.
+        let row = |id: &str, origin: Option<&str>, timestamp: &str| {
+            let mut message = chat_message(id, "assistant", "commentary", timestamp, "Second wording.");
+            message.message_origin = origin.map(str::to_owned);
+            message
+        };
+        let kept = dedupe_room_messages(vec![
+            row("violet-note-added", Some("note"), "2026-11-21T08:00:01Z"),
+            row("violet-note-edited", Some("note_edit"), "2026-11-21T08:00:02Z"),
+            row("violet-note-deleted", Some("note_delete"), "2026-11-21T08:00:03Z"),
+            row("violet-note-deleted", Some("note_delete"), "2026-11-21T08:00:03Z"),
+            row("progress-1", None, "2026-11-21T08:00:04Z"),
+            row("progress-2", None, "2026-11-21T08:00:05Z"),
+        ]);
+        assert_eq!(
+            kept.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(),
+            ["violet-note-added", "violet-note-edited", "violet-note-deleted", "progress-1"]
+        );
+        for change in [NoteChange::Added, NoteChange::Edited, NoteChange::Deleted] {
+            assert!(NoteChange::is_origin(Some(change.origin())));
+        }
+        assert!(!NoteChange::is_origin(Some("subagent")) && !NoteChange::is_origin(None));
     }
 
     #[test]

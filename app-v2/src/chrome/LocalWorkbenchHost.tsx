@@ -13,10 +13,11 @@ interface Props {
   onClose: () => void; onDetails: (id: AgentId) => void; onFresh: (id: AgentId) => void;
   onResume: (id: AgentId, startup?: LocalStartupOptions) => Promise<unknown>; onSend: LocalQueueSend;
   onGuardsChange: (keys: ReadonlySet<string>) => void;
+  onHasDraftChange?: (hasDraft: boolean) => void;
 }
 /** Only the small editor owner survives hiding; visible streaming stays unmounted. */
-export function LocalWorkbenchHost({ projectRoot, open, agents, records, targets, privateAgents, onGuardsChange, onSend, ...callbacks }: Props) {
-  const queue = useLocalQueue(projectRoot, onGuardsChange, onSend, privateAgents);
+export function LocalWorkbenchHost({ projectRoot, open, agents, records, targets, privateAgents, onGuardsChange, onHasDraftChange, onSend, ...callbacks }: Props) {
+  const queue = useLocalQueue(projectRoot, onGuardsChange, onSend, privateAgents, onHasDraftChange);
   if (!open || open.projectRoot !== projectRoot || !agents[open.agentId]) return null;
   return <LocalAgentWorkbench key={`${open.projectRoot}:${open.agentId}`} {...open} agent={agents[open.agentId]!}
     agents={agents} record={records[open.agentId]} targets={targets} privateMessage={privateAgents?.has(open.agentId)} queueController={queue} {...callbacks} />;

@@ -81,13 +81,13 @@ function mockDetail(detail = projectDetail()) {
 }
 
 describe('Project agent custom SHELL values', () => {
-  it('saves exact unmatched model and effort values only on Save SHELL', async () => {
+  it('saves exact unmatched model and effort values only on Save', async () => {
     const saveShell = mockDetail();
 
     try {
       renderOverlay();
       const shell = await screen.findByRole('region', { name: 'SHELL' });
-      await userEvent.click(within(shell).getByRole('button', { name: 'Edit SHELL' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
       const [modelInput, effortInput] = within(shell).getAllByRole('combobox').filter((element) => element.getAttribute('aria-label') !== 'Provider');
 
       await userEvent.clear(modelInput);
@@ -98,7 +98,7 @@ describe('Project agent custom SHELL values', () => {
       await userEvent.keyboard('{Enter}');
 
       expect(saveShell).not.toHaveBeenCalled();
-      await userEvent.click(within(shell).getByRole('button', { name: 'Save SHELL' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
 
       await waitFor(() => expect(saveShell).toHaveBeenCalledTimes(1));
       expect(saveShell.mock.calls[0][0]).toMatchObject({
@@ -110,13 +110,13 @@ describe('Project agent custom SHELL values', () => {
     }
   });
 
-  it('keeps staged custom text out of unrelated profile saves', async () => {
+  it('saves nothing while editing, then sends staged SHELL text and the new avatar in one request', async () => {
     const saveShell = mockDetail();
 
     try {
       renderOverlay();
       const shell = await screen.findByRole('region', { name: 'SHELL' });
-      await userEvent.click(within(shell).getByRole('button', { name: 'Edit SHELL' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
       const modelInput = within(shell).getAllByRole('combobox').filter((element) => element.getAttribute('aria-label') !== 'Provider')[0];
       await userEvent.clear(modelInput);
       await userEvent.type(modelInput, 'half-written-model');
@@ -125,13 +125,14 @@ describe('Project agent custom SHELL values', () => {
       const avatars = screen.getAllByRole('radio');
       await userEvent.click(avatars.find((option) => option.getAttribute('aria-checked') !== 'true')!);
 
-      await waitFor(() => expect(saveShell).toHaveBeenCalledTimes(1));
-      expect(saveShell.mock.calls[0][0].model).toBe('provider-model');
+      expect(saveShell).not.toHaveBeenCalled();
       expect(modelInput).toHaveValue('half-written-model');
+      expect(screen.getByText('Unsaved changes')).toBeVisible();
 
-      await userEvent.click(within(shell).getByRole('button', { name: 'Save SHELL' }));
-      await waitFor(() => expect(saveShell).toHaveBeenCalledTimes(2));
-      expect(saveShell.mock.calls[1][0].model).toBe('half-written-model');
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(saveShell).toHaveBeenCalledTimes(1));
+      expect(saveShell.mock.calls[0][0].model).toBe('half-written-model');
+      expect(saveShell.mock.calls[0][0].avatarId).toEqual(expect.any(String));
     } finally {
       vi.restoreAllMocks();
     }
@@ -158,7 +159,7 @@ describe('Project agent custom SHELL values', () => {
     try {
       renderOverlay();
       const shell = await screen.findByRole('region', { name: 'SHELL' });
-      await userEvent.click(within(shell).getByRole('button', { name: 'Edit SHELL' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
       const modelInput = within(shell).getAllByRole('combobox').filter((element) => element.getAttribute('aria-label') !== 'Provider')[0];
       await userEvent.clear(modelInput);
 
@@ -179,7 +180,7 @@ describe('Project agent provider target', () => {
     try {
       renderOverlay();
       const shell = await screen.findByRole('region', { name: 'SHELL' });
-      await userEvent.click(within(shell).getByRole('button', { name: 'Edit SHELL' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
       const provider = within(shell).getByRole('combobox', { name: 'Provider' });
       const model = within(shell).getByPlaceholderText('Exact model ID');
       await userEvent.selectOptions(provider, 'claude');
@@ -189,12 +190,12 @@ describe('Project agent provider target', () => {
       await userEvent.selectOptions(provider, 'claude');
       await userEvent.selectOptions(provider, 'kimi');
       expect(saveShell).not.toHaveBeenCalled();
-      await userEvent.click(within(shell).getByRole('button', { name: 'Save SHELL' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(saveShell).toHaveBeenCalledTimes(1));
       expect(saveShell.mock.calls[0][0]).toMatchObject({ provider: 'kimi', model: 'default', effort: null, projectRoot: '/tmp/custom-project', agentId: 'agent-custom' });
       expect(start).not.toHaveBeenCalled(); expect(spawn).not.toHaveBeenCalled();
       expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-      await userEvent.click(within(shell).getByRole('button', { name: 'Edit SHELL' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
       expect(within(shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('kimi');
     } finally { vi.restoreAllMocks(); }
   });
@@ -206,14 +207,14 @@ describe('Project agent provider target', () => {
     try {
       renderOverlay();
       const shell = await screen.findByRole('region', { name: 'SHELL' });
-      await userEvent.click(within(shell).getByRole('button', { name: 'Edit SHELL' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
       await userEvent.selectOptions(within(shell).getByRole('combobox', { name: 'Provider' }), 'claude');
-      await userEvent.dblClick(within(shell).getByRole('button', { name: 'Save SHELL' }));
+      await userEvent.dblClick(screen.getByRole('button', { name: 'Save' }));
       expect(saveShell).toHaveBeenCalledTimes(1);
       fail(new Error('write failed'));
       await screen.findByText('Error: write failed');
       expect(within(shell).getByRole('combobox', { name: 'Provider' })).toHaveValue('claude');
-      expect(within(shell).getByRole('button', { name: 'Save SHELL' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
     } finally { vi.restoreAllMocks(); }
   });
 });

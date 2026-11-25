@@ -75,6 +75,8 @@ export interface InputBarProps {
   onPrivacyToggle?: () => void;
   onFocus?: () => void;
   onDraftChange?: () => void;
+  /** Reports only 0/1 empty-to-non-empty transitions without lifting draft text. */
+  onHasDraftChange?: (hasDraft: boolean) => void;
 }
 
 export interface InputBarHandle {
@@ -561,6 +563,7 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
   onPrivacyToggle,
   onFocus,
   onDraftChange,
+  onHasDraftChange,
 }: InputBarProps, ref) {
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const previewUrlsRef = useRef<Set<string>>(new Set());
@@ -575,6 +578,20 @@ export const InputBar = forwardRef<InputBarHandle, InputBarProps>(function Input
     onDraftChange?.();
   }, [onDraftChange]);
   const [hasDraftContent, setHasDraftContent] = useState(() => value.trim().length > 0);
+  const onHasDraftChangeRef = useRef(onHasDraftChange);
+  onHasDraftChangeRef.current = onHasDraftChange;
+  const reportedHasDraftRef = useRef(false);
+  useLayoutEffect(() => {
+    if (reportedHasDraftRef.current === hasDraftContent) return;
+    reportedHasDraftRef.current = hasDraftContent;
+    onHasDraftChangeRef.current?.(hasDraftContent);
+  }, [hasDraftContent]);
+  useEffect(() => () => {
+    if (reportedHasDraftRef.current) {
+      reportedHasDraftRef.current = false;
+      onHasDraftChangeRef.current?.(false);
+    }
+  }, []);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [sendPending, setSendPending] = useState(false);

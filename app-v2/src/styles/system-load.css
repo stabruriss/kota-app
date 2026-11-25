@@ -1,0 +1,782 @@
+/* System Load bezel HUD strip & worked-clock lamp (v3.3). */
+
+.ember-room-head.ram-lit {
+  --heat-rgb: 239, 195, 111;
+  --light: 0;
+  --light-soft: 0;
+  --light-line: 0;
+  --light-core: 0;
+}
+
+.ember-room-head.ram-lit .ember-worked-flip {
+  position: relative;
+  isolation: isolate;
+}
+
+/* Under-glow beneath the flip cards: radial gradients + box-shadow only. */
+.ember-room-head.ram-lit .ember-worked-flip::before {
+  content: '';
+  pointer-events: none;
+  z-index: -1;
+  position: absolute;
+  left: -10px;
+  right: -10px;
+  top: auto;
+  bottom: 3px;
+  height: 18px;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse closest-side,
+    rgba(var(--heat-rgb), var(--light-core)) 0%,
+    rgba(var(--heat-rgb), calc(var(--light-core) * 0.42)) 48%,
+    rgba(var(--heat-rgb), 0) 100%
+  );
+}
+
+.ember-room-head.ram-lit .ember-worked-flip::after {
+  content: '';
+  pointer-events: none;
+  z-index: -1;
+  position: absolute;
+  inset: 1px -5px 8px;
+  border-radius: 7px;
+  background: radial-gradient(
+    ellipse at 50% 56%,
+    rgba(var(--heat-rgb), calc(var(--light-soft) * 0.65)) 0%,
+    rgba(var(--heat-rgb), 0) 76%
+  );
+  box-shadow: 0 2px 12px rgba(var(--heat-rgb), calc(var(--light-soft) * 0.72));
+}
+
+.ember-room-head.ram-lit .ember-worked-flip-card {
+  box-shadow:
+    0 calc(var(--worked-card-height) * 0.05) calc(var(--worked-card-height) * 0.12) rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.40),
+    0 0 6px rgba(var(--heat-rgb), var(--light-soft));
+}
+
+.ember-room-head.ram-lit .ember-worked-flip-card > span {
+  text-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.45),
+    0 0 5px rgba(var(--heat-rgb), var(--light-line));
+}
+
+.ember-room-head.ram-lit .ember-worked-reset.ram-expand {
+  box-shadow:
+    0 calc(var(--h) * 0.06) calc(var(--h) * 0.12) rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 calc(var(--h) * -0.045) calc(var(--h) * 0.05) rgba(0, 0, 0, 0.4),
+    0 0 8px rgba(var(--heat-rgb), var(--light-soft));
+}
+
+.ember-room-head.ram-lit .ember-worked-reset.ram-expand:active:not(:disabled) {
+  box-shadow:
+    0 calc(var(--h) * 0.015) calc(var(--h) * 0.03) rgba(0, 0, 0, 0.45),
+    inset 0 calc(var(--h) * 0.05) calc(var(--h) * 0.06) rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 0 8px rgba(var(--heat-rgb), var(--light-soft));
+}
+
+.ember-room-head .ember-worked-reset.ram-expand svg,
+.ember-room-head .ember-worked-reset.ram-expand:active svg {
+  filter: none;
+  transition: transform 0.16s;
+}
+
+.ember-room-head.ram-lit .ember-worked-reset.ram-expand svg,
+.ember-room-head.ram-lit .ember-worked-reset.ram-expand:active svg {
+  filter: drop-shadow(0 0 3px rgba(var(--heat-rgb), var(--light-line)));
+}
+
+.ember-room-head .ember-worked-reset.ram-expand[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.ember-room-head .ember-worked-reset.ram-expand svg path {
+  stroke: #b2c1be;
+}
+
+.ember-room-head .ember-worked-reset.ram-expand:disabled {
+  opacity: 0.34;
+  transform: none;
+  cursor: default;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.ember-room-head .ember-worked-reset.ram-expand:disabled svg {
+  filter: none;
+}
+
+.ember-room-head .ember-worked-reset.ram-expand:focus-visible {
+  outline: 1px solid #8ea8a6;
+  outline-offset: 2px;
+}
+
+/* Bezel: external display matching the neighbouring right-column cards. */
+.ram-panel,
+.reset-relay-card {
+  width: 292px;
+  padding: 5px 5px 6px;
+  border: 1px solid rgba(218, 214, 204, 0.2);
+  border-radius: 9px;
+  background: linear-gradient(180deg, #2f2f2e 0, #232322 44%, #181818 100%);
+  color: #93a9aa;
+  font-family: var(--font-mono, ui-monospace, 'SF Mono', Menlo, monospace);
+}
+
+.ram-panel {
+  --heat-rgb: 239, 195, 111;
+  --light: 0;
+  --light-soft: 0;
+  --light-line: 0;
+  --light-core: 0;
+  --cut: 6px;
+  position: fixed;
+  z-index: 4000;
+  box-shadow:
+    0 14px 26px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.085),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.6);
+  overflow: auto;
+}
+
+.ram-panel[hidden] {
+  display: none;
+}
+
+/* Bezel lower-right indicator LED driven by the shared lamp value. */
+.ram-panel::after,
+.reset-relay-card::after {
+  content: '';
+  position: absolute;
+  right: 12px;
+  bottom: 2px;
+  width: 7px;
+  height: 2px;
+  border-radius: 1px;
+  pointer-events: none;
+  background: var(--button-rgb, #5d6b6c);
+  opacity: calc(0.3 + var(--light) * 0.7);
+  box-shadow: 0 0 5px rgba(var(--heat-rgb), var(--light-core));
+}
+
+/* Black glass screen inset inside the bezel. */
+.hud-screen {
+  position: relative;
+  isolation: isolate;
+  padding: 9px 11px 11px 9px;
+  border-radius: 4px;
+  background: #04070a;
+  box-shadow:
+    inset 0 0 0 1px #000,
+    inset 0 2px 7px rgba(0, 0, 0, 0.95),
+    0 1px 0 rgba(255, 255, 255, 0.07),
+    0 -1px 0 rgba(0, 0, 0, 0.5);
+}
+
+.hud-screen::before,
+.hud-screen::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.hud-screen::before {
+  inset: 2px;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+  background:
+    linear-gradient(
+      rgba(var(--heat-rgb), calc(var(--light-line) * 0.85)),
+      rgba(var(--heat-rgb), calc(var(--light-line) * 0.85))
+    ),
+    linear-gradient(160deg, #55686b, #2a3537 52%, #3d4b4e);
+}
+
+.hud-screen::after {
+  inset: 3px;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 9.6px), calc(100% - 9.6px) 100%, 0 100%);
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.02) 0 1px, transparent 1px 3px),
+    radial-gradient(115% 95% at 0 0, rgba(var(--heat-rgb), calc(var(--light-soft) * 0.5)), transparent 60%),
+    linear-gradient(140deg, #172023, #0a1012 74%);
+}
+
+/* Caption: SYSTEM LOAD + raised centre rail + TOTAL RAM XX GB. */
+.hud-caption {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 0 11px 1px;
+  color: #7b9395;
+  font-size: 8px;
+  line-height: 10px;
+  letter-spacing: 1.15px;
+  white-space: nowrap;
+}
+
+.hud-title {
+  color: #aabdbd;
+}
+
+.hud-title::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 6px;
+  vertical-align: 0.5px;
+  background: var(--button-rgb, #8fa5a6);
+  box-shadow: 0 0 6px rgba(var(--heat-rgb), var(--light-core));
+}
+
+.hud-rail {
+  flex: 1;
+  min-width: 12px;
+  height: 8px;
+  overflow: visible;
+}
+
+.hud-rail path {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1;
+}
+
+.rail-base {
+  stroke: #44565a;
+}
+
+.rail-heat {
+  stroke: rgb(var(--heat-rgb));
+  stroke-opacity: var(--light-line);
+  filter: drop-shadow(0 0 2px rgba(var(--heat-rgb), var(--light-line)));
+}
+
+.hud-unit {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) 60px;
+  gap: 8px;
+  align-items: start;
+}
+
+/* RESET KOTA key: top flush with first bar, bottom flush with KOTA slab, straight 11 px lower-left chamfer. */
+.reset-shell {
+  width: 46px;
+  height: 28px;
+  filter:
+    drop-shadow(0 0 4px rgba(var(--heat-rgb), var(--light-line)))
+    drop-shadow(0 0 10px rgba(var(--heat-rgb), var(--light-soft)));
+}
+
+.hud-reset {
+  position: relative;
+  width: 46px;
+  height: 28px;
+  margin: 0;
+  padding: 0 0 0 3px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  isolation: isolate;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 11px 100%, 0 calc(100% - 11px));
+  background: linear-gradient(155deg, #293840 0, #141d21 56%, #0c1316 100%);
+  color: var(--button-rgb, #9bafb0);
+  font: 700 8px/9px var(--font-mono);
+  letter-spacing: 0.9px;
+  text-indent: 0.9px;
+  text-shadow: 0 0 6px rgba(var(--heat-rgb), var(--light-core));
+  transition: background 0.15s, transform 0.08s;
+}
+
+.hud-reset::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 3px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 9.2px 100%, 0 calc(100% - 9.2px));
+  background:
+    linear-gradient(
+      180deg,
+      rgba(var(--heat-rgb), calc(var(--light-soft) * 1.35)),
+      rgba(var(--heat-rgb), calc(var(--light-soft) * 0.35))
+    ),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, #1b262b, #11191c);
+}
+
+.reset-edge {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  fill: none;
+  stroke: var(--button-border, #688185);
+  stroke-width: 1;
+}
+
+.hud-reset:hover:not(:disabled) {
+  background: linear-gradient(155deg, #35474f 0, #1a272c 56%, #111a1e 100%);
+  filter: brightness(1.22);
+}
+
+.hud-reset:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.hud-reset:focus-visible {
+  outline: none;
+}
+
+.hud-reset:focus-visible .reset-edge {
+  stroke: #dfeae8;
+  stroke-width: 1.6;
+}
+
+.hud-reset:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Three gauges: COMPRESSED hairline, KOTA slanted slab, SWAP 16 slanted pips. */
+.hud-tracks {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 6px 22px 11px;
+}
+
+.hud-row {
+  position: relative;
+  min-width: 0;
+  outline: none;
+}
+
+.hud-row:focus-visible {
+  outline: 1px solid #78989a;
+  outline-offset: 3px;
+}
+
+.hud-track {
+  position: relative;
+  width: 100%;
+  margin: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.bar-fill,
+.bar-excess {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  transition: width 0.28s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.bar-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #b3a67b;
+  opacity: 0.75;
+  z-index: 2;
+}
+
+.hud-row[data-yellow="true"] .bar-mark {
+  background: rgb(var(--heat-rgb));
+  opacity: 1;
+}
+
+/* 1 · COMPRESSED hairline */
+.compressed-track {
+  height: 3px;
+}
+
+.compressed-track::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 1px;
+  height: 1px;
+  background: linear-gradient(90deg, #3f5053, #283437);
+}
+
+.compressed-track .bar-fill {
+  background: linear-gradient(90deg, #5f7c80, #a8c6c5);
+}
+
+.compressed-track .bar-fill::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 1px;
+  height: 4px;
+  background: #c5d9d6;
+}
+
+.compressed-track .bar-excess {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.4), rgb(var(--heat-rgb)) 40%);
+  box-shadow: 0 0 6px rgba(var(--heat-rgb), 0.5);
+}
+
+.compressed-row[data-yellow="true"] .bar-fill::after {
+  display: none;
+}
+
+.compressed-track .bar-mark {
+  top: 0;
+  bottom: auto;
+  height: 4px;
+}
+
+/* 2 · KOTA slanted slab */
+.kota-track {
+  height: 22px;
+  margin-top: 0;
+  filter: drop-shadow(0 0 5px rgba(var(--heat-rgb), calc(var(--light-line) * 0.7)));
+}
+
+.kota-track::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(0 0, 100% 0, calc(100% - var(--cut)) 100%, 0 100%);
+  background:
+    repeating-linear-gradient(107deg, rgba(255, 255, 255, 0.04) 0 1px, transparent 1px 5px),
+    linear-gradient(180deg, #151d20, #212d31);
+}
+
+.kota-track .bar-fill {
+  clip-path: polygon(0 0, 100% 0, calc(100% - var(--cut)) 100%, 0 100%);
+  background: linear-gradient(180deg, #c2d1ce 0, #9bb0af 9%, #7a9396 55%, #587379 100%);
+}
+
+.kota-track .bar-excess {
+  margin-left: calc(var(--cut) * -1);
+  padding-right: var(--cut);
+  box-sizing: content-box;
+  clip-path: polygon(var(--cut) 0, 100% 0, calc(100% - var(--cut)) 100%, 0 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.55) 0,
+    rgb(var(--heat-rgb)) 11%,
+    rgba(var(--heat-rgb), 0.74) 100%
+  );
+}
+
+.kota-track .bar-mark {
+  top: -2px;
+  bottom: -2px;
+  transform: translateX(-3px) skewX(-15.3deg);
+}
+
+/* 3 · SWAP sixteen slanted pips */
+.swap-track {
+  height: 8px;
+  margin-top: 3px;
+  --step: calc(100% / 16);
+  background: #1b2528;
+  transform: skewX(-18deg);
+  transform-origin: 0 100%;
+  -webkit-mask-image: repeating-linear-gradient(
+    to right,
+    #000 0 calc(var(--step) - 3px),
+    transparent calc(var(--step) - 3px) var(--step)
+  );
+  mask-image: repeating-linear-gradient(
+    to right,
+    #000 0 calc(var(--step) - 3px),
+    transparent calc(var(--step) - 3px) var(--step)
+  );
+}
+
+.swap-track .bar-fill,
+.swap-track .bar-excess {
+  z-index: 1;
+}
+
+.swap-track .bar-fill {
+  background: linear-gradient(180deg, #bcd2cf, #69858a);
+}
+
+.swap-track .bar-excess {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.5),
+    rgb(var(--heat-rgb)) 24%,
+    rgba(var(--heat-rgb), 0.72)
+  );
+}
+
+.swap-track .bar-mark {
+  z-index: 0;
+  width: auto;
+  right: 0;
+  background: rgba(214, 170, 96, 0.075);
+  opacity: 1;
+}
+
+.swap-row[data-yellow="true"] .bar-mark {
+  background: rgba(var(--heat-rgb), 0.24);
+}
+
+/* Right-aligned numbers driven by .hud-unit state classes. */
+.hud-numbers {
+  display: grid;
+  grid-template-rows: 6px 22px 11px;
+  width: 60px;
+  justify-items: end;
+  align-items: center;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.compressed-inline,
+.swap-inline {
+  font-size: 9px;
+  line-height: 9px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  color: #8aa1a3;
+}
+
+.compressed-inline {
+  align-self: start;
+  margin-top: -6px;
+}
+
+.swap-inline {
+  align-self: start;
+  margin-top: 4px;
+}
+
+.kota-number {
+  font-size: 20px;
+  line-height: 22px;
+  font-weight: 400;
+  letter-spacing: -1.1px;
+  color: #b4c3c1;
+  margin-top: 1px;
+  text-shadow: 0 0 12px rgba(var(--heat-rgb), var(--light-line));
+}
+
+.hud-unit.kota-yellow .kota-number {
+  color: rgb(var(--heat-rgb));
+}
+
+.hud-unit.compressed-yellow .compressed-inline,
+.hud-unit.swap-yellow .swap-inline {
+  color: rgba(var(--heat-rgb), 0.95);
+}
+
+/* Hover / keyboard focus tooltip card. */
+.hud-tooltip {
+  position: fixed;
+  z-index: 4100;
+  padding: 6px 11px 6px 12px;
+  white-space: nowrap;
+  color: #c6d8d6;
+  font: 700 8px/10px var(--font-mono);
+  letter-spacing: 1.4px;
+  pointer-events: none;
+  filter: drop-shadow(0 6px 8px rgba(0, 0, 0, 0.67));
+}
+
+.hud-tooltip::before,
+.hud-tooltip::after {
+  content: '';
+  position: absolute;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 7px 100%, 0 calc(100% - 7px));
+}
+
+.hud-tooltip::before {
+  inset: 0;
+  background: #6f8a8d;
+}
+
+.hud-tooltip::after {
+  inset: 1px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 6.6px 100%, 0 calc(100% - 6.6px));
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 3px),
+    linear-gradient(130deg, #1f2d32, #0f181b);
+}
+
+.hud-tooltip > span {
+  position: relative;
+  z-index: 1;
+}
+
+.hud-tooltip > span::before {
+  content: '';
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-right: 7px;
+  vertical-align: 1px;
+  background: #a3c3c1;
+}
+
+/* Full-viewport confirm layer for Reset Kota / Dream draft confirmation. */
+.system-load-confirm-layer.kota-confirm-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 12000;
+}
+
+.system-load-confirm-layer .kota-confirm-card {
+  font-family: var(--font-sans);
+  user-select: text;
+}
+
+.system-load-confirm-layer .kota-confirm-card h2 {
+  margin: 0;
+}
+
+/* Two-phase Reset Kota relay badge (window-centered P1 over dark backdrop). */
+.reset-relay-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 13000;
+  pointer-events: auto;
+  background: rgba(6, 9, 11, 0.72);
+}
+
+.reset-relay-layer[hidden] {
+  display: none !important;
+}
+
+.reset-relay-card {
+  --relay-cool-rgb: 162, 196, 194;
+  --heat-rgb: var(--relay-cool-rgb);
+  --light: 0.74;
+  --light-soft: 0.16;
+  --light-line: 0.08;
+  --light-core: 0.45;
+  --button-rgb: #9bb8b7;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: calc(100vw - 24px);
+  box-shadow:
+    0 16px 32px rgba(0, 0, 0, 0.66),
+    inset 0 1px 0 rgba(255, 255, 255, 0.085),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.6);
+}
+
+.reset-relay-card .relay-screen {
+  padding: 9px 11px 10px 10px;
+}
+
+.reset-relay-card .relay-caption {
+  padding: 0 0 9px 1px;
+}
+
+.reset-relay-card .hud-title {
+  color: #b4c7c6;
+  font-weight: 600;
+}
+
+.rail-cool {
+  stroke: #7b9b9d;
+  stroke-opacity: 0.55;
+}
+
+.relay-stage-label {
+  color: #a9c1c0;
+  font-weight: 600;
+  letter-spacing: 1.15px;
+}
+
+.relay-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.relay-gauge {
+  min-width: 0;
+  padding: 1px 4px 0 3px;
+}
+
+.relay-segments {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.relay-seg {
+  position: relative;
+  height: 15px;
+  transform: skewX(-18deg);
+  transform-origin: 0 100%;
+  background:
+    repeating-linear-gradient(108deg, rgba(255, 255, 255, 0.03) 0 1px, transparent 1px 4px),
+    linear-gradient(180deg, #131b1e 0%, #1d282c 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(96, 120, 124, 0.25),
+    inset 0 1px 2px rgba(0, 0, 0, 0.72);
+}
+
+.relay-seg[data-lit="true"] {
+  background: linear-gradient(180deg, #d7e7e5 0%, #a5bdbb 15%, #789699 58%, #547075 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.58),
+    inset 0 -1px 0 rgba(16, 26, 29, 0.55),
+    0 0 7px rgba(var(--relay-cool-rgb), 0.22);
+}
+
+.relay-seg[data-head="true"] {
+  background: linear-gradient(180deg, #eff8f7 0%, #bed4d2 18%, #85a4a7 60%, #5e7c81 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 0 9px rgba(var(--relay-cool-rgb), 0.34);
+}
+
+.relay-ticks {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 4px;
+  padding-right: 4px;
+}
+
+.relay-ticks i {
+  display: block;
+  height: 2px;
+  background: #2b393d;
+}
+
+.relay-ticks i[data-lit="true"] {
+  background: #7c9b9e;
+}
+
+.relay-count {
+  font: 400 17px/18px var(--font-mono, ui-monospace, 'SF Mono', Menlo, monospace);
+  letter-spacing: -0.6px;
+  color: #c5d6d4;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 34px;
+  text-shadow: 0 0 10px rgba(var(--relay-cool-rgb), 0.28);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ember-room-head .ember-worked-reset.ram-expand svg,
+  .hud-reset,
+  .bar-fill,
+  .bar-excess {
+    transition: none;
+  }
+}

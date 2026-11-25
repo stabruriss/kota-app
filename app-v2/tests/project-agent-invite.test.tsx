@@ -90,6 +90,39 @@ describe('inviting a project incarnation to Tavern', () => {
     expect(invite).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['fades', 'stays'])('puts the invited note beside the button for a few seconds; a refresh failure %s in the status', async (outcome) => {
+    setup();
+    vi.spyOn(client, 'inviteProjectAgentToTavern').mockResolvedValue(result);
+    if (outcome === 'stays') vi.mocked(client.loadTavernHeroProfiles).mockRejectedValue(new Error('directory unreadable'));
+    const view = overlay();
+    const button = await screen.findByRole('button', { name: 'Invite to Tavern' });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(button);
+      await act(async () => { for (let tick = 0; tick < 50; tick += 1) await Promise.resolve(); });
+      const done = screen.getByRole('button', { name: 'Already in Tavern' });
+      const toast = view.container.querySelector('.profile-sheet-toast')!;
+      expect(toast.parentElement).toContainElement(done);
+      if (outcome === 'fades') {
+        expect(toast).toHaveTextContent('Invited as 颦儿 v. Kota');
+        expect(toast).toHaveAttribute('data-show', 'true');
+        expect(view.container.querySelector('.profile-sheet-status')).toBeNull();
+        act(() => { vi.advanceTimersByTime(2900); });
+        expect(toast).toHaveAttribute('data-show', 'true');
+        act(() => { vi.advanceTimersByTime(200); });
+        expect(toast).toHaveAttribute('data-show', 'false');
+      } else {
+        // This one asks the user to act, so it does not fade.
+        expect(toast).toHaveAttribute('data-show', 'false');
+        const note = screen.getByText('Invited as 颦儿 v. Kota. Recruit list could not refresh; open Tavern to refresh it.');
+        expect(note).toHaveClass('profile-sheet-status');
+        act(() => { vi.advanceTimersByTime(60000); });
+        expect(note).toBeInTheDocument();
+      }
+    } finally { vi.useRealTimers(); }
+  });
+
   it('refreshes the cache only after invitation succeeds and guards clicks until refresh finishes', async () => {
     setup();
     let finishInvite!: (value: client.ProjectAgentInviteResult) => void;

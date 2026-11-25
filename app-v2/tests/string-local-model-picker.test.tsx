@@ -36,11 +36,11 @@ async function edit() {
 }
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 describe('String owner save behavior', () => {
-  it.each(['profile', 'hero', 'workbench'] as const)('only removes redundant external details on the profile surface (%s)', async surface => {
+  it.each(['profile', 'hero', 'workbench'] as const)('lists the String models in the menu and editor only, never under the picker (%s)', async surface => {
     render(<StringLocalModelPicker ownerKey="fixture" owner="Copper" surface={surface} model="kota/auto" group={group()}
       catalog={catalog} jev={jev} onSelect={vi.fn()} onAutoRouteChange={vi.fn()} onOpen={vi.fn()} onJevSettings={vi.fn()} />);
     expect(!!screen.queryByRole('button', { name: 'Edit routing' })).toBe(surface !== 'profile');
-    expect(!!screen.queryByLabelText('Auto String configuration')).toBe(surface === 'hero');
+    expect(screen.queryAllByText(/\bSol\b|\bLuna\b|threshold/i)).toHaveLength(0);
     await userEvent.click(screen.getByRole('button', { name: 'Local model' }));
     const option = screen.getByRole('option', { name: /Auto String/ });
     expect(option).toHaveTextContent('Sol · high');

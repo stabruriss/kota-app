@@ -39,6 +39,8 @@ import type {
 } from '../types/tree';
 import type { AgentId } from '../types/scene';
 import { HeroAvatarArt } from './HeroAvatarPicker';
+import { publishLeftRailUpdateVersion } from '../lib/sidebar-rail';
+import { SidebarRailSlot } from './SidebarRailCollapse';
 
 interface SelectedTreePath {
   rootKind: WorkspaceTreeRootKind;
@@ -165,6 +167,15 @@ export function FileTree({
     latestVersion,
     openUpdateHome,
   } = useKotaUpdateCheck();
+
+  useEffect(() => {
+    publishLeftRailUpdateVersion(updateAvailable && latestVersion ? latestVersion : null);
+  }, [latestVersion, updateAvailable]);
+
+  const handleCollapseRail = useCallback(() => {
+    setContextMenu(null);
+    setDiffScope(null);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -532,12 +543,14 @@ export function FileTree({
   }, [openUpdateHome]);
 
   return (
-    <aside
-      className="tree"
-      aria-label="Project inventory"
-      data-testid="file-tree"
-      onClick={() => setContextMenu(null)}
-    >
+    <SidebarRailSlot side="left" onCollapse={handleCollapseRail}>
+      <aside
+        id="file-tree"
+        className="tree"
+        aria-label="Project inventory"
+        data-testid="file-tree"
+        onClick={() => setContextMenu(null)}
+      >
       <div className="tree-head">
         <span className="tree-title-stack">
           <span className="tree-repo">{projectDisplayName(repoName)}</span>
@@ -737,7 +750,8 @@ export function FileTree({
           onClose={() => setDiffScope(null)}
         />
       )}
-    </aside>
+      </aside>
+    </SidebarRailSlot>
   );
 }
 

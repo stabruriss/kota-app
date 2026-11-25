@@ -20,6 +20,8 @@ const KOTA_LOCAL_SETTLED_DELIVERY_LIMIT: usize = 512;
 const KOTA_LOCAL_PATH_TAIL_LIMIT: usize = 512;
 const KOTA_LOCAL_FAULT_DETAIL_LIMIT: usize = 400;
 const KOTA_USER_CUSTOM_TYPE: &str = "kota.user";
+const KOTA_LOCAL_TOOL_IMAGE_DIR: &str = "project-memory/attachments/violet/kota-local";
+const COMPOSER_ATTACHMENT_DIR: &str = "project-memory/attachments/composer";
 const KOTA_INPUT_CUSTOM_TYPES: [&str; 7] = [
     "kota.user",
     "kota.lm",
@@ -715,9 +717,100 @@ fn message_entry_events(
                 .unwrap_or_default(),
             None,
         ),
-        // toolResult / bashExecution / system stay out of the room until the
-        // console phase; thinking and tool blocks are dropped by room_event_for.
+        Some("toolResult") => (tool_image_events(context, scope, entry, message, &native_id), None),
+        // bashExecution / system and tool result text stay out of the room until
+        // the console phase; thinking and tool blocks are dropped by room_event_for.
         _ => (Vec::new(), None),
+    }
+}
+
+/// Images a tool handed the model (Pi `ImageContent` blocks of a toolResult)
+/// become one room artifact per tool result, stored by content hash. Only
+/// explicit image blocks count; paths named in text are never followed. An
+/// image byte-identical to the human's own composer upload is already in the
+/// room and is neither stored nor shown again.
+fn tool_image_events(
+    context: &LocalContext,
+    scope: &KotaLocalScope,
+    entry: &LocalEntry<'_>,
+    message: &JsonValue,
+    native_id: &str,
+) -> Vec<NativeEvent> {
+    let paths = message
+        .get("content")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(JsonValue::as_str) == Some("image"))
+        .filter_map(|block| {
+            let encoded = block.get("data").and_then(JsonValue::as_str)?;
+            persist_tool_image(&scope.project_root, encoded)
+                .inspect_err(|reason| {
+                    eprintln!("Kota Violet Local tool image skipped: entry={} reason={reason}", entry.id)
+                })
+                .ok()
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let summary = if paths.len() == 1 { "1 image".to_string() } else { format!("{} images", paths.len()) };
+    let mut artifact = event(
+        &context.agent,
+        &context.source,
+        "assistant",
+        "artifact",
+        &entry.timestamp,
+        &format!("{native_id}:images"),
+        format!("{summary}\n\n{}", paths.join("\n\n")),
+    );
+    artifact.work_signal = None;
+    vec![artifact]
+}
+
+/// `Ok(None)`: the image is the human's own composer upload.
+fn persist_tool_image(project_root: &Path, encoded: &str) -> Result<Option<String>, &'static str> {
+    let bytes = base64::Engine::decode(&BASE64_STANDARD, encoded.trim().as_bytes())
+        .map_err(|_| "invalid_base64")?;
+    let extension = tool_image_extension(&bytes).ok_or("unsupported_image_format")?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    if is_composer_attachment(project_root, &digest) {
+        return Ok(None);
+    }
+    let relative_path = format!("{KOTA_LOCAL_TOOL_IMAGE_DIR}/{digest}.{extension}");
+    write_if_changed(&project_root.join(&relative_path), &bytes).map_err(|_| "image_write_failed")?;
+    Ok(Some(relative_path))
+}
+
+/// Composer attachment ids start with the first 12 hex digits of the upload's
+/// sha256, and each manifest records the full digest.
+fn is_composer_attachment(project_root: &Path, digest: &str) -> bool {
+    let prefix = format!("att_{}_", &digest[..12]);
+    let Ok(entries) = fs::read_dir(project_root.join(COMPOSER_ATTACHMENT_DIR)) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_name().to_str().is_some_and(|name| name.starts_with(&prefix))
+            && fs::read(entry.path().join("manifest.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<JsonValue>(&bytes).ok())
+                .is_some_and(|manifest| manifest.get("sha256").and_then(JsonValue::as_str) == Some(digest))
+    })
+}
+
+/// The formats Pi passes to models; anything else is not shown.
+fn tool_image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
     }
 }
 

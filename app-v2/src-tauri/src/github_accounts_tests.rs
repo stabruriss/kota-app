@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub(crate) struct FakeGh {
     pub tokens: HashMap<String, String>,
-    pub status: GhLogins,
+    pub active: Option<String>,
     pub switch_fails: bool,
     pub switched: RefCell<Vec<String>>,
 }
@@ -15,7 +15,7 @@ impl FakeGh {
     pub(crate) fn with(logins: &[&str], active: Option<&str>) -> Self {
         Self {
             tokens: logins.iter().map(|login| (login.to_string(), format!("fixture-token-{login}"))).collect(),
-            status: GhLogins { logins: logins.iter().map(|login| login.to_string()).collect(), active: active.map(str::to_owned) },
+            active: active.map(str::to_owned),
             ..Self::default()
         }
     }
@@ -25,8 +25,8 @@ impl Gh for FakeGh {
     fn token(&self, login: &str) -> Option<String> {
         self.tokens.get(login).cloned()
     }
-    fn logins(&self) -> Result<GhLogins> {
-        Ok(self.status.clone())
+    fn active(&self) -> Result<Option<String>> {
+        Ok(self.active.clone())
     }
     fn switch(&self, login: &str) -> Result<()> {
         if self.switch_fails {
@@ -43,18 +43,16 @@ fn home(label: &str) -> PathBuf {
     dir
 }
 
+/// Kota already uses these accounts; the first one is the default.
+pub(crate) fn record(home: &Path, logins: &[&str]) {
+    let accounts = logins.iter().map(|login| Account { login: login.to_string(), added_at: String::new() }).collect();
+    write_store(home, &Store { schema: 1, default_login: logins.first().map(|login| login.to_string()), accounts }).unwrap();
+}
+
 fn register(home: &Path, project_id: &str, workspace: serde_json::Value) {
     let root = home.join("Workspaces").join(project_id);
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("workspace.json"), serde_json::to_vec(&workspace).unwrap()).unwrap();
-}
-
-#[test]
-fn gh_status_lists_every_account_and_the_active_one_without_colour_codes() {
-    let text = "github.com\n  \u{1b}[0;32m✓\u{1b}[0m Logged in to github.com account \u{1b}[0;1;39mfable-copper\u{1b}[0m (keyring)\n  - Active account: \u{1b}[0;1;39mfalse\u{1b}[0m\n\
-        \n  ✓ Logged in to github.com account fable-indigo (keyring)\n  - Active account: true\n  - Token: gho_************************************\n";
-    assert_eq!(parse_gh_status(text), GhLogins { logins: vec!["fable-copper".into(), "fable-indigo".into()], active: Some("fable-indigo".into()) });
-    assert_eq!(parse_gh_status("You are not logged into any GitHub hosts."), GhLogins::default());
 }
 
 #[test]
@@ -74,30 +72,51 @@ fn first_use_takes_over_gh_active_login_once_and_writes_nothing_without_one() {
 }
 
 #[test]
-fn adding_records_new_logins_and_switches_gh_back_to_the_previous_account() {
+fn signing_in_adds_that_account_only_and_switches_gh_back_to_the_previous_one() {
     let home = home("add");
     ensure_store(&home, &FakeGh::with(&["fable-copper"], Some("fable-copper"))).unwrap();
-    // gh made the new login active; Kota restores the one the user had.
-    let gh = FakeGh::with(&["fable-copper", "fable-indigo"], Some("fable-indigo"));
-    let result = finish_add(&home, &gh, Some("fable-copper")).unwrap();
-    assert_eq!(result.added, ["fable-indigo"]);
+    // gh made the new login active; Kota restores the one the user had. gh also holds an
+    // account Kota does not use (removed from Kota, or never added): it stays out.
+    let gh = FakeGh::with(&["fable-amber", "fable-copper", "fable-indigo"], Some("fable-indigo"));
+    let result = finish_sign_in(&home, &gh, Some("fable-copper")).unwrap();
+    assert_eq!((result.login.as_str(), result.added), ("fable-indigo", true));
     assert_eq!((result.active.as_deref(), result.restore_failed), (Some("fable-copper"), false));
     assert_eq!(*gh.switched.borrow(), ["fable-copper"]);
-    assert_eq!(result.view.default_login.as_deref(), Some("fable-copper"), "adding never moves the default");
-    // Signing in again to a known login adds nothing.
-    assert!(finish_add(&home, &FakeGh::with(&["fable-copper", "fable-indigo"], Some("fable-copper")), Some("fable-copper")).unwrap().added.is_empty());
+    assert_eq!(result.view.accounts.iter().map(|a| a.login.as_str()).collect::<Vec<_>>(), ["fable-copper", "fable-indigo"]);
+    // Signing in again to a known login adds nothing and names that login.
+    let again = finish_sign_in(&home, &FakeGh::with(&["fable-copper", "fable-indigo"], Some("fable-copper")), Some("fable-copper")).unwrap();
+    assert_eq!((again.login.as_str(), again.added, again.view.accounts.len()), ("fable-copper", false, 2));
     let failing = FakeGh { switch_fails: true, ..FakeGh::with(&["fable-copper", "fable-indigo", "fable-amber"], Some("fable-amber")) };
-    let failed = finish_add(&home, &failing, Some("fable-copper")).unwrap();
-    assert_eq!((failed.added.as_slice(), failed.active.as_deref(), failed.restore_failed), (&["fable-amber".to_owned()][..], Some("fable-amber"), true));
+    let failed = finish_sign_in(&home, &failing, Some("fable-copper")).unwrap();
+    assert_eq!((failed.login.as_str(), failed.active.as_deref(), failed.restore_failed), ("fable-amber", Some("fable-amber"), true));
+    assert_eq!(finish_sign_in(&home, &FakeGh::default(), None).unwrap_err().to_string(), "github_account_unknown");
     let _ = fs::remove_dir_all(home);
 }
 
 #[test]
-fn the_first_account_added_becomes_the_default_and_removing_it_moves_the_default() {
+fn a_new_account_becomes_the_default_only_when_it_is_the_first() {
     let home = home("default");
-    let result = finish_add(&home, &FakeGh::with(&["fable-copper"], Some("fable-copper")), None).unwrap();
-    assert_eq!(result.view.default_login.as_deref(), Some("fable-copper"));
-    finish_add(&home, &FakeGh::with(&["fable-copper", "fable-indigo"], Some("fable-indigo")), None).unwrap();
+    let default = |result: &SignInResult| result.view.default_login.clone();
+    // The first account ever: no store yet, and it counts as added.
+    let first = finish_sign_in(&home, &FakeGh::with(&["fable-copper"], Some("fable-copper")), None).unwrap();
+    assert_eq!((first.login.as_str(), first.added, default(&first).as_deref()), ("fable-copper", true, Some("fable-copper")));
+    // The default stays, also when its own sign-in has expired (gh no longer holds it).
+    let expired = finish_sign_in(&home, &FakeGh::with(&["fable-indigo"], Some("fable-indigo")), Some("fable-copper")).unwrap();
+    assert_eq!((expired.added, default(&expired).as_deref()), (true, Some("fable-copper")));
+    assert_eq!(expired.view.accounts[0].state, "needs_login");
+    // Empty again: the one signed in to is the first, whatever else gh holds.
+    remove(&home, "fable-copper").unwrap();
+    remove(&home, "fable-indigo").unwrap();
+    let only = finish_sign_in(&home, &FakeGh::with(&["fable-amber", "fable-copper", "fable-indigo"], Some("fable-indigo")), None).unwrap();
+    assert_eq!((only.added, default(&only).as_deref(), only.view.accounts.len()), (true, Some("fable-indigo"), 1));
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn the_default_can_be_chosen_and_removing_it_moves_the_default() {
+    let home = home("choose");
+    finish_sign_in(&home, &FakeGh::with(&["fable-copper"], Some("fable-copper")), None).unwrap();
+    finish_sign_in(&home, &FakeGh::with(&["fable-copper", "fable-indigo"], Some("fable-indigo")), None).unwrap();
     assert_eq!(set_default(&home, "fable-indigo").unwrap().default_login.as_deref(), Some("fable-indigo"));
     assert_eq!(set_default(&home, "stranger").unwrap_err().to_string(), "github_account_unknown");
     let store = remove(&home, "fable-indigo").unwrap();
@@ -105,6 +124,21 @@ fn the_first_account_added_becomes_the_default_and_removing_it_moves_the_default
     let gh = FakeGh::with(&["fable-indigo"], None);
     assert_eq!(view(&store, &gh).accounts[0].state, "needs_login", "gh no longer holds this login");
     let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn gh_runs_without_the_tokens_and_the_request_log_kota_may_have_inherited() {
+    let command = gh_command("gh");
+    let mut removed: Vec<_> = command.get_envs().filter(|(_, value)| value.is_none()).map(|(key, _)| key.to_str().unwrap()).collect();
+    removed.sort();
+    assert_eq!(removed, ["DEBUG", "GH_DEBUG", "GH_TOKEN", "GITHUB_TOKEN"]);
+}
+
+#[test]
+fn a_gh_that_prints_nothing_means_no_account_not_an_error() {
+    assert_eq!(printed(true, b"fable-copper\n").as_deref(), Some("fable-copper"));
+    assert_eq!(printed(false, b""), None);
+    assert_eq!(printed(true, b"\n"), None);
 }
 
 #[test]
@@ -127,7 +161,7 @@ fn a_project_uses_its_own_account_the_default_only_when_unbound_and_never_a_remo
 fn the_credential_helper_answers_with_the_project_account_or_quits() {
     let home = home("credential");
     let gh = FakeGh::with(&["fable-copper", "fable-indigo"], Some("fable-copper"));
-    finish_add(&home, &gh, None).unwrap();
+    record(&home, &["fable-copper", "fable-indigo"]);
     register(&home, "owner-repo", serde_json::json!({"remoteUrl":"https://github.com/owner/repo.git","connection":{"kind":"github","accountLogin":"fable-indigo"}}));
     register(&home, "owner-legacy", serde_json::json!({"remoteUrl":"https://github.com/owner/legacy.git"}));
     register(&home, "owner-removed", serde_json::json!({"remoteUrl":"x","connection":{"kind":"github","accountLogin":"removed"}}));

@@ -541,26 +541,6 @@ export function SmartTerminal() {
     return ptyId;
   }, []);
 
-  // M6.B Step 2 — external "open + run a command" trigger. App.tsx
-  // fires `kota:smart-run` when the user clicks the GitHub CLI setup
-  // pill so we drop them straight into a new tab running the browser
-  // login flow.
-  // Detail: { command: string, cwd?: string }.
-  useEffect(() => {
-    const onRun = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { command?: string; cwd?: string } | undefined;
-      const cmd = detail?.command;
-      if (!cmd) return;
-      void newTab(detail?.cwd).then((ptyId) => {
-        // Tiny tick so the PTY has its prompt before we write —
-        // otherwise zsh swallows the line as part of its init banner.
-        setTimeout(() => { void writeSmartPty(ptyId, `${cmd}\r`); }, 250);
-      });
-    };
-    window.addEventListener('kota:smart-run', onRun);
-    return () => window.removeEventListener('kota:smart-run', onRun);
-  }, [newTab]);
-
   const removeTabLocal = useCallback((tabId: string) => {
     setTabs((prev) => {
       const idx = prev.findIndex((t) => t.tabId === tabId);

@@ -15,6 +15,7 @@ mod cli_identity;
 mod claude_native_images;
 mod file_clipboard;
 mod github_accounts;
+mod github_sign_in;
 mod file_preview;
 pub mod laughing_man;
 pub mod ember;
@@ -42,6 +43,7 @@ pub mod dream_entry;
 pub mod soul;
 mod soul_push;
 mod string_templates;
+mod system_load;
 mod temporal_context;
 mod message_origin;
 mod violet;
@@ -11117,25 +11119,31 @@ async fn github_accounts_read() -> Result<github_accounts::AccountsView, String>
     .map_err(|err| format!("join github_accounts_read: {err}"))?
 }
 
-/// Before the Smart Terminal runs `gh auth login`: gh's active login, to restore after.
+/// Starts `gh auth login`; its output and its end arrive as `github-sign-in` events.
 #[tauri::command]
-async fn github_account_add_begin() -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+async fn github_sign_in_start(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
         use github_accounts::Gh;
-        github_accounts::GhCli.logins().map(|logins| logins.active).map_err(|err| err.to_string())
+        // Reading it fails only when gh cannot be run at all.
+        let previous = github_accounts::GhCli.active().map_err(|_| "github_cli_missing".to_owned())?;
+        let child = github_sign_in::spawn_gh().map_err(|err| err.to_string())?;
+        let events = app.clone();
+        app.state::<github_sign_in::Manager>().start(
+            id,
+            child,
+            github_sign_in::LIMIT,
+            move |event| drop(events.emit("github-sign-in", event)),
+            move || github_accounts::finish_sign_in(&github_accounts::kota_home(), &github_accounts::GhCli, previous.as_deref()),
+        );
+        Ok(())
     })
     .await
-    .map_err(|err| format!("join github_account_add_begin: {err}"))?
+    .map_err(|err| format!("join github_sign_in_start: {err}"))?
 }
 
 #[tauri::command]
-async fn github_account_add_finish(previous_active: Option<String>) -> Result<github_accounts::AddResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        github_accounts::finish_add(&github_accounts::kota_home(), &github_accounts::GhCli, previous_active.as_deref())
-            .map_err(|err| err.to_string())
-    })
-    .await
-    .map_err(|err| format!("join github_account_add_finish: {err}"))?
+fn github_sign_in_cancel(id: String, manager: tauri::State<'_, github_sign_in::Manager>) {
+    manager.cancel(&id);
 }
 
 #[tauri::command]
@@ -14164,8 +14172,10 @@ pub fn run() {
         .manage(PtyManager::default())
         .manage(IntegrationManager::default())
         .manage(BartenderManager::default())
+        .manage(github_sign_in::Manager::default())
         .manage(AgentBusManager::default())
         .manage(TemporalContextManager::default())
+        .manage(system_load::SystemLoad::default())
         .manage(std::sync::Arc::new(soul_push::service::Service::new(kota_home_dir())))
         .manage(EmberManager::default())
         .manage(bbs_sync::manager::Manager::account())
@@ -14252,10 +14262,12 @@ pub fn run() {
             {
                 let _ = app.get_webview_window("main");
             }
+            system_load::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             ping,
+            system_load::system_load_snapshot,
             terminal_enhancement_status,
             terminal_enhancement_save,
             supported_shells_status,
@@ -14334,8 +14346,8 @@ pub fn run() {
             google_drive_connect_and_setup,
             github_list_repos,
             github_accounts_read,
-            github_account_add_begin,
-            github_account_add_finish,
+            github_sign_in_start,
+            github_sign_in_cancel,
             github_account_set_default,
             github_account_remove,
             github_create_repo,

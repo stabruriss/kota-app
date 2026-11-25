@@ -59,9 +59,12 @@ body::before {
    (flex-end) so their rounded tops rise above the band. Dragging is
    wired by `data-tauri-drag-region` on the <header>. */
 .topbar {
+  /* Shared with .tb-edge, which is painted like the bar. */
+  --topbar-fill: linear-gradient(180deg, #151617 0%, #0B0C0D 100%);
+  --topbar-line: rgba(197,187,170,0.65);
   display: flex; align-items: flex-end;
   height: 48px; padding: 0 8px 0 84px; flex-shrink: 0;
-  background: linear-gradient(180deg, #151617 0%, #0B0C0D 100%);
+  background: var(--topbar-fill);
   border-bottom: 1px solid var(--border-hi);
   box-shadow: inset 0 1px rgba(232,220,203,0.06), 0 2px 16px rgba(0,0,0,0.5);
   position: relative; z-index: 100;
@@ -73,31 +76,78 @@ body::before {
   right: 0;
   bottom: 0;
   height: 1px;
-  background: rgba(197,187,170,0.65);
+  background: var(--topbar-line);
   box-shadow: 0 0 5px rgba(197,187,170,0.16);
   pointer-events: none;
   z-index: 4;
 }
+.tb-strip {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  width: max-content;
+  max-width: calc(100% - 136px);
+  min-width: 0;
+  height: 48px;
+}
+/* Nothing may stick out below: that would scroll vertically. No mask either: it
+   would make a stacking context and put the bar's line over the active tab. */
 .tb-tabs {
+  position: relative;
   display: flex; align-items: flex-end; gap: 1px;
   flex: 0 1 auto;
   width: max-content;
-  max-width: calc(100% - 96px);
+  max-width: 100%;
   min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: none;
   padding-left: 12px;
   height: 48px;
 }
 .tb-tabs::-webkit-scrollbar { display: none; }
+/* Room for the last tab's outline. Not flex-basis: WebKit leaves that out of max-content. */
+.tb-tabs::after { content: ''; flex: none; width: 4px; }
+
+/* Shown on the side that hides a tab. */
+.tb-edge {
+  position: absolute; top: 2px; bottom: 0; z-index: 6; width: 64px;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.tb-edge.on { opacity: 1; }
+.tb-edge.left { left: 0; }
+.tb-edge.right { right: 0; }
+.tb-edge::before {
+  content: ''; position: absolute; inset: 0;
+  background:
+    linear-gradient(var(--topbar-line), var(--topbar-line)) 0 100% / 100% 1px no-repeat,
+    var(--topbar-fill) 0 100% / 100% 47px no-repeat;
+}
+.tb-edge.left::before { mask-image: linear-gradient(90deg, #000 26px, transparent); }
+.tb-edge.right::before { mask-image: linear-gradient(270deg, #000 26px, transparent); }
+.tb-edge button {
+  position: absolute; top: 14px;
+  width: 24px; height: 28px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: var(--text-3); cursor: pointer;
+  background: transparent; border: 0; padding: 0;
+  transition: all var(--dur-fast);
+}
+.tb-edge.left button { left: 1px; }
+.tb-edge.right button { right: 1px; }
+.tb-edge.on button { pointer-events: auto; }
+.tb-edge button:hover { background: rgba(218,214,204,0.12); color: var(--brass-hi); }
+@media (prefers-reduced-motion: reduce) { .tb-edge { transition: none; } }
 
 .tab {
   position: relative;
   z-index: 2;
   flex-shrink: 0;
-  height: 36px;
+  height: 35px;
   min-width: 120px; max-width: 200px;
-  padding: 0 6px 0 12px;
+  padding: 1px 6px 0 12px;
   border-top-left-radius: 10px;
   border-top-right-radius: 10px;
   background: rgba(20,21,23,0.55);
@@ -108,7 +158,6 @@ body::before {
   color: var(--text-3);
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-  margin-bottom: -1px;
 }
 .tab:hover { background: rgba(43,44,47,0.6); color: var(--text-2); }
 .tab.active {
@@ -137,8 +186,8 @@ body::before {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: -2px;
-  height: 4px;
+  bottom: 0;
+  height: 1px;
   background: #1B1C1F;
   pointer-events: none;
   z-index: 1;
@@ -248,46 +297,16 @@ body::before {
   display: flex; align-items: center; justify-content: center;
   color: var(--text-3); cursor: pointer;
   background: transparent; border: 0; padding: 0;
-  margin-bottom: 2px; margin-left: 4px;
+  margin-bottom: 2px;
   transition: all var(--dur-fast);
 }
 .tab-plus:hover { background: rgba(218,214,204,0.12); color: var(--brass-hi); }
 
 .tb-spacer { flex: 1 1 24px; min-width: 24px; height: 48px; }
-.gh-pill,
 .tavern-btn {
   position: relative;
   z-index: 5;
 }
-
-/* M6.B Step 1 — gh auth indicator pill in the TopBar. */
-.gh-pill {
-  display: inline-flex; align-items: center; gap: 6px;
-  margin: 0 8px 11px 0;
-  padding: 4px 10px;
-  height: 26px;
-  border-radius: 999px;
-  background: rgba(0,0,0,0.25);
-  border: 1px solid var(--border);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
-  color: var(--text-3);
-  cursor: pointer;
-  transition: all var(--dur-fast);
-}
-.gh-pill:hover { background: rgba(218,214,204,0.14); border-color: var(--brass-hi); }
-.gh-pill .gh-pill-dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--text-4);
-}
-.gh-pill[data-state="ok"]      { color: var(--brass-bright); border-color: var(--brass-hi); }
-.gh-pill[data-state="ok"] .gh-pill-dot { background: #6fbf73; box-shadow: 0 0 6px rgba(111,191,115,0.5); }
-.gh-pill[data-state="setup"]   { color: #d4a358; border-color: rgba(212,163,88,0.6); }
-.gh-pill[data-state="setup"] .gh-pill-dot { background: #d4a358; box-shadow: 0 0 6px rgba(212,163,88,0.5); }
-.gh-pill[data-state="missing"] { color: #d36a3a; border-color: rgba(211,106,58,0.6); }
-.gh-pill[data-state="missing"] .gh-pill-dot { background: #d36a3a; box-shadow: 0 0 6px rgba(211,106,58,0.5); }
-.gh-pill[data-state="probing"] { opacity: 0.65; cursor: progress; }
-.gh-pill[data-state="probing"] .gh-pill-dot { animation: chipPulseBrass 1.2s ease-in-out infinite; }
 
 .tavern-btn {
   margin: 0 4px 6px 0;
@@ -3386,6 +3405,7 @@ body::before {
 
 .incarnation-progress-actions button {
   min-height: 28px;
+  padding-inline: 12px;
   border-radius: var(--r-sm);
   border: 1px solid rgba(218,214,204,0.34);
   background: rgba(218,178,104,0.15);
@@ -4076,7 +4096,7 @@ body::before {
     linear-gradient(180deg, rgba(12,13,14,0), rgba(39,44,34,0.28));
 }
 .stage-bottom-dock .input-bar {
-  max-width: min(920px, calc(100% - 16px));
+  max-width: max(min(920px, calc(100% - 16px)), calc(100% - 72px));
   min-height: 172px;
   margin: 0 auto;
   position: relative;
@@ -5669,7 +5689,6 @@ body::before {
   cursor: pointer;
   outline: none;
 }
-.ember-card:hover,
 .ember-card:focus-visible {
   border-color: rgba(250,205,151,0.48);
   background:
@@ -7683,7 +7702,6 @@ body::before {
   letter-spacing: 0.7px;
   text-transform: uppercase;
 }
-.violet-card:hover,
 .violet-card:focus-visible {
   border-color: rgba(174,160,214,0.44);
   background: linear-gradient(180deg, rgba(45,39,56,0.48), rgba(0,0,0,0.22));
@@ -15390,6 +15408,12 @@ body::before {
   font-size: 15px;
 }
 .tavern-hero-gathering .tavern-hero-card-copy b {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.2;
   font-size: 15px;
 }
 .tavern-hero-gathering .tavern-hero-card-copy span {
@@ -15593,8 +15617,8 @@ body::before {
   display: grid;
   grid-template-columns: 40px minmax(0, 1fr);
   align-items: center;
-  gap: 13px;
-  min-height: 64px;
+  gap: 2px 13px;
+  min-height: 72px;
   border: 1px solid rgba(218,214,204,0.18);
   border-radius: 8px;
   background:
@@ -15626,20 +15650,25 @@ body::before {
     radial-gradient(ellipse at 80% 0%, rgba(197,187,170,0.16), transparent 44%);
 }
 
-.tavern-system-card b {
-  display: block;
+.tavern-system-card-copy b {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   color: var(--text);
   font: 13px var(--font-serif);
   font-weight: 800;
-  line-height: 1.05;
+  line-height: 1.15;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .tavern-system-card small {
   display: block;
-  margin-top: 2px;
+  grid-column: 1 / -1;
+  text-align: center;
+  margin-top: 0;
   color: var(--text-4);
   font: 10px var(--font-display);
   font-weight: 800;
@@ -16758,133 +16787,6 @@ body::before {
   opacity: 0.55;
 }
 
-.tavern-merit-bar {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  justify-content: center;
-  gap: clamp(8px, 1.4vw, 16px);
-  padding: 2px 46px 0;
-  margin: -2px auto 8px;
-}
-
-.tavern-merit-badge {
-  display: grid;
-  grid-template-columns: 28px minmax(0, auto);
-  align-items: center;
-  gap: 7px;
-  min-width: 112px;
-  padding: 5px 10px 5px 5px;
-  border-radius: 999px;
-  border: 1px solid rgba(197,187,170,0.2);
-  background:
-    radial-gradient(ellipse at 8% 50%, rgba(197,187,170,0.18), transparent 55%),
-    rgba(0,0,0,0.2);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 10px 22px rgba(0,0,0,0.18);
-}
-
-.tavern-merit-badge img {
-  width: 28px;
-  height: 28px;
-  object-fit: contain;
-  filter:
-    invert(90%) sepia(7%) saturate(270%) hue-rotate(352deg) brightness(96%) contrast(88%)
-    drop-shadow(0 4px 9px rgba(0,0,0,0.38));
-}
-
-.tavern-merit-badge span {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-
-.tavern-merit-badge b {
-  color: var(--text);
-  font: 13px var(--font-display);
-  font-weight: 900;
-  line-height: 1;
-}
-
-.tavern-merit-badge small {
-  color: var(--text-4);
-  font: 8px var(--font-display);
-  font-weight: 900;
-  letter-spacing: 0.7px;
-  line-height: 1.1;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.project-agent-merits {
-  margin-bottom: 4px;
-}
-.project-agent-merits .tavern-merit-badge {
-  min-width: 134px;
-}
-.project-agent-profile {
-  min-height: min(650px, calc(100vh - 94px));
-  padding: clamp(16px, 2.2vw, 24px);
-}
-.project-agent-profile .tavern-profile-layout {
-  min-height: min(500px, calc(100vh - 220px));
-  gap: clamp(14px, 2.2vw, 30px);
-  padding-top: 8px;
-}
-.project-agent-profile .tavern-profile-panel {
-  min-height: min(420px, calc(100vh - 260px));
-  gap: 12px;
-  padding: 14px;
-}
-.project-agent-profile .tavern-profile-center {
-  min-height: min(500px, calc(100vh - 230px));
-  gap: 10px;
-}
-.project-agent-profile .tavern-avatar-art.profile {
-  width: clamp(88px, 9.5vw, 122px);
-  height: clamp(88px, 9.5vw, 122px);
-}
-.profile-name-button {
-  position: relative;
-  max-width: min(420px, 100%);
-  border: 0;
-  background: transparent;
-  color: inherit;
-  padding: 0;
-  cursor: pointer;
-}
-.profile-name-button::after {
-  content: attr(data-full-name);
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 10px);
-  z-index: 10;
-  max-width: min(460px, 80vw);
-  padding: 7px 10px;
-  border-radius: 8px;
-  border: 1px solid rgba(218,214,204,0.22);
-  background: rgba(9,10,11,0.96);
-  color: var(--brass-bright);
-  box-shadow: 0 14px 34px rgba(0,0,0,0.42), inset 0 1px rgba(255,255,255,0.06);
-  font: 14px/1.15 var(--font-serif);
-  font-weight: 900;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, 4px);
-  transition: opacity 110ms var(--ease-out), transform 110ms var(--ease-out);
-}
-.profile-name-button:hover::after,
-.profile-name-button:focus-visible::after {
-  opacity: 1;
-  transform: translate(-50%, 0);
-}
-.profile-name-button:disabled {
-  cursor: default;
-}
-.profile-name-button:hover .project-agent-name-base {
-  color: var(--brass-bright);
-}
 .profile-name-display {
   width: min(380px, 100%);
   display: inline-flex;
@@ -16960,29 +16862,6 @@ body::before {
 }
 .project-agent-name-editor input:focus {
   border-color: rgba(214,167,107,0.5);
-}
-.project-agent-name-editor-actions {
-  display: inline-flex;
-  gap: 5px;
-}
-.project-agent-name-editor-actions button {
-  width: 31px;
-  height: 31px;
-  border-radius: 999px;
-  border: 1px solid rgba(218,214,204,0.22);
-  background: rgba(0,0,0,0.18);
-  color: var(--text-3);
-  cursor: pointer;
-  font: 13px var(--font-display);
-  font-weight: 900;
-}
-.project-agent-name-editor-actions button.accept {
-  color: var(--copper-hi);
-  border-color: rgba(132,160,145,0.42);
-}
-.project-agent-name-editor-actions button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }
 .project-agent-profile .tavern-profile-field input[readonly] {
   color: var(--text-3);
@@ -17136,11 +17015,6 @@ body::before {
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
-}
-.project-agent-file-path,
-.project-agent-error {
-  color: var(--text-4);
-  font: 11px var(--font-sans);
 }
 .project-agent-shell-summary {
   align-self: stretch;
@@ -17302,103 +17176,6 @@ body::before {
   text-transform: none;
   letter-spacing: 0;
 }
-.project-agent-error {
-  color: var(--terra-hi);
-}
-.project-agent-invite-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin: 12px auto 0;
-  width: min(680px, 100%);
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(218,214,204,0.18);
-  background: rgba(0,0,0,0.18);
-}
-.project-agent-invite-copy {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-.project-agent-invite-copy span {
-  color: var(--text-2);
-  font: 11px var(--font-display);
-  font-weight: 900;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-}
-.project-agent-invite-copy small {
-  color: var(--text-4);
-  font: 12px var(--font-sans);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.project-agent-invite {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(218,214,204,0.24);
-  background: rgba(0,0,0,0.18);
-  color: var(--brass-hi);
-  padding: 8px 12px;
-  cursor: pointer;
-  font: 10px var(--font-display);
-  font-weight: 900;
-  letter-spacing: 0.7px;
-  text-transform: uppercase;
-}
-.project-agent-invite:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.project-agent-remove {
-  display: block;
-  margin: 28px auto 0;
-}
-.tavern-remove-quiet.project-agent-remove {
-  margin-top: 42px;
-}
-.project-agent-profile .tavern-ghost-scroll {
-  margin-top: 8px;
-  padding: 11px;
-}
-.project-agent-profile .tavern-ghost-preview {
-  min-height: 118px;
-  max-height: clamp(118px, calc(100vh - 470px), 220px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding-right: 4px;
-}
-.project-agent-profile .tavern-ghost-scroll textarea {
-  min-height: 120px;
-}
-.project-agent-ghost-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  margin-top: 2px;
-}
-.project-agent-notes-entry {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 5px;
-}
-.project-agent-notes-entry > span {
-  color: var(--text-3);
-  font: 11px/1.3 var(--font-sans);
-}
-.project-agent-notes-entry .tavern-user-dreams:disabled {
-  cursor: default;
-  opacity: 0.42;
-  border-style: dashed;
-  background: rgba(154,123,196,0.06);
-}
 
 .tavern-profile-layout {
   display: grid;
@@ -17536,8 +17313,7 @@ body::before {
   text-align: left;
 }
 
-.tavern-raw-button,
-.tavern-profile-actions button {
+.tavern-raw-button {
   width: fit-content;
   border-radius: 999px;
   border: 1px solid rgba(218,214,204,0.24);
@@ -17631,13 +17407,6 @@ body::before {
   background: transparent;
   font: 13px/1.5 var(--font-sans);
   cursor: pointer;
-}
-
-.tavern-profile-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
 }
 
 .tavern-remove-quiet {
@@ -17781,38 +17550,6 @@ body::before {
   white-space: nowrap;
 }
 
-.tavern-skill-state-pill {
-  flex: 0 0 auto;
-  border: 1px solid rgba(218,214,204,0.16);
-  border-radius: 999px;
-  color: var(--text-4);
-  padding: 2px 6px;
-  font: 10px/1 var(--font-sans);
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.tavern-skill-state-pill.active {
-  color: var(--copper-hi);
-  border-color: rgba(132,160,145,0.3);
-  background: rgba(132,160,145,0.12);
-}
-
-.tavern-skill-state-pill.missing {
-  color: var(--terra-hi);
-  border-color: rgba(216,139,106,0.34);
-}
-
-.tavern-skill-row code {
-  min-width: 0;
-  overflow: hidden;
-  color: rgba(237,232,223,0.46);
-  font: 10px var(--font-mono);
-  letter-spacing: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .tavern-skill-context-menu {
   z-index: 240;
   width: 210px;
@@ -17954,15 +17691,6 @@ body::before {
 
   .tavern-user-profile-actions {
     justify-content: center;
-  }
-
-  .tavern-merit-bar {
-    flex-wrap: wrap;
-    padding-inline: 0;
-  }
-
-  .tavern-merit-badge {
-    min-width: 118px;
   }
 
   .tavern-hero-gathering {
@@ -19514,13 +19242,15 @@ body::before {
 
 .violet-commentary-details,
 .violet-ember-dream-details,
-.violet-bartender-conflict-details {
+.violet-bartender-conflict-details,
+.violet-tool-images-details {
   min-width: 0;
 }
 
 .violet-commentary-details summary,
 .violet-ember-dream-details summary,
-.violet-bartender-conflict-details summary {
+.violet-bartender-conflict-details summary,
+.violet-tool-images-details summary {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
@@ -19530,19 +19260,22 @@ body::before {
 }
 
 .violet-ember-dream-details summary,
-.violet-bartender-conflict-details summary {
+.violet-bartender-conflict-details summary,
+.violet-tool-images-details summary {
   grid-template-columns: minmax(0, 1fr);
 }
 
 .violet-commentary-details summary::-webkit-details-marker,
 .violet-ember-dream-details summary::-webkit-details-marker,
-.violet-bartender-conflict-details summary::-webkit-details-marker {
+.violet-bartender-conflict-details summary::-webkit-details-marker,
+.violet-tool-images-details summary::-webkit-details-marker {
   display: none;
 }
 
 .violet-commentary-details summary span,
 .violet-ember-dream-details summary span,
-.violet-bartender-conflict-details summary span {
+.violet-bartender-conflict-details summary span,
+.violet-tool-images-details summary span {
   color: rgba(226, 182, 98, 0.84);
   font-family: var(--font-display);
   font-size: 10px;
@@ -19598,7 +19331,8 @@ body::before {
 }
 
 .violet-ember-dream-details summary span,
-.violet-bartender-conflict-details summary span {
+.violet-bartender-conflict-details summary span,
+.violet-tool-images-details summary span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -19660,7 +19394,8 @@ body::before {
 
 .violet-commentary-details[open] summary,
 .violet-ember-dream-details[open] summary,
-.violet-bartender-conflict-details[open] summary {
+.violet-bartender-conflict-details[open] summary,
+.violet-tool-images-details[open] summary {
   margin-bottom: 8px;
 }
 

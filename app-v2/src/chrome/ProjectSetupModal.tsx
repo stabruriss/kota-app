@@ -6,7 +6,7 @@ import {
   type WorkspaceProject, type GitAvailability,
 } from '../pty-client';
 import { ProjectGithubLink } from './ProjectGithubLink';
-import { refreshGithubAccounts, useGithubAccounts } from '../lib/github-account-flow';
+import { installGithubCli, refreshGithubAccounts, useGithubAccounts } from '../lib/github-account-flow';
 import { GithubSignIn } from './GithubSignIn';
 import '../styles/github-accounts.css';
 
@@ -40,8 +40,13 @@ export function ProjectSetupModal({ open, onClose, onWorkspacePrepared, mode = '
   const generation = useRef(0), authSerial = useRef(0), gitSerial = useRef(0), operating = useRef(false);
   const account = accounts?.accounts.find(item => item.login === (chosenLogin ?? accounts.defaultLogin));
   const canLink = !ghAuthLoading && account?.state === 'ok';
+  const ghMissing = !ghAuthLoading && !!ghAuth?.cliMissing;
   const linked = canLink && (linkDraft ?? true);
   const accountLogin = canLink ? account.login : undefined;
+
+  // The account just signed in to is the one to pick repositories from; the default stays.
+  const signedIn = accountFlow.signIn?.phase === 'done' ? accountFlow.signIn.result.login : null;
+  useEffect(() => { if (signedIn) setChosenLogin(signedIn); }, [signedIn]);
 
   const refreshAuth = useCallback(async () => {
     const epoch = generation.current, serial = ++authSerial.current;
@@ -73,11 +78,11 @@ export function ProjectSetupModal({ open, onClose, onWorkspacePrepared, mode = '
   }, [open, refreshAuth, refreshGit]);
 
   useEffect(() => {
-    if (!open || ghAuthLoading || canLink || authError) return;
-    // Existing sign-in flow uses Smart Terminal; stop probing as soon as an account is ready.
+    if (!open || !ghMissing) return;
+    // Until GitHub CLI is installed.
     const timer = window.setInterval(() => { void refreshAuth(); }, 3000);
     return () => window.clearInterval(timer);
-  }, [open, ghAuthLoading, canLink, authError, refreshAuth]);
+  }, [open, ghMissing, refreshAuth]);
 
   useEffect(() => {
     if (!open) return;
@@ -113,7 +118,6 @@ export function ProjectSetupModal({ open, onClose, onWorkspacePrepared, mode = '
   };
   const openedByRepo = useMemo(() => new Map(workspaces.filter(item => item.connection?.kind !== 'local' && item.repoFullName)
     .map(item => [item.repoFullName, item])), [workspaces]);
-  const ghMissing = !ghAuthLoading && !!ghAuth?.cliMissing;
   const title = mode === 'firstProject' ? 'Create First Project' : 'Open Project';
 
   if (!open) return null;
@@ -148,7 +152,8 @@ export function ProjectSetupModal({ open, onClose, onWorkspacePrepared, mode = '
             })}
           </div>
         </>}
-        <GithubSignIn label={ghMissing ? 'Install GitHub CLI' : canLink ? 'Add GitHub account' : 'Login GitHub'} disabled={ghAuthLoading || busy != null} />
+        {ghMissing ? <div className="github-sign-in"><button type="button" disabled={busy != null} onClick={() => void installGithubCli()}>Install GitHub CLI</button></div>
+          : <GithubSignIn label={canLink || !account ? 'Add GitHub account' : 'Sign in'} expect={canLink || !account ? null : account.login} disabled={ghAuthLoading || busy != null} />}
       </section>
       <section className="tavern-section project-create-card">
         <div className="tavern-section-title">Create New</div>

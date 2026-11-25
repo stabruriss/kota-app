@@ -53,7 +53,7 @@ async function open() {
   render(<ProjectAgentProfileOverlay agentId="agent-explicit" projectRoot="/fixture" existingNames={[]}
     onClose={() => {}} onSaved={() => {}} onRemoveFromProject={() => {}} />);
   const shell = await screen.findByRole('region',{name:'SHELL'});
-  await userEvent.click(within(shell).getByRole('button',{name:'Edit SHELL'}));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   return within(shell);
 }
 
@@ -79,10 +79,10 @@ it.each([2, 6])('keeps %s-model String details inside the picker, not the saved 
   render(<ProjectAgentProfileOverlay agentId="agent-explicit" projectRoot="/fixture" existingNames={[]}
     onClose={() => {}} onSaved={() => {}} onRemoveFromProject={() => {}} />);
   const shell = within(await screen.findByRole('region', { name: 'SHELL' }));
-  await waitFor(() => expect(shell.getByLabelText('Current SHELL settings')).toHaveTextContent('Auto StringBy Auto String'));
+  await waitFor(() => expect(shell.getByLabelText('Current SHELL settings')).toHaveTextContent(/Auto String.*By Auto String/));
   expect(shell.queryByLabelText('Auto String configuration')).not.toBeInTheDocument();
   expect(shell.queryByText('Probability threshold')).not.toBeInTheDocument();
-  await userEvent.click(shell.getByRole('button', { name: 'Edit SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   expect(shell.queryByLabelText('Auto String configuration')).not.toBeInTheDocument();
   expect(shell.queryByRole('button', { name: 'Edit routing' })).not.toBeInTheDocument();
   expect(shell.queryByText(/models from signed-in providers|Fetching model IDs/)).not.toBeInTheDocument();
@@ -96,10 +96,14 @@ it.each([2, 6])('keeps %s-model String details inside the picker, not the saved 
   }
   expect(editor.getByRole('slider')).toHaveValue('0.85');
   await userEvent.click(editor.getByRole('button', { name: 'OK' }));
-  await userEvent.click(shell.getByRole('button', { name: 'Save SHELL' }));
-  await waitFor(() => expect(shell.getByRole('button', { name: 'Edit SHELL' })).toBeEnabled());
+  // Opening/closing does not alter configuration: nothing to save, and Cancel leaves without asking.
+  expect(screen.getByText('No changes yet')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled());
   expect(shell.queryByLabelText('Auto String configuration')).not.toBeInTheDocument();
-  expect(pty.saveProjectAgentDetail).not.toHaveBeenCalled(); // Opening/closing does not alter configuration.
+  expect(pty.saveProjectAgentDetail).not.toHaveBeenCalled();
 });
 
 it.each(['Escape', 'close button', 'backdrop'])('explains disabled profile saving after closing incomplete String edits (%s)', async action => {
@@ -117,17 +121,19 @@ it.each(['Escape', 'close button', 'backdrop'])('explains disabled profile savin
   else if (action === 'backdrop') fireEvent.pointerDown(editor.parentElement!);
   else await userEvent.click(within(editor).getByRole('button', { name: 'Close model picker' }));
   expect(screen.queryByRole('dialog', { name: 'Auto String' })).not.toBeInTheDocument();
-  expect(shell.getByRole('button', { name: 'Save SHELL' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   expect(shell.getByText('Finish the Auto String configuration before saving.')).toHaveClass('project-agent-shell-apply-note');
-  expect(shell.queryByText('Apply on Next Launch')).not.toBeInTheDocument();
+  expect(shell.queryByText(/^SHELL changes apply/)).not.toBeInTheDocument();
+  expect(screen.getByText('Finish SHELL settings to save')).toBeVisible();
   expect(pty.saveProjectAgentDetail).not.toHaveBeenCalled();
   // The retained incomplete draft remains editable through the model picker.
   await openStringFromModelPicker(shell);
   expect(screen.getByRole('textbox', { name: 'Model 2 intent' })).toHaveValue('');
-  fireEvent.change(screen.getByRole('textbox', { name: 'Model 2 intent' }), { target: { value: 'Easy tasks.' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Model 2 intent' }), { target: { value: 'Simple tasks.' } });
   await userEvent.click(screen.getByRole('button', { name: 'OK' }));
-  expect(shell.getByRole('button', { name: 'Save SHELL' })).toBeEnabled();
-  expect(shell.getByText('Save applies to a running Local session, or to its next launch.')).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  expect(screen.getByText('Unsaved changes')).toBeVisible();
+  expect(shell.getByText('SHELL changes apply to a running Local session, or to its next launch.')).toBeVisible();
 });
 
 it('requires a supported linked model on a Local provider switch and saves medium-clamped thinking', async () => {
@@ -140,7 +146,7 @@ it('requires a supported linked model on a Local provider switch and saves mediu
   expect(shell.queryByRole('button', {name:/Sign in|Retry/})).not.toBeInTheDocument();
   expect(model).toHaveTextContent('Choose a model');
   expect(thinking).toBeDisabled(); expect(thinking).toHaveTextContent('Choose a model first');
-  expect(shell.getByRole('button',{name:'Save SHELL'})).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   expect(shell.getByText('Choose a model before saving.')).toBeInTheDocument();
   await userEvent.click(model);
   expect(shell.queryByRole('option',{name:/default/i})).not.toBeInTheDocument();
@@ -148,8 +154,8 @@ it('requires a supported linked model on a Local provider switch and saves mediu
   await userEvent.click(screen.getByRole('option',{name:/Reason fable/}));
   expect(thinking).toHaveValue('high');
   expect(within(thinking).getAllByRole('option').map(option => option.textContent)).toEqual(['low','high']);
-  expect(shell.getByText('Save applies to a running Local session, or to its next launch.')).toBeInTheDocument();
-  await userEvent.click(shell.getByRole('button',{name:'Save SHELL'}));
+  expect(shell.getByText('SHELL changes apply to a running Local session, or to its next launch.')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(pty.saveProjectAgentDetail).toHaveBeenCalledOnce());
   expect(pty.saveProjectAgentDetail).toHaveBeenCalledWith(expect.objectContaining({provider:'kota-local',model:'fable/reason',effort:'high'}));
   expect(pty.refreshProviderModelOptions).not.toHaveBeenCalled();
@@ -162,12 +168,12 @@ it('keeps the loaded Local SHELL revision on Save and requires Reload after an e
   await userEvent.selectOptions(shell.getByRole('combobox', { name: 'Thinking' }), 'low');
   detail = { ...detail, effort: 'high', shellRevision: 'external-edit' };
   vi.mocked(pty.saveProjectAgentDetail).mockRejectedValueOnce('local_config_changed');
-  await userEvent.click(shell.getByRole('button', { name: 'Save SHELL' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await screen.findByText('Settings changed outside this editor. Reload before saving.');
   expect(pty.saveProjectAgentDetail).toHaveBeenCalledWith(expect.objectContaining({ shellRevision: 'before-edit', effort: 'low' }));
   expect(shell.getByRole('combobox', { name: 'Thinking' })).toHaveValue('low');
   await userEvent.click(screen.getByRole('button', { name: 'Reload' }));
-  await waitFor(() => expect(shell.queryByRole('button', { name: 'Save SHELL' })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument());
   expect(pty.loadProjectAgentDetail).toHaveBeenCalledTimes(2);
 });
 
@@ -185,7 +191,7 @@ it('the Local thinking menu lists every supported level and saves the one picked
   expect(thinking).toHaveValue('high');
   await userEvent.selectOptions(thinking, 'low');
   expect(thinking).toHaveValue('low');
-  await userEvent.click(shell.getByRole('button', {name:'Save SHELL'}));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(pty.saveProjectAgentDetail).toHaveBeenCalledWith(expect.objectContaining({provider:'kota-local',model:'fable/reason',effort:'low'})));
 });
 
@@ -215,7 +221,7 @@ it('repairs a legacy Local default without effort and chooses off for a non-reas
   expect(model).toHaveTextContent('Choose a model'); expect(thinking).toBeDisabled();
   await userEvent.click(model); await userEvent.click(screen.getByRole('option',{name:/Plain fable/}));
   expect(thinking).toHaveValue('off');
-  await userEvent.click(shell.getByRole('button',{name:'Save SHELL'}));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(pty.saveProjectAgentDetail).toHaveBeenCalledWith(expect.objectContaining({model:'fable/plain',effort:'off'})));
 });
 
@@ -244,10 +250,10 @@ it('marks exact Anthropic candidates before selection and the selected Local mod
   expect(within(magpie).queryByText('(Use Credit)')).not.toBeInTheDocument();
   await userEvent.click(anthropic);
   expect(shell.getByText('(Use Credit)')).toHaveClass('local-model-credit');
-  await userEvent.click(shell.getByRole('button',{name:'Save SHELL'}));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(pty.saveProjectAgentDetail).toHaveBeenCalledWith(expect.objectContaining({model:'anthropic/claude-fixture',effort:'off'})));
   expect(shell.getByLabelText('Current SHELL settings')).toHaveTextContent('anthropic/claude-fixture(Use Credit)');
-  await userEvent.click(shell.getByRole('button',{name:'Edit SHELL'}));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   const nextModel = shell.getByRole('button', {name:'Local model'});
   await userEvent.click(nextModel);
   await userEvent.click(screen.getByRole('option',{name:/Magpie \/ Claude fixture/}));
@@ -282,20 +288,20 @@ it('saves the staged agent String group only with Save SHELL and restores it aft
   await userEvent.click(within(editor).getByRole('button',{name:'OK'}));
   expect(pty.saveProjectAgentDetail).not.toHaveBeenCalled();
   expect(shell.getByRole('combobox',{name:'Thinking'})).toBeDisabled();
-  expect(shell.getByRole('button',{name:'Save SHELL'})).toBeEnabled();
-  await userEvent.click(shell.getByRole('button',{name:'Save SHELL'}));
+  expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(pty.saveProjectAgentDetail).toHaveBeenCalledOnce());
   expect(pty.saveProjectAgentDetail).toHaveBeenLastCalledWith(expect.objectContaining({model:'kota/auto',effort:'off',autoRoute:{threshold:.5,defaultModel:'model-2',models:[
     expect.objectContaining({id:'model-1',providerId:'fable',modelId:'reason',thinkingLevel:'high'}),
     expect.objectContaining({id:'model-2',providerId:'fable',modelId:'plain',thinkingLevel:'off'}),
   ]}}));
-  await userEvent.click(shell.getByRole('button',{name:'Edit SHELL'}));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   await userEvent.click(shell.getByRole('button',{name:'Local model'}));
   await userEvent.click(screen.getByRole('option',{name:/Plain fable/}));
-  await userEvent.click(shell.getByRole('button',{name:'Save SHELL'}));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(pty.saveProjectAgentDetail).toHaveBeenCalledTimes(2));
   expect(pty.saveProjectAgentDetail).toHaveBeenLastCalledWith(expect.not.objectContaining({autoRoute:expect.anything()}));
-  await userEvent.click(shell.getByRole('button',{name:'Edit SHELL'}));
+  await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
   await userEvent.click(shell.getByRole('button',{name:'Local model'}));
   await userEvent.click(screen.getByRole('option',{name:/^Auto String/}));
   const reopened = screen.getByRole('dialog',{name:'Auto String'});

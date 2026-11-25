@@ -33,6 +33,7 @@ import { avatarClassForAgentFallback, avatarImageStyleForId } from '../lib/hero-
 import { useFileTreeAgentHover } from '../lib/file-tree-agent-hover';
 import { MAX_AGENT_SLOTS } from '../lib/agent-slots';
 import type { RoomQuoteInsertResult, RoomQuoteReference } from '../lib/room-quote';
+import { StageComposerRailHost } from './SidebarRailCollapse';
 
 const SCENE_W = 1120;
 const SCENE_H = 660;
@@ -277,6 +278,7 @@ export interface StageProps {
   workingStartedAt?: ReadonlyMap<AgentId, string>;
   dreamingStatusAgents?: ReadonlySet<AgentId>;
   agentsHydrating?: boolean;
+  suppressRoomRestoreOverlay?: boolean;
   agentHydrationProgress?: { completed: number; total: number } | null;
   agentHydrationFailed?: boolean;
   onRetryAgentHydration?: () => void;
@@ -348,6 +350,7 @@ export interface StageProps {
   projectRulesDir?: string | null;
   children?: ReactNode;
   composer?: ReactNode;
+  composerFooter?: ReactNode;
   broadcastPopover?: ReactNode;
 }
 
@@ -358,6 +361,7 @@ export function Stage({
   workingStartedAt,
   dreamingStatusAgents,
   agentsHydrating = false,
+  suppressRoomRestoreOverlay = false,
   agentHydrationProgress,
   agentHydrationFailed = false,
   onRetryAgentHydration,
@@ -420,6 +424,7 @@ export function Stage({
   projectRulesDir,
   children,
   composer,
+  composerFooter,
   broadcastPopover,
 }: StageProps) {
   // Stage stays mounted when the room is minimized. Only a project change
@@ -675,7 +680,7 @@ export function Stage({
   useEffect(() => {
     setRoomRestoreOverlayVisible(false);
     setRoomRestoreProgressVisible(false);
-    if (!agentsHydrating) return undefined;
+    if (!agentsHydrating || suppressRoomRestoreOverlay) return undefined;
 
     const overlayTimer = window.setTimeout(() => {
       setRoomRestoreOverlayVisible(true);
@@ -688,7 +693,7 @@ export function Stage({
       window.clearTimeout(overlayTimer);
       window.clearTimeout(progressTimer);
     };
-  }, [agentsHydrating, projectRoot]);
+  }, [agentsHydrating, projectRoot, suppressRoomRestoreOverlay]);
 
   useEffect(() => {
     if (recruitSeatIndex === null) return;
@@ -987,7 +992,7 @@ export function Stage({
             onClose={() => setProjectRulesOpen(false)}
           />
         )}
-        {agentsHydrating && roomRestoreOverlayVisible && (
+        {agentsHydrating && !suppressRoomRestoreOverlay && roomRestoreOverlayVisible && (
           <div className="room-restore-overlay" data-testid="room-restore-overlay">
             <div className="room-restore-status" role="status" aria-live="polite">
               <span className="room-restore-spinner" aria-hidden />
@@ -1057,7 +1062,8 @@ export function Stage({
           agentRecords={agentRecords}
         />
         <div className="stage-composer-stack">
-          {composer}
+          {composer ? <StageComposerRailHost>{composer}</StageComposerRailHost> : null}
+          {composerFooter}
           {broadcastPopover}
         </div>
       </div>

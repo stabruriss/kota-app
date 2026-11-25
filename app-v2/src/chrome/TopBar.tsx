@@ -9,14 +9,11 @@
  *  Phase 3 design reference:
  *    .context/design-brief/03-UI-expansion-requirements.md §7 (S13)  */
 
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import tabMoveLeftIcon from '../assets/tavern/icons/tab-move-left.svg';
 import tabMoveRightIcon from '../assets/tavern/icons/tab-move-right.svg';
 import tavernEntryIcon from '../assets/tavern/icons/tavern-entry.svg';
 import type { Project, ProjectId } from '../types/project';
-import type { GhAuthInfo, WorkspaceProject } from '../pty-client';
-import '../styles/project-github.css';
-import { openGithubAccounts } from '../lib/github-account-flow';
-import { useProjectConnectionStatus } from '../lib/project-connection-status';
 
 interface TopBarProps {
   projects: readonly Project[];
@@ -30,13 +27,6 @@ interface TopBarProps {
   tavernOpen?: boolean;
   tavernPreparing?: boolean;
   hideProjectTabs?: boolean;
-  /** M6.B Step 1 — `gh auth status` snapshot. `null` while the
-   *  initial probe is in flight. */
-  ghAuth?: GhAuthInfo | null;
-  workspace?: WorkspaceProject | null;
-  /** Called when the user clicks the auth indicator pill — typically
-   *  routes to a SmartTerminal tab running `gh auth login` (M6.B §B2). */
-  onGhAuthClick?: () => void;
 }
 
 export function TopBar({
@@ -51,9 +41,6 @@ export function TopBar({
   tavernOpen = false,
   tavernPreparing = false,
   hideProjectTabs = false,
-  ghAuth,
-  workspace,
-  onGhAuthClick,
 }: TopBarProps) {
   const tavernButtonLabel = tavernPreparing
     ? 'Preparing Tavern'
@@ -85,11 +72,8 @@ export function TopBar({
       aria-label="Project bar"
       data-tauri-drag-region
     >
-      {!hideProjectTabs && (
-        <div
-          className="tb-tabs"
-          data-tauri-drag-region="false"
-        >
+      {!hideProjectTabs && (<>
+        <TabStrip active={activeProjectId} order={projectIds.join('\n')}>
           {projects.map((p, index) => {
             const active = p.id === activeProjectId;
             const unreadCount = projectUnreadCounts?.[p.id] ?? 0;
@@ -162,25 +146,23 @@ export function TopBar({
               </div>
             );
           })}
-          <button
-            className="tab-plus"
-            aria-label="Open project"
-            title="Open project"
-            data-testid="tab-plus"
-            data-tauri-drag-region="false"
-            onClick={onNewProject}
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
-                 stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-              <path d="M8 3v10M3 8h10" />
-            </svg>
-          </button>
-        </div>
-      )}
+        </TabStrip>
+        <button
+          className="tab-plus"
+          aria-label="Open project"
+          title="Open project"
+          data-testid="tab-plus"
+          data-tauri-drag-region="false"
+          onClick={onNewProject}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
+               stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+            <path d="M8 3v10M3 8h10" />
+          </svg>
+        </button>
+      </>)}
 
       <div className="tb-spacer" data-tauri-drag-region />
-
-      {workspace ? <ProjectConnectionPill workspace={workspace} /> : ghAuth !== undefined && <GhAuthPill ghAuth={ghAuth} onClick={onGhAuthClick} />}
 
       <button
         className={[
@@ -209,6 +191,79 @@ export function TopBar({
   );
 }
 
+/** .tb-edge's width, and how far .tab-move stands out from the active tab with a little air. */
+const EDGE = 64;
+const MOVE_BUTTON = 12;
+
+/** The scrolling tabs. An edge shows on the side that hides one; the active tab is kept clear of both. */
+function TabStrip({ active, order, children }: { active: ProjectId | null; order: string; children: ReactNode }) {
+  const strip = useRef<HTMLDivElement>(null);
+  // Two booleans, not one object: replayed updates would make a new object each time and never settle.
+  const [hiddenLeft, setHiddenLeft] = useState(false);
+  const [hiddenRight, setHiddenRight] = useState(false);
+  const measure = () => {
+    const box = strip.current!.getBoundingClientRect();
+    const tabs = strip.current!.children;
+    if (!tabs.length) return; // no project is open
+    setHiddenLeft(tabs[0]!.getBoundingClientRect().left < box.left - 0.5);
+    setHiddenRight(tabs[tabs.length - 1]!.getBoundingClientRect().right > box.right + 0.5);
+  };
+  const scroll = (left: number, smooth = true) => strip.current!.scrollTo({
+    left,
+    behavior: smooth && !window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'auto',
+  });
+
+  // A tab may have come, gone or changed its width with this render; the window changes ours without one.
+  useLayoutEffect(measure);
+  useEffect(() => {
+    const observer = new ResizeObserver(measure);
+    observer.observe(strip.current!);
+    return () => observer.disconnect();
+  }, []);
+
+  const shown = useRef(false);
+  useLayoutEffect(() => {
+    const tab = strip.current!.querySelector<HTMLElement>('.tab.active');
+    if (!tab) return;
+    const { scrollLeft, clientWidth } = strip.current!;
+    const left = tab.offsetLeft - EDGE - MOVE_BUTTON;
+    const right = tab.offsetLeft + tab.offsetWidth + EDGE + MOVE_BUTTON;
+    if (left < scrollLeft) scroll(left, shown.current);
+    else if (right > scrollLeft + clientWidth) scroll(right - clientWidth, shown.current);
+    shown.current = true;
+  }, [active, order]);
+
+  const edge = (side: 'left' | 'right', on: boolean) => {
+    const label = side === 'left' ? 'Earlier projects' : 'More projects';
+    const step = side === 'left' ? -1 : 1;
+    return (
+      <div className={`tb-edge ${side}${on ? ' on' : ''}`}>
+        <button
+          type="button"
+          tabIndex={-1}
+          disabled={!on}
+          title={label}
+          aria-label={label}
+          data-tauri-drag-region="false"
+          onClick={() => scroll(strip.current!.scrollLeft + step * (strip.current!.clientWidth - 2 * EDGE))}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+               strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+            <path d={side === 'left' ? 'M10 3.5 5.5 8l4.5 4.5' : 'M6 3.5 10.5 8 6 12.5'} />
+          </svg>
+        </button>
+      </div>
+    );
+  };
+  return (
+    <div className="tb-strip" data-tauri-drag-region="false">
+      <div ref={strip} className="tb-tabs" data-tauri-drag-region="false" onScroll={measure}>{children}</div>
+      {edge('left', hiddenLeft)}
+      {edge('right', hiddenRight)}
+    </div>
+  );
+}
+
 function projectDisplayName(name: string): string {
   const trimmed = name.trim();
   const parts = trimmed.split(/[\\/]/).filter(Boolean);
@@ -222,87 +277,4 @@ function projectTabTitle(project: Project): string {
     project.accountPath ? `Account: ${project.accountPath}` : null,
   ].filter((item): item is string => item != null);
   return details.length > 0 ? `${project.name}\n${details.join('\n')}` : project.name;
-}
-
-function ProjectConnectionPill({ workspace }: { workspace: WorkspaceProject }) {
-  const local = workspace.connection?.kind === 'local';
-  const view = useProjectConnectionStatus(workspace);
-  const login = view.status?.kind === 'github' ? view.status.accountLogin : workspace.connection?.kind === 'github' ? workspace.connection.accountLogin : undefined;
-  const state = view.status?.kind === 'github' ? view.status.accountState : view.error ? 'unavailable' : 'checking';
-  return <button type="button" onClick={openGithubAccounts} className={`gh-pill project-connection-pill ${local ? 'local' : state === 'ok' ? 'ok' : 'setup'}`} data-testid="gh-auth-pill"
-    data-state={local ? 'local' : !login || state === 'missing' || state === 'unbound' ? 'unassigned' : state} data-tauri-drag-region="false"
-    title={local ? 'This project is local only.' : state === 'needs_login' ? 'Sign in required' : !login || state === 'missing' || state === 'unbound' ? 'No account assigned' : `Project account: ${login}`}>
-    <span className="gh-pill-dot" aria-hidden /><span className="project-connection-label">{local ? 'Local' : `GitHub · ${login || 'No account'}`}</span>
-  </button>;
-}
-
-function GhAuthPill({
-  ghAuth,
-  onClick,
-}: {
-  ghAuth: GhAuthInfo | null | undefined;
-  onClick?: () => void;
-}) {
-  // null === probe in flight; undefined === probe not wired (e.g. test
-  // env); both render the same neutral placeholder.
-  if (ghAuth == null) {
-    return (
-      <span
-        className="gh-pill probing"
-        data-testid="gh-auth-pill"
-        data-state="probing"
-        data-tauri-drag-region="false"
-        title="Checking gh auth status…"
-      >
-        <span className="gh-pill-dot" aria-hidden />
-        GitHub
-      </span>
-    );
-  }
-  if (ghAuth.cliMissing) {
-    return (
-      <button
-        type="button"
-        className="gh-pill missing"
-        data-testid="gh-auth-pill"
-        data-state="missing"
-        data-tauri-drag-region="false"
-        title="GitHub CLI not found"
-        onClick={onClick}
-      >
-        <span className="gh-pill-dot" aria-hidden />
-        GitHub
-      </button>
-    );
-  }
-  if (!ghAuth.authenticated) {
-    return (
-      <button
-        type="button"
-        className="gh-pill setup"
-        data-testid="gh-auth-pill"
-        data-state="setup"
-        data-tauri-drag-region="false"
-        title={ghAuth.error ?? 'Sign in to GitHub via the terminal'}
-        onClick={onClick}
-      >
-        <span className="gh-pill-dot" aria-hidden />
-        GitHub
-      </button>
-    );
-  }
-  return (
-    <button
-      type="button"
-      className="gh-pill ok"
-      data-testid="gh-auth-pill"
-      data-state="ok"
-      data-tauri-drag-region="false"
-      title={`Signed in as ${ghAuth.username ?? '?'} · ${ghAuth.scopes.join(' ') || 'no scopes'}`}
-      onClick={onClick}
-    >
-      <span className="gh-pill-dot" aria-hidden />
-      GitHub{ghAuth.username ? ` · ${ghAuth.username}` : ''}
-    </button>
-  );
 }

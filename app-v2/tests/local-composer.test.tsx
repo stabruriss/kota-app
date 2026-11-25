@@ -934,7 +934,7 @@ it('wires composer overrides through Local submit and takeover, keeps them stick
   ] };
   const { submit, spawn } = await mount([localId, terminalId], [], { model: 'kota/auto', thinkingLevel: 'off', autoRoute });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Auto String routing: Auto' })).toBeEnabled());
-  fireEvent.pointerEnter(screen.getByRole('button', { name: 'Auto String routing: Auto' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Auto String routing: Auto' }));
   await userEvent.click(screen.getByRole('menuitemradio', { name: 'fixture / other • high' }));
   submit.mockRejectedValueOnce(new pty.AgentSessionLeaseConflictError(conflict));
   spawn.mockRejectedValueOnce(new pty.AgentSessionLeaseConflictError(conflict));
@@ -946,7 +946,7 @@ it('wires composer overrides through Local submit and takeover, keeps them stick
   expect(submit.mock.calls[1][0]).toEqual(submit.mock.calls[0][0]);
   await send('Still manual'); await waitFor(() => expect(submit).toHaveBeenCalledTimes(3));
   expect(submit.mock.calls[2][0].routeModel).toBe('model-2');
-  fireEvent.pointerEnter(screen.getByRole('button', { name: 'Manual model: other • high' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Manual model: other • high' }));
   await userEvent.click(screen.getByRole('menuitemradio', { name: 'Auto' }));
   await send('Automatic again'); await waitFor(() => expect(submit).toHaveBeenCalledTimes(4));
   expect(submit.mock.calls[3][0]).not.toHaveProperty('routeModel');

@@ -4029,7 +4029,7 @@ mod tests {
         use crate::github_accounts::tests::FakeGh;
         let base = temp_dir("agent-token");
         let gh = FakeGh::with(&["fable-copper", "fable-indigo"], Some("fable-copper"));
-        crate::github_accounts::finish_add(&base, &gh, None).unwrap();
+        crate::github_accounts::tests::record(&base, &["fable-copper", "fable-indigo"]);
         let root = base.join("project");
         let mut workspace = settings_workspace_for_test(&root, "owner-repo");
         let env = |workspace: &WorkspaceProject, gh: &FakeGh| {

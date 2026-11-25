@@ -22,13 +22,6 @@
   letter-spacing: .085em;
   color: var(--brass-hi);
 }
-.string-selected-summary { margin-top: 10px; min-width: 0; }
-.string-selected-summary small { display: block; font: 9px/1.6 var(--font-sans); color: var(--text-3); }
-.string-summary-models { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; margin: 7px 0; }
-.string-summary-models>div { padding: 7px; border: 1px solid var(--border); border-radius: 5px; min-width: 0; }
-.string-summary-models b { font: 10px/1.5 var(--font-sans); color: var(--text-2); overflow-wrap: anywhere; }
-.string-summary-threshold { display: flex; flex-wrap: wrap; gap: 5px 8px; font: 9px/1.5 var(--font-sans); color: var(--text-3); }
-.string-summary-threshold b { color: var(--brass-hi); font-family: var(--font-mono); }
 .string-routing-body fieldset {
   border: 0;
   padding: 0;

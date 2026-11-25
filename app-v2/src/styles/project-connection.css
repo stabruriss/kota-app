@@ -33,5 +33,4 @@
 .project-connection-action { margin-top:8px; }
 .project-account-issue { margin-top:12px; padding:12px; border:1px solid var(--border); border-radius:6px; font:11px/1.6 var(--font-sans); color:var(--text-2); }
 .project-account-issue p { margin:6px 0 10px; }
-.gh-pill.project-connection-pill { cursor:pointer; }
 @media(max-width:600px) { .github-dialog-layer { padding:12px; } .github-dialog-layer .kota-confirm-card { max-height:calc(100dvh - 24px); } .github-confirm-transition>div { grid-template-columns:32px 1fr; } }
